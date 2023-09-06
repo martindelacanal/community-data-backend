@@ -6,6 +6,32 @@ const bcryptjs = require('bcryptjs');
 const axios = require('axios');
 const logger = require('../utils/logger.js');
 
+// S3 INICIO
+const S3Client = require("@aws-sdk/client-s3").S3Client;
+const PutObjectCommand = require("@aws-sdk/client-s3").PutObjectCommand;
+const GetObjectCommand = require("@aws-sdk/client-s3").GetObjectCommand;
+const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const { DeleteObjectsCommand } = require("@aws-sdk/client-s3");
+const getSignedUrl = require("@aws-sdk/s3-request-presigner").getSignedUrl;
+
+const bucketName = process.env.BUCKET_NAME;
+const bucketRegion = process.env.BUCKET_REGION;
+const accessKey = process.env.ACCESS_KEY;
+const secretAccessKey = process.env.SECRET_ACCESS_KEY;
+
+const crypto = require("crypto");
+const randomImageName = (bytes = 32) =>
+  crypto.randomBytes(bytes).toString("hex");
+
+const s3 = new S3Client({
+  credentials: {
+    accessKeyId: accessKey,
+    secretAccessKey: secretAccessKey,
+  },
+  region: bucketRegion,
+});
+// S3 FIN
+
 router.post('/signin', (req, res) => {
 
   const email = req.body.email || null;
@@ -180,81 +206,81 @@ const multer = require('multer');
 const path = require('path');
 const uuid = require('uuid');
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'api/tickets/');
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname);
-    const filename = uuid.v4() + ext;
-    cb(null, filename);
-  }
-});
+const storage = multer.memoryStorage();
 
 // Modificar el middleware upload para aceptar un array de archivos
 const upload = multer({ storage: storage }).array('ticket[]');
-// TO-DO HACERLO EN BUCKET S3 DE AWS
 router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'stocker') {
     try {
-      formulario = JSON.parse(req.body.form);
+      if (req.files.length > 0) {
+        formulario = JSON.parse(req.body.form);
 
-      const donation_id = formulario.donation_id || null;
-      const total_weight = formulario.total_weight || null;
-      var provider = formulario.provider || null;
-      const destination = formulario.destination || null;
-      const date = formulario.date || null;
-      const delivered_by = formulario.delivered_by || null;
-      var products = formulario.products || [];
+        const donation_id = formulario.donation_id || null;
+        const total_weight = formulario.total_weight || null;
+        var provider = formulario.provider || null;
+        const destination = formulario.destination || null;
+        const date = formulario.date || null;
+        const delivered_by = formulario.delivered_by || null;
+        var products = formulario.products || [];
 
-      const logoPaths = req.files.map(file => path.basename(file.path)); // Obtener los nombres de archivo de cada archivo subido
-
-      console.log(formulario);
-      console.log(req.files);
-      if (!Number.isInteger(provider)) {
-        const [rows] = await mysqlConnection.promise().query(
-          'insert into provider(name) values(?)',
-          [provider]
-        );
-        provider = rows.insertId;
-      }
-      // iterar el array de objetos products (product,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
-      for (let i = 0; i < products.length; i++) {
-        if (!Number.isInteger(products[i].product)) {
+        console.log(formulario);
+        console.log(req.files);
+        if (!Number.isInteger(provider)) {
           const [rows] = await mysqlConnection.promise().query(
-            'insert into product(name) values(?)',
-            [products[i].product]
+            'insert into provider(name) values(?)',
+            [provider]
           );
-          products[i].product = rows.insertId;
+          provider = rows.insertId;
         }
-      }
-
-      const [rows] = await mysqlConnection.promise().query(
-        'insert into donation_ticket(client_id, donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?,?)',
-        [cabecera.client_id, donation_id, total_weight, provider, destination, date, delivered_by]
-      );
-
-      if (rows.affectedRows > 0) {
-        const donation_ticket_id = rows.insertId;
+        // iterar el array de objetos products (product,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
         for (let i = 0; i < products.length; i++) {
-          await mysqlConnection.promise().query(
-            'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
-            [products[i].product, donation_ticket_id, products[i].quantity]
-          );
+          if (!Number.isInteger(products[i].product)) {
+            const [rows] = await mysqlConnection.promise().query(
+              'insert into product(name) values(?)',
+              [products[i].product]
+            );
+            products[i].product = rows.insertId;
+          }
         }
-        for (let i = 0; i < logoPaths.length; i++) {
-          await mysqlConnection.promise().query(
-            'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
-            [donation_ticket_id, logoPaths[i]]
-          );
+
+        const [rows] = await mysqlConnection.promise().query(
+          'insert into donation_ticket(client_id, donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?,?)',
+          [cabecera.client_id, donation_id, total_weight, provider, destination, date, delivered_by]
+        );
+
+        if (rows.affectedRows > 0) {
+          const donation_ticket_id = rows.insertId;
+          for (let i = 0; i < products.length; i++) {
+            await mysqlConnection.promise().query(
+              'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
+              [products[i].product, donation_ticket_id, products[i].quantity]
+            );
+          }
+          for (let i = 0; i < req.files.length; i++) {
+            // renombrar cada archivo con un nombre aleatorio
+            req.files[i].filename = randomImageName();
+            const paramsLogo = {
+              Bucket: bucketName,
+              Key: req.files[i].filename,
+              Body: req.files[i].buffer,
+              ContentType: req.files[i].mimetype,
+            };
+            const commandLogo = new PutObjectCommand(paramsLogo);
+            const uploadLogo = await s3.send(commandLogo);
+            await mysqlConnection.promise().query(
+              'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
+              [donation_ticket_id, req.files[i].filename]
+            );
+          }
+        } else {
+          res.status(500).json('Could not create ticket');
         }
+        res.status(200).json('Data inserted successfully');
       } else {
-        res.status(500).json('Could not create ticket');
+        res.status(400).json('Donation ticket image is required');
       }
-
-      res.status(200).json('Data inserted successfully');
-
     } catch (error) {
       console.log(error);
       logger.error(error);
@@ -461,7 +487,7 @@ router.post('/onBoard', verifyToken, async (req, res) => {
         'insert into delivery_log(user_id, operation, location_id) values(?,?,?)',
         [user_id, user_status_id, location_id]
       );
-      
+
       if (rows.affectedRows > 0) {
         res.json('Status updated successfully');
       } else {
