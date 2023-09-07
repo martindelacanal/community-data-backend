@@ -770,7 +770,7 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
       );
       const totalBeneficiariesServed = rows[0].total_beneficiaries_served;
       const totalBeneficiaries = rows[0].total_beneficiaries;
-      const percentage = totalBeneficiariesServed / totalBeneficiaries * 100;
+      const percentage = (totalBeneficiariesServed / totalBeneficiaries * 100).toFixed(2);
       res.json(percentage);
     } catch (err) {
       console.log(err);
