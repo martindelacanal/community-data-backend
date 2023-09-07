@@ -484,7 +484,7 @@ router.post('/onBoard', verifyToken, async (req, res) => {
       );
       // insertar en tabla delivery_log la operation
       const [rows2] = await mysqlConnection.promise().query(
-        'insert into delivery_log(user_id, operation, location_id) values(?,?,?)',
+        'insert into delivery_log(user_id, operation_id, location_id) values(?,?,?)',
         [user_id, user_status_id, location_id]
       );
 
