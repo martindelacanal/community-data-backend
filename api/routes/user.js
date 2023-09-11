@@ -125,48 +125,46 @@ router.post('/signup', async (req, res) => {
     if (rows.affectedRows > 0) {
       // save inserted user id
       const user_id = rows.insertId;
-
+      console.log("user_id: ", user_id);
+      console.log("secondForm: ", secondForm);
       // insert user_question, iterate array of questions and insert each question with its answer
       for (let i = 0; i < secondForm.length; i++) {
         const question_id = secondForm[i].question_id;
         const answer_type_id = secondForm[i].answer_type_id;
         const answer = secondForm[i].answer;
         var user_question_id = null;
-        switch (answer_type_id) {
-          case 1: // texto
-            const [rows] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_text) values(?,?,?,?)',
-              [user_id, question_id, answer_type_id, answer]);
-            break;
-          case 2: // numero
-            const [rows2] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_number) values(?,?,?,?)',
-              [user_id, question_id, answer_type_id, answer]);
-            break;
-          case 3: // opcion simple
-            if (answer && answer.length > 0) {
+        if (answer) {
+          switch (answer_type_id) {
+            case 1: // texto
+              const [rows] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_text) values(?,?,?,?)',
+                [user_id, question_id, answer_type_id, answer]);
+              break;
+            case 2: // numero
+              const [rows2] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_number) values(?,?,?,?)',
+                [user_id, question_id, answer_type_id, answer]);
+              break;
+            case 3: // opcion simple
               const [rows3] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
                 [user_id, question_id, answer_type_id]);
               user_question_id = rows3.insertId;
-              for (let j = 0; j < answer.length; j++) {
-                const answer_id = answer[j];
-                const [rows4] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                  [user_question_id, answer_id]);
+              const [rows4] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+                [user_question_id, answer]);
+              break;
+            case 4: // opcion multiple
+              if (answer.length > 0) {
+                const [rows5] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
+                  [user_id, question_id, answer_type_id]);
+                user_question_id = rows5.insertId;
+                for (let j = 0; j < answer.length; j++) {
+                  const answer_id = answer[j];
+                  const [rows6] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+                    [user_question_id, answer_id]);
+                }
               }
-            }
-            break;
-          case 4: // opcion multiple
-            if (answer && answer.length > 0) {
-              const [rows5] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
-                [user_id, question_id, answer_type_id]);
-              user_question_id = rows5.insertId;
-              for (let j = 0; j < answer.length; j++) {
-                const answer_id = answer[j];
-                const [rows6] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                  [user_question_id, answer_id]);
-              }
-            }
-            break;
-          default:
-            break;
+              break;
+            default:
+              break;
+          }
         }
       }
       res.status(200).json('Data inserted successfully');
