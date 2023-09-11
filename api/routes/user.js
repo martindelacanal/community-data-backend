@@ -901,6 +901,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
+      const language = req.query.language || 'en';
       const { tabSelected } = req.params;
       let name = '';
       var rows = [];
@@ -909,6 +910,9 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
       switch (tabSelected) {
         case 'pounds':
           name = 'Pounds';
+          if (language === 'es') {
+            name = 'Libras';
+          }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
               SUM(total_weight) AS value,
@@ -923,6 +927,9 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           break;
         case 'beneficiaries':
           name = 'Beneficiaries';
+          if (language === 'es') {
+            name = 'Beneficiarios';
+          }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
               COUNT(DISTINCT user.id) AS value,
@@ -937,6 +944,9 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           break;
         case 'deliveryPeople':
           name = 'Delivery people';
+          if (language === 'es') {
+            name = 'Repartidores';
+          }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
               COUNT(DISTINCT user.id) AS value,
@@ -951,6 +961,9 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           break;
         case 'operations':
           name = 'Operations';
+          if (language === 'es') {
+            name = 'Operaciones';
+          }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
               COUNT(DISTINCT delivery_beneficiary.location_id) AS value,
@@ -982,6 +995,36 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
     res.status(401).json('Unauthorized');
   }
 });
+
+router.post('/message', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary') {
+      try {
+        const user_id = cabecera.id;
+        const message = req.body.message || null;
+        
+        if (message) {
+          const [rows] = await mysqlConnection.promise().query(
+            'insert into message(user_id,name) values(? , ?)',
+            [user_id, message]
+          );
+          if (rows.affectedRows > 0) {
+            res.json('Message sent successfully');
+          } else {
+            res.status(500).json('Could not send message');
+          }
+        } else {
+          res.status(400).json('Bad request');
+        }
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 
 
 function verifyToken(req, res, next) {
