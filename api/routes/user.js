@@ -68,7 +68,7 @@ router.post('/signin', (req, res) => {
             });
           } else {
             //generar token que expire en 8 horas
-            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '8h' }, (err, token) => {
+            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '1m' }, (err, token) => {
               logger.info(`user id: ${rows[0].id} logueado`);
               res.status(200).json({ token: token, reset_password: reset_password });
             });
