@@ -67,7 +67,8 @@ router.post('/signin', (req, res) => {
               res.status(200).json({ token: token, reset_password: reset_password });
             });
           } else {
-            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '8h' }, (err, token) => {
+            //generar token que expire en 1 minuto
+            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '1m' }, (err, token) => {
               logger.info(`user id: ${rows[0].id} logueado`);
               res.status(200).json({ token: token, reset_password: reset_password });
             });
@@ -92,6 +93,8 @@ router.post('/signup', async (req, res) => {
   firstForm = req.body.firstForm;
   secondForm = req.body.secondForm;
 
+  const client_id = 1; // TO-DO obtener client_id de la cabecera
+
   const role_id = 5;
   const username = firstForm.username || null;
   let passwordHash = await bcryptjs.hash(firstForm.password, 8);
@@ -111,6 +114,7 @@ router.post('/signup', async (req, res) => {
                                                           password, \
                                                           email, \
                                                           role_id, \
+                                                          client_id, \
                                                           firstname, \
                                                           lastname, \
                                                           date_of_birth, \
@@ -120,8 +124,8 @@ router.post('/signup', async (req, res) => {
                                                           gender_id, \
                                                           ethnicity_id, \
                                                           other_ethnicity) \
-                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [username, passwordHash, email, role_id, firstname, lastname, dateOfBirth, phone, zipcode, householdSize, gender, ethnicity, otherEthnicity]);
+                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, householdSize, gender, ethnicity, otherEthnicity]);
     if (rows.affectedRows > 0) {
       // save inserted user id
       const user_id = rows.insertId;
