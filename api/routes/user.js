@@ -142,23 +142,27 @@ router.post('/signup', async (req, res) => {
               [user_id, question_id, answer_type_id, answer]);
             break;
           case 3: // opcion simple
-            const [rows3] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
-              [user_id, question_id, answer_type_id]);
-            user_question_id = rows3.insertId;
-            for (let j = 0; j < answer.length; j++) {
-              const answer_id = answer[j];
-              const [rows4] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                [user_question_id, answer_id]);
+            if (answer && answer.length > 0) {
+              const [rows3] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
+                [user_id, question_id, answer_type_id]);
+              user_question_id = rows3.insertId;
+              for (let j = 0; j < answer.length; j++) {
+                const answer_id = answer[j];
+                const [rows4] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+                  [user_question_id, answer_id]);
+              }
             }
             break;
           case 4: // opcion multiple
-            const [rows5] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
-              [user_id, question_id, answer_type_id]);
-            user_question_id = rows5.insertId;
-            for (let j = 0; j < answer.length; j++) {
-              const answer_id = answer[j];
-              const [rows6] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                [user_question_id, answer_id]);
+            if (answer && answer.length > 0) {
+              const [rows5] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
+                [user_id, question_id, answer_type_id]);
+              user_question_id = rows5.insertId;
+              for (let j = 0; j < answer.length; j++) {
+                const answer_id = answer[j];
+                const [rows6] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+                  [user_question_id, answer_id]);
+              }
             }
             break;
           default:
@@ -999,27 +1003,27 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
 router.post('/message', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary') {
-      try {
-        const user_id = cabecera.id;
-        const message = req.body.message || null;
-        
-        if (message) {
-          const [rows] = await mysqlConnection.promise().query(
-            'insert into message(user_id,name) values(? , ?)',
-            [user_id, message]
-          );
-          if (rows.affectedRows > 0) {
-            res.json('Message sent successfully');
-          } else {
-            res.status(500).json('Could not send message');
-          }
+    try {
+      const user_id = cabecera.id;
+      const message = req.body.message || null;
+
+      if (message) {
+        const [rows] = await mysqlConnection.promise().query(
+          'insert into message(user_id,name) values(? , ?)',
+          [user_id, message]
+        );
+        if (rows.affectedRows > 0) {
+          res.json('Message sent successfully');
         } else {
-          res.status(400).json('Bad request');
+          res.status(500).json('Could not send message');
         }
-      } catch (err) {
-        console.log(err);
-        res.status(500).json('Internal server error');
+      } else {
+        res.status(400).json('Bad request');
       }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
   } else {
     res.status(401).json('Unauthorized');
   }
