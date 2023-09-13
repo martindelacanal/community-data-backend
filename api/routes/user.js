@@ -335,7 +335,7 @@ router.put('/beneficiary/reset-password', async (req, res) => {
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'beneficiary') {
+  if (cabecera.role === 'admin') {
     try {
       const { idUser } = req.params;
       const { password } = req.body;
@@ -1027,6 +1027,47 @@ router.post('/message', verifyToken, async (req, res) => {
     }
   } else {
     res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/settings/password', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary') {
+    try {
+      const user_id = cabecera.id;
+      const { actual_password, new_password } = req.body;
+
+      if (actual_password && new_password) {
+        const [rows] = await mysqlConnection.promise().query(
+          'select password from user where id = ?', [user_id]
+        );
+
+        if (rows.length > 0) {
+          const passwordCorrect = await bcryptjs.compare(actual_password, rows[0].password);
+          if (passwordCorrect) {
+            let passwordHash = await bcryptjs.hash(new_password, 8);
+            const [rows2] = await mysqlConnection.promise().query(
+              'update user set password = ? where id = ?', [passwordHash, user_id]
+            );
+            if (rows2.affectedRows > 0) {
+              res.json('Password updated successfully');
+            } else {
+              res.status(500).json('Could not update password');
+            }
+          } else {
+            res.status(401).json('Unauthorized');
+          }
+        } else {
+          res.status(500).json('Could not update password');
+        }
+      } else {
+        res.status(400).json('Bad request');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
   }
 });
 
