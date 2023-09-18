@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcryptjs = require('bcryptjs');
 const axios = require('axios');
 const logger = require('../utils/logger.js');
+const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 
 // S3 INICIO
 const S3Client = require("@aws-sdk/client-s3").S3Client;
@@ -397,6 +398,10 @@ router.post('/upload/beneficiaryQR/:locationId', verifyToken, async (req, res) =
         } else {
           // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
+          // actualizar location_id del user beneficiary
+          const [rows2] = await mysqlConnection.promise().query(
+            'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
+          );
           // insertar en tabla delivery_beneficiary
           const [rows3] = await mysqlConnection.promise().query(
             'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
@@ -1070,6 +1075,156 @@ router.put('/settings/password', verifyToken, async (req, res) => {
     }
   }
 });
+
+router.get('/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT u.username,
+                u.email,
+                u.firstname,
+                u.lastname,
+                DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
+                u.phone,
+                u.zipcode,
+                u.household_size,
+                g.name AS gender,
+                eth.name AS ethnicity,
+                u.other_ethnicity,
+                loc.organization AS location,
+                DATE_FORMAT(u.creation_date, '%m/%d/%Y %T') AS registration_date,
+                q.id AS question_id,
+                at.id AS answer_type_id,
+                q.name AS question,
+                a.name AS answer,
+                uq.answer_text AS answer_text,
+                uq.answer_number AS answer_number
+        FROM user u
+        INNER JOIN gender AS g ON u.gender_id = g.id
+        INNER JOIN ethnicity AS eth ON u.ethnicity_id = eth.id
+        LEFT JOIN location AS loc ON u.location_id = loc.id
+        CROSS JOIN question AS q
+        LEFT JOIN answer_type as at ON q.answer_type_id = at.id
+        LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
+        LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+        left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        WHERE u.role_id = 5 AND q.enabled = 'Y'
+        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        order by u.id, q.id, a.id`,
+        [cabecera.client_id]
+      );
+
+      // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
+      var question_id_array = [];
+      if (rows.length > 0) {
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          // si el id de la pregunta no esta en el question_id_array, agregarlo
+          const id_repetido = question_id_array.some(obj => obj.question_id === row.question_id);
+          if (!id_repetido) {
+            question_id_array.push({ question_id: row.question_id, question: row.question });
+          }
+        }
+      }
+
+      /* iterar el array rows y agregar los campos username, email, firstname, lastname, date_of_birth, phone, zipcode, household_size, gender, ethnicity, other_ethnicity, location, registration_date
+      y que cada pregunta sea una columna, si el question_id se repite entonces agregar el campo answer a la columna correspondiente agregando al final del campo texto separando el valor por coma, si no se repite entonces agregar el campo answer a la columna correspondiente y agregar el objeto a rows_filtered
+      */
+      var rows_filtered = [];
+      var row_filtered = {};
+      for (let i = 0; i < rows.length; i++) {
+
+        if (!row_filtered["username"]) {
+          row_filtered["username"] = rows[i].username;
+          row_filtered["email"] = rows[i].email;
+          row_filtered["firstname"] = rows[i].firstname;
+          row_filtered["lastname"] = rows[i].lastname;
+          row_filtered["date_of_birth"] = rows[i].date_of_birth;
+          row_filtered["phone"] = rows[i].phone;
+          row_filtered["zipcode"] = rows[i].zipcode;
+          row_filtered["household_size"] = rows[i].household_size;
+          row_filtered["gender"] = rows[i].gender;
+          row_filtered["ethnicity"] = rows[i].ethnicity;
+          row_filtered["other_ethnicity"] = rows[i].other_ethnicity;
+          row_filtered["location"] = rows[i].location;
+          row_filtered["registration_date"] = rows[i].registration_date;
+        }
+        if (!row_filtered[rows[i].question_id]) {
+
+          switch (rows[i].answer_type_id) {
+            case 1:
+              row_filtered[rows[i].question_id] = rows[i].answer_text;
+              break;
+            case 2:
+              row_filtered[rows[i].question_id] = rows[i].answer_number;
+              break;
+            case 3:
+              row_filtered[rows[i].question_id] = rows[i].answer;
+              break;
+            case 4:
+              row_filtered[rows[i].question_id] = rows[i].answer;
+              break;
+            default:
+              break;
+          }
+        } else {
+          // es un answer_type_id = 4, agregar el campo answer al final del campo texto separando el valor por coma
+          row_filtered[rows[i].question_id] = row_filtered[rows[i].question_id] + ', ' + rows[i].answer;
+        }
+        if (i < rows.length - 1) {
+          if (rows[i].username !== rows[i + 1].username) {
+            rows_filtered.push(row_filtered);
+            row_filtered = {};
+          }
+        } else {
+          rows_filtered.push(row_filtered);
+          row_filtered = {};
+        }
+      }
+      // iterar el array headers y convertirlo en un array de objetos con id y title para csvWriter
+      var headers_array = [
+        { id: 'username', title: 'Username' },
+        { id: 'email', title: 'Email' },
+        { id: 'firstname', title: 'Firstname' },
+        { id: 'lastname', title: 'Lastname' },
+        { id: 'date_of_birth', title: 'Date of birth' },
+        { id: 'phone', title: 'Phone' },
+        { id: 'zipcode', title: 'Zipcode' },
+        { id: 'household_size', title: 'Household size' },
+        { id: 'gender', title: 'Gender' },
+        { id: 'ethnicity', title: 'Ethnicity' },
+        { id: 'other_ethnicity', title: 'Other ethnicity' },
+        { id: 'location', title: 'Location' },
+        { id: 'registration_date', title: 'Registration date' }
+      ];
+
+      for (let i = 0; i < question_id_array.length; i++) {
+        const question_id = question_id_array[i].question_id;
+        const question = question_id_array[i].question;
+        headers_array.push({ id: question_id, title: question });
+      }
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows_filtered);
+
+      res.setHeader('Content-disposition', 'attachment; filename=resultados.csv');
+      res.setHeader('Content-type', 'text/csv');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
 
 
 
