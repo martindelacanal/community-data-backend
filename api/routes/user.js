@@ -239,6 +239,11 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             [provider]
           );
           provider = rows.insertId;
+          // insertar en stocker_log la operation 5 (create), el provider insertado y el id del usuario logueado
+          const [rows2] = await mysqlConnection.promise().query(
+            'insert into stocker_log(user_id, operation_id, provider_id) values(?,?,?)',
+            [cabecera.id, 5, provider]
+          );
         }
         // iterar el array de objetos products (product,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
         for (let i = 0; i < products.length; i++) {
@@ -248,6 +253,11 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
               [products[i].product]
             );
             products[i].product = rows.insertId;
+            // insertar en stocker_log la operation 5 (create), el product insertado y el id del usuario logueado
+            const [rows2] = await mysqlConnection.promise().query(
+              'insert into stocker_log(user_id, operation_id, product_id) values(?,?,?)',
+              [cabecera.id, 5, products[i].product]
+            );
           }
         }
 
@@ -280,6 +290,11 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
               [donation_ticket_id, req.files[i].filename]
             );
           }
+          // insertar en stocker_log la operation 5 (create), el ticket insertado y el id del usuario logueado
+          const [rows2] = await mysqlConnection.promise().query(
+            'insert into stocker_log(user_id, operation_id, donation_ticket_id) values(?,?,?)',
+            [cabecera.id, 5, donation_ticket_id]
+          );
         } else {
           res.status(500).json('Could not create ticket');
         }
@@ -1226,7 +1241,44 @@ router.get('/download-csv', verifyToken, async (req, res) => {
 }
 );
 
+router.get('/metrics/questions/:locationId', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const location_id = parseInt(req.params.locationId) || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT u.id AS user_id,
+                q.id AS question_id,
+                at.id AS answer_type_id,
+                q.name AS question,
+                a.name AS answer,
+                uq.answer_text AS answer_text,
+                uq.answer_number AS answer_number
+        FROM user u
+        LEFT JOIN location AS loc ON u.location_id = loc.id
+        CROSS JOIN question AS q
+        LEFT JOIN answer_type as at ON q.answer_type_id = at.id
+        LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
+        LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+        left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        WHERE u.role_id = 5 AND q.enabled = 'Y'
+        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        ${location_id ? 'and u.location_id = ?' : ''}
+        order by u.id, q.id, a.id`,
+        [cabecera.client_id]
+        );
 
+        console.log(rows);
+
+        res.json(rows);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    }
+  }
+);
+          
 
 function verifyToken(req, res, next) {
 
