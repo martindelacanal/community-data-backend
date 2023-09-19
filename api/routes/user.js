@@ -1229,7 +1229,7 @@ router.get('/download-csv', verifyToken, async (req, res) => {
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows_filtered);
 
-      res.setHeader('Content-disposition', 'attachment; filename=resultados.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
       res.setHeader('Content-type', 'text/csv');
       res.send(csvData);
 
@@ -1245,13 +1245,15 @@ router.get('/metrics/questions/:locationId', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
+      const language = req.query.language || 'en';
       const location_id = parseInt(req.params.locationId) || null;
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id AS user_id,
                 q.id AS question_id,
                 at.id AS answer_type_id,
-                q.name AS question,
-                a.name AS answer,
+                ${language === 'en' ? 'q.name' : 'q.name_es'} AS question,
+                a.id AS answer_id,
+                ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer,
                 uq.answer_text AS answer_text,
                 uq.answer_number AS answer_number
         FROM user u
@@ -1261,24 +1263,122 @@ router.get('/metrics/questions/:locationId', verifyToken, async (req, res) => {
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
-        WHERE u.role_id = 5 AND q.enabled = 'Y'
+        WHERE u.role_id = 5 AND q.enabled = 'Y' and (q.answer_type_id = 3 or q.answer_type_id = 4)
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         ${location_id ? 'and u.location_id = ?' : ''}
-        order by u.id, q.id, a.id`,
+        order by q.id, a.id`,
         [cabecera.client_id]
-        );
+      );
 
-        console.log(rows);
+      // crear array de objetos pregunta, cada pregunta tiene un array de objetos respuesta, donde cada respuesta tiene un nombre y la suma de usuarios que la eligieron
+      // iterar el array rows y agregar el campo question, ir sumando sus respuestas sobre esa question hasta que cambie de question_id, luego se pushea el objeto question al array questions
+      // estructura:
+      // questions = [
+      //   {
+      //     question_id: 1,
+      //     question: '¿Cuál es su género?',
+      //     answers: [
+      //       {
+      //         answer_id: 1,
+      //         answer: 'Masculino',
+      //         total: 5
+      //       }
+      //     ]
+      //   }
+      // ]
+      const questions = [];
+      let currentQuestion = null;
 
-        res.json(rows);
-      } catch (err) {
-        console.log(err);
-        res.status(500).json('Internal server error');
+      for (const row of rows) {
+        if (row.question_id !== (currentQuestion && currentQuestion.question_id)) {
+          const question = {
+            question_id: row.question_id,
+            question: row.question,
+            answers: []
+          };
+          questions.push(question);
+          currentQuestion = question;
+        }
+
+        if (row.answer_id) {
+          const answer = {
+            answer_id: row.answer_id,
+            answer: row.answer,
+            total: 1
+          };
+
+          const existingAnswer = currentQuestion.answers.find(a => a.answer_id === answer.answer_id);
+          if (existingAnswer) {
+            existingAnswer.total++;
+            answer.answer = null;
+          } else {
+            currentQuestion.answers.push(answer);
+          }
+        }
       }
+
+
+      // Obtener todas las posibles respuestas para cada pregunta
+      const [answerRows] = await mysqlConnection.promise().query(`
+        SELECT q.id AS question_id, 
+              a.id AS answer_id, 
+              ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer
+              FROM question q
+              JOIN answer_type at ON q.answer_type_id = at.id
+              JOIN answer a ON q.id = a.question_id
+              WHERE q.enabled = 'Y' AND at.id = 3 OR at.id = 4
+              ${cabecera.role === 'client' ? 'AND q.client_id = ?' : ''}
+              ORDER BY q.id, a.id
+      `);
+
+      const possibleAnswers = {};
+      for (const row of answerRows) {
+        if (!possibleAnswers[row.question_id]) {
+          possibleAnswers[row.question_id] = [];
+        }
+        possibleAnswers[row.question_id].push({
+          answer_id: row.answer_id,
+          answer: row.answer,
+          total: 0
+        });
+      }
+
+      // Contar cuántas veces se ha elegido cada respuesta
+      const answerCounts = {};
+      for (const row of rows) {
+        if (row.answer_id) {
+          if (!answerCounts[row.question_id]) {
+            answerCounts[row.question_id] = {};
+          }
+          if (!answerCounts[row.question_id][row.answer_id]) {
+            answerCounts[row.question_id][row.answer_id] = 0;
+          }
+          answerCounts[row.question_id][row.answer_id]++;
+        }
+      }
+
+      // Agregar las respuestas que no fueron elegidas
+      for (const question of questions) {
+        if (possibleAnswers[question.question_id]) {
+          for (const answer of possibleAnswers[question.question_id]) {
+            if (!answerCounts[question.question_id][answer.answer_id]) {
+              answerCounts[question.question_id][answer.answer_id] = 0;
+              answer.total = answerCounts[question.question_id][answer.answer_id];
+              question.answers.push(answer);
+            }
+          }
+        }
+      }
+
+      res.json(questions);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
     }
   }
+}
 );
-          
+
 
 function verifyToken(req, res, next) {
 
