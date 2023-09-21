@@ -447,7 +447,7 @@ router.get('/locations', verifyToken, async (req, res) => {
   if (cabecera.role === 'stocker' || cabecera.role === 'delivery') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select id,organization,address from location where enabled = "Y" and client_id = ? order by organization',
+        'select id,organization,community_city,address from location where enabled = "Y" and client_id = ? order by community_city',
         [cabecera.client_id]
       );
       res.json(rows);
