@@ -227,10 +227,15 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         const total_weight = formulario.total_weight || null;
         var provider = formulario.provider || null;
         const destination = formulario.destination || null;
-        const date = formulario.date || null;
         const delivered_by = formulario.delivered_by || null;
         var products = formulario.products || [];
-
+        var date = null;
+        if (formulario.date) {
+          fecha = new Date(formulario.date);
+          // Formatear la fecha en el formato deseado (YYYY-MM-DD)
+          date = fecha.toISOString().slice(0, 10);
+        }
+        console.log("date: " + date);
         console.log(formulario);
         console.log(req.files);
         if (!Number.isInteger(provider)) {
@@ -260,43 +265,66 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             );
           }
         }
-
-        const [rows] = await mysqlConnection.promise().query(
-          'insert into donation_ticket(client_id, donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?,?)',
-          [cabecera.client_id, donation_id, total_weight, provider, destination, date, delivered_by]
-        );
+        try {
+          const [rows] = await mysqlConnection.promise().query(
+            'insert into donation_ticket(client_id, donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?,?)',
+            [cabecera.client_id, donation_id, total_weight, provider, destination, date, delivered_by]
+          );
+        } catch (error) {
+          console.log(error);
+          logger.error(error);
+          res.status(500).json('Could not create ticket');
+        }
 
         if (rows.affectedRows > 0) {
           const donation_ticket_id = rows.insertId;
-          for (let i = 0; i < products.length; i++) {
-            await mysqlConnection.promise().query(
-              'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
-              [products[i].product, donation_ticket_id, products[i].quantity]
-            );
+          try {
+            for (let i = 0; i < products.length; i++) {
+              await mysqlConnection.promise().query(
+                'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
+                [products[i].product, donation_ticket_id, products[i].quantity]
+              );
+            }
+          } catch (error) {
+            console.log(error);
+            logger.error(error);
+            res.status(500).json('Could not create product_donation_ticket');
           }
-          for (let i = 0; i < req.files.length; i++) {
-            // renombrar cada archivo con un nombre aleatorio
-            req.files[i].filename = randomImageName();
-            const paramsLogo = {
-              Bucket: bucketName,
-              Key: req.files[i].filename,
-              Body: req.files[i].buffer,
-              ContentType: req.files[i].mimetype,
-            };
-            const commandLogo = new PutObjectCommand(paramsLogo);
-            const uploadLogo = await s3.send(commandLogo);
-            await mysqlConnection.promise().query(
-              'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
-              [donation_ticket_id, req.files[i].filename]
-            );
+          try {
+            for (let i = 0; i < req.files.length; i++) {
+              // renombrar cada archivo con un nombre aleatorio
+              req.files[i].filename = randomImageName();
+              const paramsLogo = {
+                Bucket: bucketName,
+                Key: req.files[i].filename,
+                Body: req.files[i].buffer,
+                ContentType: req.files[i].mimetype,
+              };
+              const commandLogo = new PutObjectCommand(paramsLogo);
+              const uploadLogo = await s3.send(commandLogo);
+              await mysqlConnection.promise().query(
+                'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
+                [donation_ticket_id, req.files[i].filename]
+              );
+            }
+          } catch (error) {
+            console.log(error);
+            logger.error(error);
+            res.status(500).json('Could not upload image');
           }
-          // insertar en stocker_log la operation 5 (create), el ticket insertado y el id del usuario logueado
-          const [rows2] = await mysqlConnection.promise().query(
-            'insert into stocker_log(user_id, operation_id, donation_ticket_id) values(?,?,?)',
-            [cabecera.id, 5, donation_ticket_id]
-          );
+          try {
+            // insertar en stocker_log la operation 5 (create), el ticket insertado y el id del usuario logueado
+            const [rows2] = await mysqlConnection.promise().query(
+              'insert into stocker_log(user_id, operation_id, donation_ticket_id) values(?,?,?)',
+              [cabecera.id, 5, donation_ticket_id]
+            );
+          } catch (error) {
+            console.log(error);
+            logger.error(error);
+            res.status(500).json('Could not create stocker_log');
+          }
         } else {
-          res.status(500).json('Could not create ticket');
+          res.status(500).json('Not ticket inserted');
         }
         res.status(200).json('Data inserted successfully');
       } else {
@@ -1379,6 +1407,75 @@ router.get('/metrics/questions/:locationId', verifyToken, async (req, res) => {
 }
 );
 
+router.get('/table/user', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `and (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or DATE_FORMAT(user.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `SELECT
+      user.id,
+      user.username,
+      user.email,
+      user.firstname,
+      user.lastname,
+      role.name as role,
+      DATE_FORMAT(user.creation_date, '%m/%d/%Y %T') as creation_date
+      FROM user
+      INNER JOIN role ON user.role_id = role.id
+      WHERE user.enabled = "Y" ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+        SELECT COUNT(*) as count
+        FROM user
+        INNER JOIN role ON user.role_id = role.id
+        WHERE user.enabled = "Y" ${queryBuscar}
+      `);
+
+        const numOfResults = countRows[0].count;
+        console.log(countRows)
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
 
 function verifyToken(req, res, next) {
 
