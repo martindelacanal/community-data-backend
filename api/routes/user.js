@@ -265,16 +265,10 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             );
           }
         }
-        try {
-          const [rows] = await mysqlConnection.promise().query(
-            'insert into donation_ticket(client_id, donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?,?)',
-            [cabecera.client_id, donation_id, total_weight, provider, destination, date, delivered_by]
-          );
-        } catch (error) {
-          console.log(error);
-          logger.error(error);
-          res.status(500).json('Could not create ticket');
-        }
+        const [rows] = await mysqlConnection.promise().query(
+          'insert into donation_ticket(client_id, donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?,?)',
+          [cabecera.client_id, donation_id, total_weight, provider, destination, date, delivered_by]
+        );
 
         if (rows.affectedRows > 0) {
           const donation_ticket_id = rows.insertId;
@@ -909,6 +903,46 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
         [cabecera.client_id]
       );
       res.json(rows[0].total_tickets_uploaded);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/total-locations-enabled', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+          COUNT(DISTINCT location.id) AS total_locations_enabled
+          FROM location
+          WHERE location.enabled = 'Y' ${cabecera.role === 'client' ? 'and location.client_id = ?' : ''}`,
+        [cabecera.client_id]
+      );
+      res.json(rows[0].total_locations_enabled);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/total-products-uploaded', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+            COUNT(DISTINCT product.id) AS total_products_uploaded
+          FROM product`
+      );
+      res.json(rows[0].total_products_uploaded);
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
