@@ -33,6 +33,10 @@ const s3 = new S3Client({
 });
 // S3 FIN
 
+router.get('/ping', (req, res) => {
+  res.status(200).send();
+});
+
 router.post('/signin', (req, res) => {
 
   const email = req.body.email || null;
