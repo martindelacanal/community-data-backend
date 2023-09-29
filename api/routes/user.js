@@ -377,7 +377,7 @@ router.put('/beneficiary/reset-password', async (req, res) => {
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
     try {
       const { idUser } = req.params;
       const { password } = req.body;
