@@ -1307,6 +1307,75 @@ router.get('/download-csv', verifyToken, async (req, res) => {
 }
 );
 
+router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const from_date = req.query.from_date || '1970-01-01';
+      const to_date = req.query.to_date || '2100-01-01';
+      console.log ("download CSV ticket from_date: " + from_date + " to_date: " + to_date);
+      
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT dt.id,
+                dt.donation_id,
+                dt.total_weight,
+                p.name as provider,
+                loc.community_city as location,
+                dt.date as date,
+                dt.delivered_by,
+                u.id as created_by_id,
+                u.username as created_by_username,
+                DATE_FORMAT(dt.creation_date, '%m/%d/%Y %T') AS creation_date,
+                product.id as product_id,
+                product.name as product,
+                pdt.quantity as quantity
+        FROM donation_ticket as dt
+        INNER JOIN provider as p ON dt.provider_id = p.id
+        INNER JOIN location as loc ON dt.location_id = loc.id
+        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+        INNER JOIN user as u ON sl.user_id = u.id
+        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        INNER JOIN product as product ON pdt.product_id = product.id
+        WHERE dt.creation_date >= ? AND dt.creation_date <= ?
+        ORDER BY dt.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'donation_id', title: 'Donation ID' },
+        { id: 'total_weight', title: 'Total weight' },
+        { id: 'location', title: 'Location' },
+        { id: 'date', title: 'Date' },
+        { id: 'delivered_by', title: 'Delivered by' },
+        { id: 'created_by_id', title: 'Created by ID' },
+        { id: 'created_by_username', title: 'Created by username' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'product_id', title: 'Product ID' },
+        { id: 'product', title: 'Product' },
+        { id: 'quantity', title: 'Quantity' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-type', 'text/csv');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 router.get('/metrics/questions/:locationId', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
@@ -1445,13 +1514,80 @@ router.get('/metrics/questions/:locationId', verifyToken, async (req, res) => {
 }
 );
 
-router.get('/table/user', verifyToken, async (req, res) => {
+router.get('/table/notification', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   let buscar = req.query.search;
   let queryBuscar = '';
 
   var page = req.query.page ? Number(req.query.page) : 1;
 
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `WHERE (message.id like '${buscar}' or message.user_id like '${buscar}' or user.username like '${buscar}' or message.name like '${buscar}' or DATE_FORMAT(message.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `SELECT
+      message.id,
+      message.user_id,
+      user.username as user_name,
+      message.name as message,
+      DATE_FORMAT(message.creation_date, '%m/%d/%Y %T') as creation_date
+      FROM message
+      INNER JOIN user ON message.user_id = user.id
+      ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+        SELECT COUNT(*) as count
+        FROM message
+        INNER JOIN user ON message.user_id = user.id
+        ${queryBuscar}
+      `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/user', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+  
   if (page < 1) {
     page = 1;
   }
@@ -1497,7 +1633,213 @@ router.get('/table/user', verifyToken, async (req, res) => {
       `);
 
         const numOfResults = countRows[0].count;
-        console.log(countRows)
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/ticket', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `WHERE (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(donation_ticket.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `SELECT
+      donation_ticket.id,
+      donation_ticket.donation_id,
+      donation_ticket.total_weight,
+      provider.name as provider,
+      location.community_city as location,
+      DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') as date,
+      donation_ticket.delivered_by,
+      COUNT(DISTINCT product_donation_ticket.product_id) AS products,
+      DATE_FORMAT(donation_ticket.creation_date, '%m/%d/%Y %T') as creation_date
+      FROM donation_ticket
+      INNER JOIN provider ON donation_ticket.provider_id = provider.id
+      INNER JOIN location ON donation_ticket.location_id = location.id
+      INNER JOIN product_donation_ticket ON donation_ticket.id = product_donation_ticket.donation_ticket_id
+      ${queryBuscar}
+      GROUP BY donation_ticket.id
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+        SELECT COUNT(DISTINCT donation_ticket.id) as count
+        FROM donation_ticket
+        INNER JOIN provider ON donation_ticket.provider_id = provider.id
+        INNER JOIN location ON donation_ticket.location_id = location.id
+        INNER JOIN product_donation_ticket ON donation_ticket.id = product_donation_ticket.donation_ticket_id
+        ${queryBuscar}
+      `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/product', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `WHERE (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(product.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `SELECT
+      product.id,
+      product.name,
+      product.value_usd,
+      DATE_FORMAT(product.creation_date, '%m/%d/%Y %T') as creation_date
+      FROM product
+      ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+        SELECT COUNT(*) as count
+        FROM product
+        ${queryBuscar}
+      `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/location', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `WHERE (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or location.partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or DATE_FORMAT(location.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `SELECT
+      location.id,
+      location.organization,
+      location.community_city,
+      location.partner,
+      location.address,
+      location.enabled,
+      DATE_FORMAT(location.creation_date, '%m/%d/%Y %T') as creation_date
+      FROM location
+      ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+        SELECT COUNT(*) as count
+        FROM location
+        ${queryBuscar}
+      `);
+
+        const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
 
         res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
