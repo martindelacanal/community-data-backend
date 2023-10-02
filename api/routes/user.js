@@ -1350,7 +1350,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 dt.total_weight,
                 p.name as provider,
                 loc.community_city as location,
-                dt.date as date,
+                DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 dt.delivered_by,
                 u.id as created_by_id,
                 u.username as created_by_username,
@@ -1365,7 +1365,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         INNER JOIN user as u ON sl.user_id = u.id
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as product ON pdt.product_id = product.id
-        WHERE dt.creation_date >= ? AND dt.creation_date <= ?
+        WHERE dt.creation_date >= ? AND dt.creation_date < DATE_ADD(?, INTERVAL 1 DAY)
         ORDER BY dt.id`,
         [from_date, to_date]
       );
@@ -1885,6 +1885,67 @@ router.get('/table/location', verifyToken, async (req, res) => {
     res.status(401).json('No autorizado');
   }
 });
+
+router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idTicket } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT dt.id,
+                dt.donation_id,
+                dt.total_weight,
+                p.name as provider,
+                loc.community_city as location,
+                DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
+                dt.delivered_by,
+                u.id as created_by_id,
+                u.username as created_by_username,
+                DATE_FORMAT(dt.creation_date, '%m/%d/%Y %T') AS creation_date,
+                product.id as product_id,
+                product.name as product,
+                pdt.quantity as quantity
+        FROM donation_ticket as dt
+        INNER JOIN provider as p ON dt.provider_id = p.id
+        INNER JOIN location as loc ON dt.location_id = loc.id
+        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+        INNER JOIN user as u ON sl.user_id = u.id
+        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        INNER JOIN product as product ON pdt.product_id = product.id
+        WHERE dt.id = ?`,
+        [idTicket]
+      );
+
+      // create object with ticket data and field 'products' with array of products
+      var ticket = {};
+      var products = [];
+      ticket["id"] = rows[0].id;
+      ticket["donation_id"] = rows[0].donation_id;
+      ticket["total_weight"] = rows[0].total_weight;
+      ticket["provider"] = rows[0].provider;
+      ticket["location"] = rows[0].location;
+      ticket["date"] = rows[0].date;
+      ticket["delivered_by"] = rows[0].delivered_by;
+      ticket["created_by_id"] = rows[0].created_by_id;
+      ticket["created_by_username"] = rows[0].created_by_username;
+      ticket["creation_date"] = rows[0].creation_date;
+
+      for (let i = 0; i < rows.length; i++) {
+        products.push({ product_id: rows[i].product_id, product: rows[i].product, quantity: rows[i].quantity });
+      }
+      ticket["products"] = products;
+
+      res.json(ticket);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 
 function verifyToken(req, res, next) {
 
