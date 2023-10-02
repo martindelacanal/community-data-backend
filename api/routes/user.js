@@ -402,6 +402,35 @@ router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   }
 });
 
+router.delete('/user/reset-password/:idUser', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idUser } = req.params;
+
+      // const newPassword = Math.random().toString(36).slice(-8);
+      const newPassword = 'communitydata';
+      let passwordHash = await bcryptjs.hash(newPassword, 8);
+
+      const [rows2] = await mysqlConnection.promise().query('update user set password = ?, reset_password = "Y" where id = ?',
+        [passwordHash, idUser]);
+
+      if (rows2.affectedRows > 0) {
+        res.json({ password: newPassword });
+      } else {
+        res.status(500).json('Could not update password');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.post('/upload/beneficiaryQR/:locationId', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'delivery') {
@@ -1313,8 +1342,8 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
     try {
       const from_date = req.query.from_date || '1970-01-01';
       const to_date = req.query.to_date || '2100-01-01';
-      console.log ("download CSV ticket from_date: " + from_date + " to_date: " + to_date);
-      
+      console.log("download CSV ticket from_date: " + from_date + " to_date: " + to_date);
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT dt.id,
                 dt.donation_id,
@@ -1587,7 +1616,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
   let queryBuscar = '';
 
   var page = req.query.page ? Number(req.query.page) : 1;
-  
+
   if (page < 1) {
     page = 1;
   }
