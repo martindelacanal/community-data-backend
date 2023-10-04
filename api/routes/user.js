@@ -431,6 +431,50 @@ router.delete('/user/reset-password/:idUser', verifyToken, async (req, res) => {
   }
 });
 
+router.post('/new/user', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      console.log("entre a new user")
+      formulario = req.body;
+      console.log("formulario: ", formulario);
+      const username = formulario.username || null;
+      const password = formulario.password || null;
+      const email = formulario.email || null;
+      const firstname = formulario.firstname || null;
+      const lastname = formulario.lastname || null;
+      const date_of_birth = formulario.date_of_birth || null;
+      const gender_id = formulario.gender_id || null;
+      const role_id = formulario.role_id || null;
+      
+      // const newPassword = Math.random().toString(36).slice(-8);
+      var newPassword = 'communitydata';
+      if (password) {
+        newPassword = password;
+      }
+      let passwordHash = await bcryptjs.hash(newPassword, 8);
+      var reset_password = "Y";
+      const [rows2] = await mysqlConnection.promise().query(
+        'insert into user (username, email, firstname, lastname, date_of_birth, password, reset_password, gender_id, role_id) values(?,?,?,?,?,?,?,?,?)',
+        [username, email, firstname, lastname, date_of_birth, passwordHash, reset_password, gender_id, role_id]
+      );
+
+      if (rows2.affectedRows > 0) {
+        res.json({ password: newPassword });
+      } else {
+        res.status(500).json('Could not create user');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.post('/upload/beneficiaryQR/:locationId', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'delivery') {
@@ -538,6 +582,26 @@ router.get('/products', verifyToken, async (req, res) => {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name from product order by name',
+      );
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/roles', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        'select id,name \
+        from role \
+        where name != "beneficiary" \
+        order by name',
       );
       res.json(rows);
     } catch (err) {
