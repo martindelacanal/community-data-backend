@@ -1267,7 +1267,7 @@ router.get('/download-csv', verifyToken, async (req, res) => {
                 g.name AS gender,
                 eth.name AS ethnicity,
                 u.other_ethnicity,
-                loc.organization AS location,
+                loc.community_city AS location,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', '-07:00'), '%m/%d/%Y') AS registration_date,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', '-07:00'), '%T') AS registration_time,
                 q.id AS question_id,
