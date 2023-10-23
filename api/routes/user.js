@@ -1268,7 +1268,8 @@ router.get('/download-csv', verifyToken, async (req, res) => {
                 eth.name AS ethnicity,
                 u.other_ethnicity,
                 loc.organization AS location,
-                DATE_FORMAT(u.creation_date, '%m/%d/%Y %T') AS registration_date,
+                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', '-07:00'), '%m/%d/%Y') AS registration_date,
+                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', '-07:00'), '%T') AS registration_time,
                 q.id AS question_id,
                 at.id AS answer_type_id,
                 q.name AS question,
@@ -1303,7 +1304,7 @@ router.get('/download-csv', verifyToken, async (req, res) => {
         }
       }
 
-      /* iterar el array rows y agregar los campos username, email, firstname, lastname, date_of_birth, phone, zipcode, household_size, gender, ethnicity, other_ethnicity, location, registration_date
+      /* iterar el array rows y agregar los campos username, email, firstname, lastname, date_of_birth, phone, zipcode, household_size, gender, ethnicity, other_ethnicity, location, registration_date, registration_time
       y que cada pregunta sea una columna, si el question_id se repite entonces agregar el campo answer a la columna correspondiente agregando al final del campo texto separando el valor por coma, si no se repite entonces agregar el campo answer a la columna correspondiente y agregar el objeto a rows_filtered
       */
       var rows_filtered = [];
@@ -1324,6 +1325,7 @@ router.get('/download-csv', verifyToken, async (req, res) => {
           row_filtered["other_ethnicity"] = rows[i].other_ethnicity;
           row_filtered["location"] = rows[i].location;
           row_filtered["registration_date"] = rows[i].registration_date;
+          row_filtered["registration_time"] = rows[i].registration_time;
         }
         if (!row_filtered[rows[i].question_id]) {
 
@@ -1371,7 +1373,8 @@ router.get('/download-csv', verifyToken, async (req, res) => {
         { id: 'ethnicity', title: 'Ethnicity' },
         { id: 'other_ethnicity', title: 'Other ethnicity' },
         { id: 'location', title: 'Location' },
-        { id: 'registration_date', title: 'Registration date' }
+        { id: 'registration_date', title: 'Registration date' },
+        { id: 'registration_time', title: 'Registration time' }
       ];
 
       for (let i = 0; i < question_id_array.length; i++) {
@@ -1389,7 +1392,7 @@ router.get('/download-csv', verifyToken, async (req, res) => {
       csvData += csvStringifier.stringifyRecords(rows_filtered);
 
       res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
-      res.setHeader('Content-type', 'text/csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
     } catch (err) {
@@ -1418,7 +1421,8 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 dt.delivered_by,
                 u.id as created_by_id,
                 u.username as created_by_username,
-                DATE_FORMAT(dt.creation_date, '%m/%d/%Y %T') AS creation_date,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', '-07:00'), '%m/%d/%Y') AS creation_date,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', '-07:00'), '%T') AS creation_time,
                 product.id as product_id,
                 product.name as product,
                 pdt.quantity as quantity
@@ -1429,7 +1433,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         INNER JOIN user as u ON sl.user_id = u.id
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as product ON pdt.product_id = product.id
-        WHERE dt.creation_date >= ? AND dt.creation_date < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE CONVERT_TZ(dt.creation_date, '+00:00', '-07:00') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', '-07:00') < DATE_ADD(?, INTERVAL 1 DAY)
         ORDER BY dt.id`,
         [from_date, to_date]
       );
@@ -1444,6 +1448,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         { id: 'created_by_id', title: 'Created by ID' },
         { id: 'created_by_username', title: 'Created by username' },
         { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
         { id: 'product_id', title: 'Product ID' },
         { id: 'product', title: 'Product' },
         { id: 'quantity', title: 'Quantity' }
@@ -1458,7 +1463,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
       csvData += csvStringifier.stringifyRecords(rows);
 
       res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
-      res.setHeader('Content-type', 'text/csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
     } catch (err) {
@@ -1627,7 +1632,7 @@ router.get('/table/notification', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (message.id like '${buscar}' or message.user_id like '${buscar}' or user.username like '${buscar}' or message.name like '${buscar}' or DATE_FORMAT(message.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (message.id like '${buscar}' or message.user_id like '${buscar}' or user.username like '${buscar}' or message.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(message.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1638,7 +1643,7 @@ router.get('/table/notification', verifyToken, async (req, res) => {
       message.user_id,
       user.username as user_name,
       message.name as message,
-      DATE_FORMAT(message.creation_date, '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(message.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
       FROM message
       INNER JOIN user ON message.user_id = user.id
       ${queryBuscar}
@@ -1694,7 +1699,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `and (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or DATE_FORMAT(user.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `and (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1707,7 +1712,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
       user.firstname,
       user.lastname,
       role.name as role,
-      DATE_FORMAT(user.creation_date, '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
       FROM user
       INNER JOIN role ON user.role_id = role.id
       WHERE user.enabled = "Y" ${queryBuscar}
@@ -1763,7 +1768,7 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(donation_ticket.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1778,7 +1783,7 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
       DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') as date,
       donation_ticket.delivered_by,
       COUNT(DISTINCT product_donation_ticket.product_id) AS products,
-      DATE_FORMAT(donation_ticket.creation_date, '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(user.donation_ticket, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket
       INNER JOIN provider ON donation_ticket.provider_id = provider.id
       INNER JOIN location ON donation_ticket.location_id = location.id
@@ -1839,7 +1844,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(product.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1849,7 +1854,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
       product.id,
       product.name,
       product.value_usd,
-      DATE_FORMAT(product.creation_date, '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
       FROM product
       ${queryBuscar}
       ORDER BY ${queryOrderBy}
@@ -1903,7 +1908,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or location.partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or DATE_FORMAT(location.creation_date, '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or location.partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1916,7 +1921,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
       location.partner,
       location.address,
       location.enabled,
-      DATE_FORMAT(location.creation_date, '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
       FROM location
       ${queryBuscar}
       ORDER BY ${queryOrderBy}
@@ -1966,7 +1971,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 dt.delivered_by,
                 u.id as created_by_id,
                 u.username as created_by_username,
-                DATE_FORMAT(dt.creation_date, '%m/%d/%Y %T') AS creation_date,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') AS creation_date,
                 product.id as product_id,
                 product.name as product,
                 pdt.quantity as quantity
