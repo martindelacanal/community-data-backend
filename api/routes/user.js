@@ -658,7 +658,41 @@ router.get('/user/status', verifyToken, async (req, res) => {
         where user.id = ?',
         [cabecera.id]
       );
-      res.json(rows[0]);
+      if (rows.length > 0) {
+        if (rows[0].id === 3) { //verificar si no pasaron 8hs desde que se acualizo el status a 3 usando tabla delivery_log
+          const [rows2] = await mysqlConnection.promise().query(
+            'select * from delivery_log where user_id = ? and operation_id = 3 order by creation_date desc limit 1',
+            [cabecera.id]
+          );
+          if (rows2.length > 0) {
+            const fecha = new Date(rows2[0].creation_date);
+            const fechaActual = new Date();
+            const diff = fechaActual.getTime() - fecha.getTime();
+            const hours = Math.floor(diff / (1000 * 60 * 60));
+            // const minutes = Math.floor(diff / (1000 * 60));
+            if (hours >= 8) { // si pasaron 8hs, insertar en delivery_log con operation_id 4, actualizar status de user a 4 y su location_id a null
+              const [rows3] = await mysqlConnection.promise().query(
+                'insert into delivery_log(user_id, operation_id) values(?,?)',
+                [cabecera.id, 4]
+              );
+              const [rows4] = await mysqlConnection.promise().query(
+                'update user set user_status_id = 4, location_id = null where id = ?',
+                [cabecera.id]
+              );
+              res.json({ id: 4, name: 'Off boarded' });
+            } else {
+              res.json(rows[0]);
+            }
+          } else {
+            res.json(rows[0]);
+          }
+        } else {
+          res.json(rows[0]);
+        }
+      } else {
+        res.json({ id: null, name: null });
+      }
+    
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
