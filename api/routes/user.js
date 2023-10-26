@@ -1284,10 +1284,13 @@ router.put('/settings/password', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/download-csv', verifyToken, async (req, res) => {
+router.get('/metrics/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
+      const from_date = req.query.from_date || '1970-01-01';
+      const to_date = req.query.to_date || '2100-01-01';
+      console.log("download CSV ticket from_date: " + from_date + " to_date: " + to_date);
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.username,
@@ -1319,10 +1322,10 @@ router.get('/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
-        WHERE u.role_id = 5 AND q.enabled = 'Y'
+        WHERE u.role_id = 5 AND q.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', '-07:00') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', '-07:00') < DATE_ADD(?, INTERVAL 1 DAY)
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         order by u.id, q.id, a.id`,
-        [cabecera.client_id]
+        [from_date, to_date, cabecera.client_id]
       );
 
       // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
