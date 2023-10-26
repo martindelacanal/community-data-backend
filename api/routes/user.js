@@ -1783,7 +1783,7 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
       DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') as date,
       donation_ticket.delivered_by,
       COUNT(DISTINCT product_donation_ticket.product_id) AS products,
-      DATE_FORMAT(CONVERT_TZ(user.donation_ticket, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket
       INNER JOIN provider ON donation_ticket.provider_id = provider.id
       INNER JOIN location ON donation_ticket.location_id = location.id
