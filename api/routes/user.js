@@ -1440,6 +1440,71 @@ router.get('/metrics/download-csv', verifyToken, async (req, res) => {
 }
 );
 
+router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const from_date = req.query.from_date || '1970-01-01';
+      const to_date = req.query.to_date || '2100-01-01';
+      console.log("download CSV delivered from_date: " + from_date + " to_date: " + to_date);
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT db.id, 
+        db.delivering_user_id, 
+        u1.username as delivery_username, 
+        db.receiving_user_id, 
+        u2.username as beneficiary_username, 
+        u2.firstname as beneficiary_firstname, 
+        u2.lastname as beneficiary_lastname, 
+        db.location_id, 
+        l.community_city, 
+        db.approved, 
+        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', '-07:00'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', '-07:00'), '%T') AS creation_time
+        FROM delivery_beneficiary as db
+        INNER JOIN user as u1 ON db.delivering_user_id = u1.id
+        INNER JOIN user as u2 ON db.receiving_user_id = u2.id
+        INNER JOIN location as l ON db.location_id = l.id
+        WHERE CONVERT_TZ(db.creation_date, '+00:00', '-07:00') >= ? AND CONVERT_TZ(db.creation_date, '+00:00', '-07:00') < DATE_ADD(?, INTERVAL 1 DAY)
+        ORDER BY db.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'delivering_user_id', title: 'Delivering user ID' },
+        { id: 'delivery_username', title: 'Delivery username' },
+        { id: 'receiving_user_id', title: 'Receiving user ID' },
+        { id: 'beneficiary_username', title: 'Beneficiary username' },
+        { id: 'beneficiary_firstname', title: 'Beneficiary firstname' },
+        { id: 'beneficiary_lastname', title: 'Beneficiary lastname' },
+        { id: 'location_id', title: 'Location ID' },
+        { id: 'community_city', title: 'Community city' },
+        { id: 'approved', title: 'Approved' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -1765,6 +1830,81 @@ router.get('/table/user', verifyToken, async (req, res) => {
         FROM user
         INNER JOIN role ON user.role_id = role.id
         WHERE user.enabled = "Y" ${queryBuscar}
+      `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/delivered', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `WHERE (delivery_beneficiary.id like '${buscar}' or delivery_beneficiary.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or delivery_beneficiary.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or delivery_beneficiary.location_id like '${buscar}' or location.community_city like '${buscar}' or delivery_beneficiary.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `SELECT
+      delivery_beneficiary.id,
+      delivery_beneficiary.delivering_user_id,
+      user_delivery.username as delivery_username,
+      delivery_beneficiary.receiving_user_id,
+      user_beneficiary.username as beneficiary_username,
+      delivery_beneficiary.location_id,
+      location.community_city,
+      delivery_beneficiary.approved,
+      DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      FROM delivery_beneficiary
+      INNER JOIN user as user_delivery ON delivery_beneficiary.delivering_user_id = user_delivery.id
+      INNER JOIN user as user_beneficiary ON delivery_beneficiary.receiving_user_id = user_beneficiary.id
+      INNER JOIN location ON delivery_beneficiary.location_id = location.id
+      ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+        SELECT COUNT(DISTINCT delivery_beneficiary.id) as count
+        FROM delivery_beneficiary
+        INNER JOIN user as user_delivery ON delivery_beneficiary.delivering_user_id = user_delivery.id
+        INNER JOIN user as user_beneficiary ON delivery_beneficiary.receiving_user_id = user_beneficiary.id
+        INNER JOIN location ON delivery_beneficiary.location_id = location.id
+        ${queryBuscar}
       `);
 
         const numOfResults = countRows[0].count;
