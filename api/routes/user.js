@@ -1121,6 +1121,26 @@ router.get('/total-products-uploaded', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/total-delivered', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+            COUNT(db.id) AS total_delivered
+          FROM delivery_beneficiary as db
+          WHERE db.approved = 'Y' ${cabecera.role === 'client' ? 'and db.client_id = ?' : ''}`,
+      );
+      res.json(rows[0].total_delivered);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/map/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
