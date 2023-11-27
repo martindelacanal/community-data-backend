@@ -746,11 +746,49 @@ router.get('/userName/exists/search', async (req, res) => {
   }
 });
 
+router.get('/phone/exists/search', async (req, res) => {
+  const phone = req.query.phone || null;
+  try {
+    if (phone) {
+      const [rows] = await mysqlConnection.promise().query('select phone from user where phone = ?', [phone]);
+      if (rows.length > 0) {
+        res.json(true);
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.json(false);
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
 router.get('/email/exists/search', async (req, res) => {
   const email = req.query.email || null;
   try {
     if (email) {
       const [rows] = await mysqlConnection.promise().query('select email from user where email = ?', [email]);
+      if (rows.length > 0) {
+        res.json(true);
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.json(false);
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/donation_id/exists/search', async (req, res) => {
+  const donation_id = req.query.donation_id || null;
+  try {
+    if (donation_id) {
+      const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ?', [donation_id]);
       if (rows.length > 0) {
         res.json(true);
       } else {
