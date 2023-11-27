@@ -1574,7 +1574,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as product ON pdt.product_id = product.id
         WHERE CONVERT_TZ(dt.creation_date, '+00:00', '-07:00') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', '-07:00') < DATE_ADD(?, INTERVAL 1 DAY)
-        ORDER BY dt.id`,
+        ORDER BY dt.date`,
         [from_date, to_date]
       );
 
