@@ -1860,7 +1860,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `and (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1873,10 +1873,11 @@ router.get('/table/user', verifyToken, async (req, res) => {
       user.firstname,
       user.lastname,
       role.name as role,
+      user.enabled,
       DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
       FROM user
       INNER JOIN role ON user.role_id = role.id
-      WHERE user.enabled = "Y" ${queryBuscar}
+      ${queryBuscar}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
