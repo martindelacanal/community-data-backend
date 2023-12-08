@@ -997,6 +997,45 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+        const [rows] = await mysqlConnection.promise().query(
+          `select count(user.id) as total from user
+        where user.role_id = 5 and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`, 
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/total-beneficiaries-recurring-today', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      // beneficiarios que ya estaban registrados en una fecha distinta a la de hoy y que aparecieron en delivery_beneficiary en la fecha de hoy
+        const [rows] = await mysqlConnection.promise().query(
+          `select count(user.id) as total from user
+          inner join delivery_beneficiary on user.id = delivery_beneficiary.receiving_user_id
+          where user.role_id = 5 and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) and date(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
 /*
 para que el beneficiario (user.role = 5) sea considerado como beneficiario calificado debe cumplir con los siguientes requisitos:
 1. haber respondido todas las preguntas de la encuesta de su client_id que tengan el campo enabled = 'Y' (cruce de tablas user, user_question, question)
@@ -1363,8 +1402,8 @@ router.get('/metrics/download-csv', verifyToken, async (req, res) => {
                 eth.name AS ethnicity,
                 u.other_ethnicity,
                 loc.community_city AS location,
-                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', '-07:00'), '%m/%d/%Y') AS registration_date,
-                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', '-07:00'), '%T') AS registration_time,
+                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
+                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
                 q.id AS question_id,
                 at.id AS answer_type_id,
                 q.name AS question,
@@ -1380,7 +1419,7 @@ router.get('/metrics/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
-        WHERE u.role_id = 5 AND q.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', '-07:00') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', '-07:00') < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE u.role_id = 5 AND q.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         order by u.id, q.id, a.id`,
         [from_date, to_date, cabecera.client_id]
@@ -1517,13 +1556,13 @@ router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
         db.location_id, 
         l.community_city, 
         db.approved, 
-        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', '-07:00'), '%m/%d/%Y') AS creation_date,
-                        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', '-07:00'), '%T') AS creation_time
+        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time
         FROM delivery_beneficiary as db
         INNER JOIN user as u1 ON db.delivering_user_id = u1.id
         INNER JOIN user as u2 ON db.receiving_user_id = u2.id
         INNER JOIN location as l ON db.location_id = l.id
-        WHERE CONVERT_TZ(db.creation_date, '+00:00', '-07:00') >= ? AND CONVERT_TZ(db.creation_date, '+00:00', '-07:00') < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ORDER BY db.id`,
         [from_date, to_date]
       );
@@ -1581,8 +1620,8 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 dt.delivered_by,
                 u.id as created_by_id,
                 u.username as created_by_username,
-                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', '-07:00'), '%m/%d/%Y') AS creation_date,
-                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', '-07:00'), '%T') AS creation_time,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
                 product.id as product_id,
                 product.name as product,
                 pdt.quantity as quantity
@@ -1597,7 +1636,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ORDER BY dt.date, dt.id`,
         [from_date, to_date]
         );
-        // WHERE CONVERT_TZ(dt.creation_date, '+00:00', '-07:00') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', '-07:00') < DATE_ADD(?, INTERVAL 1 DAY)
+        // WHERE CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
 
       var headers_array = [
         { id: 'id', title: 'ID' },
@@ -1793,7 +1832,7 @@ router.get('/table/notification', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (message.id like '${buscar}' or message.user_id like '${buscar}' or user.username like '${buscar}' or message.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(message.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (message.id like '${buscar}' or message.user_id like '${buscar}' or user.username like '${buscar}' or message.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(message.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1804,7 +1843,7 @@ router.get('/table/notification', verifyToken, async (req, res) => {
       message.user_id,
       user.username as user_name,
       message.name as message,
-      DATE_FORMAT(CONVERT_TZ(message.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(message.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM message
       INNER JOIN user ON message.user_id = user.id
       ${queryBuscar}
@@ -1860,7 +1899,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1874,7 +1913,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
       user.lastname,
       role.name as role,
       user.enabled,
-      DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM user
       INNER JOIN role ON user.role_id = role.id
       ${queryBuscar}
@@ -1930,7 +1969,7 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (delivery_beneficiary.id like '${buscar}' or delivery_beneficiary.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or delivery_beneficiary.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or delivery_beneficiary.location_id like '${buscar}' or location.community_city like '${buscar}' or delivery_beneficiary.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (delivery_beneficiary.id like '${buscar}' or delivery_beneficiary.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or delivery_beneficiary.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or delivery_beneficiary.location_id like '${buscar}' or location.community_city like '${buscar}' or delivery_beneficiary.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -1945,7 +1984,7 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
       delivery_beneficiary.location_id,
       location.community_city,
       delivery_beneficiary.approved,
-      DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM delivery_beneficiary
       INNER JOIN user as user_delivery ON delivery_beneficiary.delivering_user_id = user_delivery.id
       INNER JOIN user as user_beneficiary ON delivery_beneficiary.receiving_user_id = user_beneficiary.id
@@ -2005,7 +2044,7 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -2020,7 +2059,7 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
       DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') as date,
       donation_ticket.delivered_by,
       COUNT(DISTINCT product_donation_ticket.product_id) AS products,
-      DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket
       INNER JOIN provider ON donation_ticket.provider_id = provider.id
       INNER JOIN location ON donation_ticket.location_id = location.id
@@ -2081,7 +2120,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -2091,7 +2130,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
       product.id,
       product.name,
       product.value_usd,
-      DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM product
       ${queryBuscar}
       ORDER BY ${queryOrderBy}
@@ -2145,7 +2184,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or location.partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or location.partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -2158,7 +2197,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
       location.partner,
       location.address,
       location.enabled,
-      DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') as creation_date
+      DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM location
       ${queryBuscar}
       ORDER BY ${queryOrderBy}
@@ -2208,7 +2247,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 dt.delivered_by,
                 u.id as created_by_id,
                 u.username as created_by_username,
-                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', '-07:00'), '%m/%d/%Y %T') AS creation_date,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
                 product.id as product_id,
                 product.name as product,
                 pdt.quantity as quantity
