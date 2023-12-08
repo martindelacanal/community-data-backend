@@ -1229,14 +1229,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Libras';
           }
           [rows] = await mysqlConnection.promise().query(
-            `SELECT
-              SUM(total_weight) AS value,
-              DATE_FORMAT(creation_date, '%Y-%m-%dT%TZ') AS name
-            FROM donation_ticket
-            ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
-            GROUP BY YEAR(creation_date), MONTH(creation_date)
-            ORDER BY creation_date`,
-            [cabecera.client_id]
+              `SELECT
+                SUM(total_weight) AS value,
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+              FROM donation_ticket
+              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
+              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
@@ -1246,14 +1246,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Beneficiarios';
           }
           [rows] = await mysqlConnection.promise().query(
-            `SELECT
-              COUNT(DISTINCT user.id) AS value,
-              DATE_FORMAT(creation_date, '%Y-%m-%dT%TZ') AS name
-            FROM user
-            WHERE user.role_id = 5 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
-            GROUP BY YEAR(creation_date), MONTH(creation_date)
-            ORDER BY creation_date`,
-            [cabecera.client_id]
+              `SELECT
+                COUNT(DISTINCT user.id) AS value,
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+              FROM user
+              WHERE user.role_id = 5 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
+              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
@@ -1263,14 +1263,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Repartidores';
           }
           [rows] = await mysqlConnection.promise().query(
-            `SELECT
-              COUNT(DISTINCT user.id) AS value,
-              DATE_FORMAT(creation_date, '%Y-%m-%dT%TZ') AS name
-            FROM user
-            WHERE user.role_id = 4 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
-            GROUP BY YEAR(creation_date), MONTH(creation_date)
-            ORDER BY creation_date`,
-            [cabecera.client_id]
+              `SELECT
+                COUNT(DISTINCT user.id) AS value,
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+              FROM user
+              WHERE user.role_id = 4 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
+              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
@@ -1280,14 +1280,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Operaciones';
           }
           [rows] = await mysqlConnection.promise().query(
-            `SELECT
-              COUNT(DISTINCT delivery_beneficiary.location_id) AS value,
-              DATE_FORMAT(creation_date, '%Y-%m-%dT%TZ') AS name
-            FROM delivery_beneficiary
-            ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
-            GROUP BY YEAR(creation_date), MONTH(creation_date)
-            ORDER BY creation_date`,
-            [cabecera.client_id]
+              `SELECT
+                COUNT(DISTINCT delivery_beneficiary.location_id) AS value,
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+              FROM delivery_beneficiary
+              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
+              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
