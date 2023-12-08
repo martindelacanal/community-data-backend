@@ -446,7 +446,7 @@ router.post('/new/user', verifyToken, async (req, res) => {
       const date_of_birth = formulario.date_of_birth || null;
       const gender_id = formulario.gender_id || null;
       const role_id = formulario.role_id || null;
-      
+
       // const newPassword = Math.random().toString(36).slice(-8);
       var newPassword = 'communitydata';
       if (password) {
@@ -692,7 +692,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
       } else {
         res.json({ id: null, name: null });
       }
-    
+
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
@@ -1001,12 +1001,12 @@ router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
-        const [rows] = await mysqlConnection.promise().query(
-          `select count(user.id) as total from user
-        where user.role_id = 5 and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`, 
-          [cabecera.client_id]
-        );
-        res.json(rows[0].total);
+      const [rows] = await mysqlConnection.promise().query(
+        `select count(user.id) as total from user
+        where user.role_id = 5 and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
+        [cabecera.client_id]
+      );
+      res.json(rows[0].total);
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
@@ -1021,13 +1021,13 @@ router.get('/total-beneficiaries-recurring-today', verifyToken, async (req, res)
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       // beneficiarios que ya estaban registrados en una fecha distinta a la de hoy y que aparecieron en delivery_beneficiary en la fecha de hoy
-        const [rows] = await mysqlConnection.promise().query(
-          `select count(user.id) as total from user
+      const [rows] = await mysqlConnection.promise().query(
+        `select count(user.id) as total from user
           inner join delivery_beneficiary on user.id = delivery_beneficiary.receiving_user_id
           where user.role_id = 5 and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) and date(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
-          [cabecera.client_id]
-        );
-        res.json(rows[0].total);
+        [cabecera.client_id]
+      );
+      res.json(rows[0].total);
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
@@ -1635,8 +1635,8 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         WHERE dt.date >= ? AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)
         ORDER BY dt.date, dt.id`,
         [from_date, to_date]
-        );
-        // WHERE CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+      );
+      // WHERE CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
 
       var headers_array = [
         { id: 'id', title: 'ID' },
@@ -2104,6 +2104,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   let buscar = req.query.search;
   let queryBuscar = '';
+  let queryBuscarCount = '';
 
   var page = req.query.page ? Number(req.query.page) : 1;
 
@@ -2117,34 +2118,40 @@ router.get('/table/product', verifyToken, async (req, res) => {
   var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
   var queryOrderBy = `${orderBy} ${orderType}`;
 
+
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or creation_date like '${buscar}')`;
+      queryBuscarCount = `AND (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
   if (cabecera.role === 'admin') {
     try {
-      const query = `SELECT
-      product.id,
-      product.name,
-      product.value_usd,
-      DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
-      FROM product
-      ${queryBuscar}
+      const query = `
+      SELECT * FROM (
+        SELECT
+          product.id,
+          product.name,
+          product.value_usd,
+          DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+          SUM(product_donation_ticket.quantity) as total_quantity
+        FROM product
+        LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
+        GROUP BY product.id
+      ) as subquery
+      WHERE 1=1 ${queryBuscar}
       ORDER BY ${queryOrderBy}
-      LIMIT ?, ?`
+      LIMIT ?, ?`;
 
-      const [rows] = await mysqlConnection.promise().query(
-        query
-        , [start, resultsPerPage]);
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
-        SELECT COUNT(*) as count
-        FROM product
-        ${queryBuscar}
-      `);
+          SELECT COUNT(*) as count
+          FROM product
+          WHERE 1=1 ${queryBuscarCount}
+        `);
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
