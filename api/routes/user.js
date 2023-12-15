@@ -1229,14 +1229,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Libras';
           }
           [rows] = await mysqlConnection.promise().query(
-              `SELECT
+            `SELECT
                 SUM(total_weight) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM donation_ticket
               ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-              [cabecera.client_id]
+            [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
@@ -1246,14 +1246,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Beneficiarios';
           }
           [rows] = await mysqlConnection.promise().query(
-              `SELECT
+            `SELECT
                 COUNT(DISTINCT user.id) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM user
               WHERE user.role_id = 5 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-              [cabecera.client_id]
+            [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
@@ -1263,14 +1263,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Repartidores';
           }
           [rows] = await mysqlConnection.promise().query(
-              `SELECT
+            `SELECT
                 COUNT(DISTINCT user.id) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM user
               WHERE user.role_id = 4 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-              [cabecera.client_id]
+            [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
@@ -1280,14 +1280,14 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             name = 'Operaciones';
           }
           [rows] = await mysqlConnection.promise().query(
-              `SELECT
+            `SELECT
                 COUNT(DISTINCT delivery_beneficiary.location_id) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM delivery_beneficiary
               ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-              [cabecera.client_id]
+            [cabecera.client_id]
           );
           isTabSelectedCorrect = true;
           break;
@@ -1580,6 +1580,203 @@ router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
         { id: 'approved', title: 'Approved' },
         { id: 'creation_date', title: 'Creation date' },
         { id: 'creation_time', title: 'Creation time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+/*
+Generar CSV con las siguientes columnas: locacion_id, community_city, fecha de reparticion,
+count_beneficiaries_creation_date: count de beneficiarios que se registraron ese dia en esa localidad y retiraron comida en esa localidad (con db.creation_date = u.creation_date), 
+count_beneficiaries_same_location: count beneficiarios que retiraron comida en esa fecha y localidad (tabla beneficiary_delivery) y ya han retirado en esa misma localidad y no en otra, 
+count_beneficiaries_same_and_other_location: count de beneficiarios que retiraron comida de esa fecha y localidad y han ido a esa localidad y a otra localidad, 
+count_beneficiaries_first_time: count de beneficiarios que retiraron comida de esa fecha y localidad y es la primera vez que van a esa localidad (anteriormente fueron a otras).
+count_beneficiaries_already_registered_first_time: count de beneficiarios que ya estaban registrados pero es la primera vez que van a una localidad, no fueron a otra localidad antes.
+tabla: delivery_beneficiary
+campos: receiving_user_id (beneficiary), location_id, creation_date
+tabla: location
+campos: id, community_city
+tabla: user
+campos: id, creation_date
+*/
+router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const from_date = req.query.from_date || '1970-01-01';
+      const to_date = req.query.to_date || '2100-01-01';
+      console.log("download CSV delivered beneficiary-summary from_date: " + from_date + " to_date: " + to_date);
+
+      // count_beneficiaries_creation_date
+      query1 = `SELECT loc.id as location_id,
+                        loc.community_city,
+                        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        SUM(IF(
+                          NOT EXISTS (
+                            SELECT 1
+                            FROM delivery_beneficiary db1
+                            WHERE db1.receiving_user_id = db.receiving_user_id
+                              AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                          ) AND DATE(db.creation_date) = DATE(u.creation_date), 1, 0)) AS count_beneficiaries_creation_date
+                  FROM delivery_beneficiary as db
+                      INNER JOIN location as loc ON db.location_id = loc.id
+                      INNER JOIN user as u ON db.receiving_user_id = u.id
+                  WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                      AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                  GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
+                  ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
+
+      //  count_beneficiaries_same_location
+      query2 = `SELECT loc.id as location_id,
+                      loc.community_city,
+                      DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                      SUM(IF(
+                        EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db1
+                          WHERE db1.receiving_user_id = db.receiving_user_id
+                            AND db1.location_id = db.location_id
+                            AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                        ) AND NOT EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db2
+                          WHERE db2.receiving_user_id = db.receiving_user_id
+                            AND db2.location_id != db.location_id
+                            AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                        ), 1, 0)) AS count_beneficiaries_same_location
+              FROM delivery_beneficiary as db
+                    INNER JOIN location as loc ON db.location_id = loc.id
+              WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                    AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+              GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
+              ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
+
+      // count_beneficiaries_same_and_other_location
+      query3 = `SELECT loc.id as location_id,
+                      loc.community_city,
+                      DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                      SUM(IF(EXISTS (
+                        SELECT 1
+                        FROM delivery_beneficiary db1
+                        WHERE db1.receiving_user_id = db.receiving_user_id
+                          AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                        GROUP BY db1.receiving_user_id
+                        HAVING COUNT(DISTINCT db1.location_id) > 1
+                      ), 1, 0)) AS count_beneficiaries_same_and_other_location
+              FROM delivery_beneficiary as db
+                  INNER JOIN location as loc ON db.location_id = loc.id
+              WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                  AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+              GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
+              ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
+
+      // count_beneficiaries_first_time
+      query4 = `SELECT loc.id as location_id,
+                      loc.community_city,
+                      DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                      SUM(IF(
+                        NOT EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db1
+                          WHERE db1.receiving_user_id = db.receiving_user_id
+                            AND db1.location_id = db.location_id
+                            AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                        ) AND EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db2
+                          WHERE db2.receiving_user_id = db.receiving_user_id
+                            AND db2.location_id != db.location_id
+                            AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                        ), 1, 0)) AS count_beneficiaries_first_time
+                FROM delivery_beneficiary as db
+                    INNER JOIN location as loc ON db.location_id = loc.id
+                WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                    AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
+                ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
+
+                // count_beneficiaries_already_registered_first_time
+                query5 = `SELECT loc.id as location_id,
+                                  loc.community_city,
+                                  DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                                  SUM(IF(
+                                    NOT EXISTS (
+                                      SELECT 1
+                                      FROM delivery_beneficiary db1
+                                      WHERE db1.receiving_user_id = db.receiving_user_id
+                                        AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                                    ) AND db.creation_date > u.creation_date, 1, 0)) AS count_beneficiaries_already_registered_first_time
+                            FROM delivery_beneficiary as db
+                                INNER JOIN location as loc ON db.location_id = loc.id
+                                INNER JOIN user as u ON db.receiving_user_id = u.id
+                            WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                                AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                            GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
+                            ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
+
+
+      const funcionesParalelas = [
+        mysqlConnection.promise().query(query1, [from_date, to_date]),
+        mysqlConnection.promise().query(query2, [from_date, to_date]),
+        mysqlConnection.promise().query(query3, [from_date, to_date]),
+        mysqlConnection.promise().query(query4, [from_date, to_date]),
+        mysqlConnection.promise().query(query5, [from_date, to_date])
+      ];
+
+      const [
+        [count_beneficiaries_creation_date],
+        [count_beneficiaries_same_location],
+        [count_beneficiaries_same_and_other_location],
+        [count_beneficiaries_first_time],
+        [count_beneficiaries_already_registered_first_time]
+      ] = await Promise.all(funcionesParalelas);
+
+      // unir los 5 arrays en uno solo con los campos location_id, community_city, creation_date, count_beneficiaries_creation_date, count_beneficiaries_same_location, count_beneficiaries_same_and_other_location, count_beneficiaries_first_time, donde location_id y creation_date son iguales
+      var rows = [];
+      for (let i = 0; i < count_beneficiaries_creation_date.length; i++) {
+        const row = count_beneficiaries_creation_date[i];
+        const row2 = count_beneficiaries_same_location[i];
+        const row3 = count_beneficiaries_same_and_other_location[i];
+        const row4 = count_beneficiaries_first_time[i];
+        const row5 = count_beneficiaries_already_registered_first_time[i];
+        rows.push({
+          location_id: row.location_id,
+          community_city: row.community_city,
+          creation_date: row.creation_date,
+          count_beneficiaries_creation_date: row.count_beneficiaries_creation_date,
+          count_beneficiaries_same_location: row2.count_beneficiaries_same_location,
+          count_beneficiaries_same_and_other_location: row3.count_beneficiaries_same_and_other_location,
+          count_beneficiaries_first_time: row4.count_beneficiaries_first_time,
+          count_beneficiaries_already_registered_first_time: row5.count_beneficiaries_already_registered_first_time
+        });
+      }
+
+      var headers_array = [
+        { id: 'location_id', title: 'Location ID' },
+        { id: 'community_city', title: 'Community city' },
+        { id: 'count_beneficiaries_creation_date', title: 'Beneficiaries who registered in that location' },
+        { id: 'count_beneficiaries_same_location', title: 'Beneficiaries who always go to the same location' },
+        { id: 'count_beneficiaries_same_and_other_location', title: 'Beneficiaries who have already gone to the location and have gone to others' },
+        { id: 'count_beneficiaries_first_time', title: 'Beneficiaries who are going for the first time but have already gone to another location' },
+        { id: 'count_beneficiaries_already_registered_first_time', title: 'Beneficiaries who are going for the first time and have not gone to another location' },
+        { id: 'creation_date', title: 'Date' },
       ];
 
       const csvStringifier = createCsvStringifier({
