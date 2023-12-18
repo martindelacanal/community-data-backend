@@ -1646,28 +1646,29 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
 
       //  count_beneficiaries_same_location
       query2 = `SELECT loc.id as location_id,
-                      loc.community_city,
-                      DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
-                      SUM(IF(
-                        EXISTS (
-                          SELECT 1
-                          FROM delivery_beneficiary db1
-                          WHERE db1.receiving_user_id = db.receiving_user_id
-                            AND db1.location_id = db.location_id
-                            AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
-                        ) AND NOT EXISTS (
-                          SELECT 1
-                          FROM delivery_beneficiary db2
-                          WHERE db2.receiving_user_id = db.receiving_user_id
-                            AND db2.location_id != db.location_id
-                            AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
-                        ), 1, 0)) AS count_beneficiaries_same_location
-              FROM delivery_beneficiary as db
-                    INNER JOIN location as loc ON db.location_id = loc.id
-              WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
-                    AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-              GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
-              ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
+                        loc.community_city,
+                        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        COUNT(DISTINCT IF(
+                          NOT EXISTS (
+                            SELECT 1
+                            FROM delivery_beneficiary db2
+                            WHERE db2.receiving_user_id = db.receiving_user_id
+                              AND db2.location_id != db.location_id
+                              AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                          ) AND EXISTS (
+                            SELECT 1
+                            FROM delivery_beneficiary db3
+                            WHERE db3.receiving_user_id = db.receiving_user_id
+                              AND db3.location_id = db.location_id
+                              AND CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                          ) AND DATE(db.creation_date) > DATE(u.creation_date), db.receiving_user_id, NULL)) AS count_beneficiaries_same_location
+                FROM delivery_beneficiary as db
+                      INNER JOIN location as loc ON db.location_id = loc.id
+                      INNER JOIN user as u ON db.receiving_user_id = u.id
+                WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                      AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
+                ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
       // count_beneficiaries_same_and_other_location
       query3 = `SELECT loc.id as location_id,
@@ -1715,23 +1716,24 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
 
       // count_beneficiaries_already_registered_first_time
       query5 = `SELECT loc.id as location_id,
-                loc.community_city,
-                DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
-                SUM(IF(
-                  NOT EXISTS (
-                    SELECT 1
-                    FROM delivery_beneficiary db1
-                    WHERE db1.receiving_user_id = db.receiving_user_id
-                      AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
-                  ) AND db.creation_date > u.creation_date, 1, 0)) AS count_beneficiaries_already_registered_first_time
-          FROM delivery_beneficiary as db
-              INNER JOIN location as loc ON db.location_id = loc.id
-              INNER JOIN user as u ON db.receiving_user_id = u.id
-          WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
-              AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-          GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
-          ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
+                      loc.community_city,
+                      DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                      SUM(IF(
+                        NOT EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db1
+                          WHERE db1.receiving_user_id = db.receiving_user_id
+                            AND CONVERT_TZ(db1.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                        ) AND DATE(db.creation_date) > DATE(u.creation_date), 1, 0)) AS count_beneficiaries_already_registered_first_time
+                FROM delivery_beneficiary as db
+                    INNER JOIN location as loc ON db.location_id = loc.id
+                    INNER JOIN user as u ON db.receiving_user_id = u.id
+                WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                    AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
+                ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
+          // total_beneficiaries
           query6 = `SELECT loc.id as location_id,
                     loc.community_city,
                     DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
@@ -1790,7 +1792,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
         { id: 'count_beneficiaries_same_location', title: 'Beneficiaries who always go to the same location' },
         { id: 'count_beneficiaries_same_and_other_location', title: 'Beneficiaries who have already gone to the location and have gone to others' },
         { id: 'count_beneficiaries_first_time', title: 'Beneficiaries who are going for the first time but have already gone to another location' },
-        { id: 'count_beneficiaries_already_registered_first_time', title: 'Beneficiaries who are going for the first time and have not gone to another location' },
+        { id: 'count_beneficiaries_already_registered_first_time', title: 'Beneficiaries who are going for the first time and have not gone to another location (already registered)' },
         { id: 'total_beneficiaries', title: 'Total beneficiaries' },
         { id: 'creation_date', title: 'Date' },
       ];
