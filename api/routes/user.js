@@ -1409,13 +1409,41 @@ router.put('/settings/password', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/metrics/download-csv', verifyToken, async (req, res) => {
+router.post('/metrics/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
-      const from_date = req.query.from_date || '1970-01-01';
-      const to_date = req.query.to_date || '2100-01-01';
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
       console.log("download CSV ticket from_date: " + from_date + " to_date: " + to_date);
+
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      
+      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+
+      var query_zipcode = '';
+      if (zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.username,
@@ -1448,6 +1476,11 @@ router.get('/metrics/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
         WHERE u.role_id = 5 AND q.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_age}
+        ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         order by u.id, q.id, a.id`,
         [from_date, to_date, cabecera.client_id]
@@ -1931,7 +1964,7 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
-      console.log("filters: " + JSON.stringify(filters));
+      
       const language = req.query.language || 'en';
 
       var query_locations = '';
@@ -1981,7 +2014,6 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
         order by q.id, a.id`,
         [from_date, to_date, cabecera.client_id]
       );
-        // console.log("rows: ", rows);
       // crear array de objetos pregunta, cada pregunta tiene un array de objetos respuesta, donde cada respuesta tiene un nombre y la suma de usuarios que la eligieron
       // iterar el array rows y agregar el campo question, ir sumando sus respuestas sobre esa question hasta que cambie de question_id, luego se pushea el objeto question al array questions
       // estructura:
@@ -2069,11 +2101,9 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
         }
       }
 
-      console.log("answerCounts: ", answerCounts);
 
       // Agregar las respuestas que no fueron elegidas
       for (const question of questions) {
-        console.log("question: ", question);
         if (possibleAnswers[question.question_id]) {
           for (const answer of possibleAnswers[question.question_id]) {
             // Verificar si answerCounts[question.question_id] existe y, si no, crearlo
@@ -2089,9 +2119,6 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
           }
         }
       }
-
-      console.log("answerCounts 2: ", answerCounts);
-      console.log("questions 2: ", questions);
 
       res.json(questions);
     } catch (err) {
