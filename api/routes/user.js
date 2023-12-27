@@ -108,6 +108,7 @@ router.post('/signup', async (req, res) => {
   const email = firstForm.email || null;
   const phone = firstForm.phone.toString() || null;
   const zipcode = firstForm.zipcode.toString() || null;
+  const location_id = firstForm.destination || null;
   const householdSize = firstForm.householdSize || null;
   const gender = firstForm.gender || null;
   const ethnicity = firstForm.ethnicity || null;
@@ -124,12 +125,13 @@ router.post('/signup', async (req, res) => {
                                                           date_of_birth, \
                                                           phone, \
                                                           zipcode, \
+                                                          location_id, \
                                                           household_size, \
                                                           gender_id, \
                                                           ethnicity_id, \
                                                           other_ethnicity) \
-                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, householdSize, gender, ethnicity, otherEthnicity]);
+                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, householdSize, gender, ethnicity, otherEthnicity]);
     if (rows.affectedRows > 0) {
       // save inserted user id
       const user_id = rows.insertId;
@@ -557,6 +559,20 @@ router.get('/locations', verifyToken, async (req, res) => {
   } else {
     res.status(401).json('Unauthorized');
   }
+});
+
+router.get('/register/locations', async (req, res) => {
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      'select id,organization,community_city,address from location where enabled = "Y" order by community_city'
+    );
+    res.json(rows);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+
 });
 
 router.get('/providers', verifyToken, async (req, res) => {
@@ -2483,7 +2499,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         WHERE dt.id = ?`,
         [idTicket]
       );
-      
+
       if (rows.length > 0) {
 
         // create object with ticket data and field 'products' with array of products
