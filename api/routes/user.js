@@ -1841,12 +1841,12 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 product.name as product,
                 pdt.quantity as quantity
         FROM donation_ticket as dt
-        INNER JOIN provider as p ON dt.provider_id = p.id
-        INNER JOIN location as loc ON dt.location_id = loc.id
-        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
-        INNER JOIN user as u ON sl.user_id = u.id
-        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-        INNER JOIN product as product ON pdt.product_id = product.id
+        LEFT JOIN provider as p ON dt.provider_id = p.id
+        LEFT JOIN location as loc ON dt.location_id = loc.id
+        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+        LEFT JOIN user as u ON sl.user_id = u.id
+        LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        LEFT JOIN product as product ON pdt.product_id = product.id
         WHERE dt.date >= ? AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)
         ORDER BY dt.date, dt.id`,
         [from_date, to_date]
