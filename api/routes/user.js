@@ -1733,8 +1733,8 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
                 GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
                 ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
-          // total_beneficiaries
-          query6 = `SELECT loc.id as location_id,
+      // total_beneficiaries
+      query6 = `SELECT loc.id as location_id,
                     loc.community_city,
                     DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
                     COUNT(DISTINCT db.receiving_user_id) AS total_beneficiaries
@@ -2476,34 +2476,39 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         FROM donation_ticket as dt
         INNER JOIN provider as p ON dt.provider_id = p.id
         INNER JOIN location as loc ON dt.location_id = loc.id
-        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
-        INNER JOIN user as u ON sl.user_id = u.id
-        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-        INNER JOIN product as product ON pdt.product_id = product.id
+        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+        LEFT JOIN user as u ON sl.user_id = u.id
+        LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        LEFT JOIN product as product ON pdt.product_id = product.id
         WHERE dt.id = ?`,
         [idTicket]
       );
+      
+      if (rows.length > 0) {
 
-      // create object with ticket data and field 'products' with array of products
-      var ticket = {};
-      var products = [];
-      ticket["id"] = rows[0].id;
-      ticket["donation_id"] = rows[0].donation_id;
-      ticket["total_weight"] = rows[0].total_weight;
-      ticket["provider"] = rows[0].provider;
-      ticket["location"] = rows[0].location;
-      ticket["date"] = rows[0].date;
-      ticket["delivered_by"] = rows[0].delivered_by;
-      ticket["created_by_id"] = rows[0].created_by_id;
-      ticket["created_by_username"] = rows[0].created_by_username;
-      ticket["creation_date"] = rows[0].creation_date;
+        // create object with ticket data and field 'products' with array of products
+        var ticket = {};
+        var products = [];
+        ticket["id"] = rows[0].id;
+        ticket["donation_id"] = rows[0].donation_id;
+        ticket["total_weight"] = rows[0].total_weight;
+        ticket["provider"] = rows[0].provider;
+        ticket["location"] = rows[0].location;
+        ticket["date"] = rows[0].date;
+        ticket["delivered_by"] = rows[0].delivered_by;
+        ticket["created_by_id"] = rows[0].created_by_id;
+        ticket["created_by_username"] = rows[0].created_by_username;
+        ticket["creation_date"] = rows[0].creation_date;
 
-      for (let i = 0; i < rows.length; i++) {
-        products.push({ product_id: rows[i].product_id, product: rows[i].product, quantity: rows[i].quantity });
+        for (let i = 0; i < rows.length; i++) {
+          products.push({ product_id: rows[i].product_id, product: rows[i].product, quantity: rows[i].quantity });
+        }
+        ticket["products"] = products;
+
+        res.json(ticket);
+      } else {
+        res.status(404).json('Ticket no encontrado');
       }
-      ticket["products"] = products;
-
-      res.json(ticket);
 
     } catch (err) {
       console.log(err);
@@ -2512,6 +2517,35 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   }
 }
 );
+
+router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const { idTicket } = req.params;
+
+  if (cabecera.role === 'admin') {
+
+    const [rows] = await mysqlConnection.promise().query(`select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
+                          from donation_ticket_image \
+                          where donation_ticket_id = ?`, [idTicket]);
+
+    if (rows.length > 0) {
+      for (let i = 0; i < rows.length; i++) {
+        getObjectParams = {
+          Bucket: bucketName,
+          Key: rows[i].file
+        };
+        command = new GetObjectCommand(getObjectParams);
+        url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+        rows[i].file = url;
+      }
+    }
+
+    res.json(rows);
+
+  } else {
+    res.status(401).json('No autorizado');
+  }
+})
 
 
 function verifyToken(req, res, next) {
