@@ -1446,7 +1446,9 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
       }
 
       const [rows] = await mysqlConnection.promise().query(
-        `SELECT u.username,
+        `SELECT 
+                u.id as user_id,
+                u.username,
                 u.email,
                 u.firstname,
                 u.lastname,
@@ -1458,6 +1460,7 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
                 eth.name AS ethnicity,
                 u.other_ethnicity,
                 loc.community_city AS location,
+                COUNT(db.receiving_user_id) AS delivery_count,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
                 q.id AS question_id,
@@ -1474,7 +1477,8 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN answer_type as at ON q.answer_type_id = at.id
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-        left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND q.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ${query_locations}
         ${query_genders}
@@ -1482,7 +1486,8 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
         ${query_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
-        order by u.id, q.id, a.id`,
+        GROUP BY u.id, q.id, a.id
+        ORDER BY u.id, q.id, a.id`,
         [from_date, to_date, cabecera.client_id]
       );
 
@@ -1507,6 +1512,7 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
       for (let i = 0; i < rows.length; i++) {
 
         if (!row_filtered["username"]) {
+          row_filtered["user_id"] = rows[i].user_id;
           row_filtered["username"] = rows[i].username;
           row_filtered["email"] = rows[i].email;
           row_filtered["firstname"] = rows[i].firstname;
@@ -1519,6 +1525,7 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
           row_filtered["ethnicity"] = rows[i].ethnicity;
           row_filtered["other_ethnicity"] = rows[i].other_ethnicity;
           row_filtered["location"] = rows[i].location;
+          row_filtered["delivery_count"] = rows[i].delivery_count;
           row_filtered["registration_date"] = rows[i].registration_date;
           row_filtered["registration_time"] = rows[i].registration_time;
         }
@@ -1556,6 +1563,7 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
       }
       // iterar el array headers y convertirlo en un array de objetos con id y title para csvWriter
       var headers_array = [
+        { id: 'user_id', title: 'User ID' },
         { id: 'username', title: 'Username' },
         { id: 'email', title: 'Email' },
         { id: 'firstname', title: 'Firstname' },
@@ -1568,6 +1576,7 @@ router.post('/metrics/download-csv', verifyToken, async (req, res) => {
         { id: 'ethnicity', title: 'Ethnicity' },
         { id: 'other_ethnicity', title: 'Other ethnicity' },
         { id: 'location', title: 'Location' },
+        { id: 'delivery_count', title: 'Delivery count' },
         { id: 'registration_date', title: 'Registration date' },
         { id: 'registration_time', title: 'Registration time' }
       ];
