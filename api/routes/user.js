@@ -2228,7 +2228,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `(user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -2245,7 +2245,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
       DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM user
       INNER JOIN role ON user.role_id = role.id
-      ${queryBuscar}
+      ${queryBuscar ? 'WHERE ' + queryBuscar : ''}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
@@ -2257,7 +2257,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
         SELECT COUNT(*) as count
         FROM user
         INNER JOIN role ON user.role_id = role.id
-        WHERE user.enabled = "Y" ${queryBuscar}
+        WHERE user.enabled = "Y" ${queryBuscar ? 'AND ' + queryBuscar : ''}
       `);
 
         const numOfResults = countRows[0].count;
