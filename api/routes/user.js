@@ -2101,6 +2101,7 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
           total: 0
         });
       }
+      console.log("possibleAnswers: ", possibleAnswers);
 
       // Contar cuántas veces se ha elegido cada respuesta
       const answerCounts = {};
@@ -2115,8 +2116,9 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
           answerCounts[row.question_id][row.answer_id]++;
         }
       }
+      console.log("answerCounts: ", answerCounts);
 
-
+      console.log("questions 1: ",  JSON.stringify(questions));
       // Agregar las respuestas que no fueron elegidas
       for (const question of questions) {
         if (possibleAnswers[question.question_id]) {
@@ -2130,10 +2132,18 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
               answerCounts[question.question_id][answer.answer_id] = 0;
             }
             answer.total = answerCounts[question.question_id][answer.answer_id];
-            question.answers.push(answer);
+
+            // Verificar si la respuesta ya está en la lista de respuestas de la pregunta
+            const answerExists = question.answers.some(a => a.answer_id === answer.answer_id);
+
+            // Solo agregar la respuesta si no está ya en la lista de respuestas de la pregunta
+            if (!answerExists) {
+              question.answers.push(answer);
+            }
           }
         }
       }
+      console.log("questions 2: ",  JSON.stringify(questions));
 
       res.json(questions);
     } catch (err) {
