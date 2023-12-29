@@ -1910,6 +1910,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
                 product.id as product_id,
                 product.name as product,
+                pt.name as product_type,
                 pdt.quantity as quantity
         FROM donation_ticket as dt
         LEFT JOIN provider as p ON dt.provider_id = p.id
@@ -1918,6 +1919,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
+        LEFT JOIN product_type as pt ON product.product_type_id = pt.id
         WHERE dt.date >= ? AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)
         ORDER BY dt.date, dt.id`,
         [from_date, to_date]
@@ -1939,6 +1941,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         { id: 'creation_time', title: 'Creation time' },
         { id: 'product_id', title: 'Product ID' },
         { id: 'product', title: 'Product' },
+        { id: 'product_type', title: 'Product type' },
         { id: 'quantity', title: 'Quantity' }
       ];
 
