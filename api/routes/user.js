@@ -1409,7 +1409,7 @@ router.put('/settings/password', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/metrics/download-csv', verifyToken, async (req, res) => {
+router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
@@ -1965,7 +1965,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
 }
 );
 
-router.post('/metrics/questions', verifyToken, async (req, res) => {
+router.post('/metrics/health/questions', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
@@ -2142,6 +2142,352 @@ router.post('/metrics/questions', verifyToken, async (req, res) => {
       }
 
       res.json(questions);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      
+      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+
+      var query_zipcode = '';
+      if (zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        ${language === 'en' ? 'g.name' : 'g.name_es'} AS name,
+        COUNT(*) AS total
+        FROM user u
+        INNER JOIN gender AS g ON u.gender_id = g.id
+        LEFT JOIN location AS loc ON u.location_id = loc.id
+        WHERE u.role_id = 5 AND u.enabled = 'Y' 
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_age}
+        ${query_zipcode}
+        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        GROUP BY g.name`,
+        [cabecera.client_id]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      
+      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+
+      var query_zipcode = '';
+      if (zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        ${language === 'en' ? 'e.name' : 'e.name_es'} AS name,
+        COUNT(*) AS total
+        FROM user u
+        INNER JOIN ethnicity AS e ON u.ethnicity_id = e.id
+        LEFT JOIN location AS loc ON u.location_id = loc.id
+        WHERE u.role_id = 5 AND u.enabled = 'Y' 
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_age}
+        ${query_zipcode}
+        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        GROUP BY e.name`,
+        [cabecera.client_id]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      
+      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+
+      var query_zipcode = '';
+      if (zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        u.household_size AS name,
+        COUNT(*) AS total
+        FROM user u
+        LEFT JOIN location AS loc ON u.location_id = loc.id
+        WHERE u.role_id = 5 AND u.enabled = 'Y' 
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_age}
+        ${query_zipcode}
+        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        GROUP BY u.household_size
+        ORDER BY u.household_size`,
+        [cabecera.client_id]
+      );
+
+      // Calcular el promedio
+      let sum = 0;
+      let count = 0;
+      for (const row of rows) {
+        sum += row.name * row.total;
+        count += row.total;
+      }
+      const average = Number((sum / count).toFixed(2));
+      
+      // Calcular la mediana
+      rows.sort((a, b) => a.name - b.name);
+      let median;
+      let accumulatedCount = 0;
+      for (const row of rows) {
+        accumulatedCount += row.total;
+        if (accumulatedCount >= count / 2) {
+          median = row.name;
+          break;
+        }
+      }
+      
+      // Convertir los números a cadenas
+      for (const row of rows) {
+        row.name = String(row.name);
+      }
+      res.json({average: average, median: median, data: rows});
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      
+      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+
+      var query_zipcode = '';
+      if (zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) AS name,
+        COUNT(*) AS total
+        FROM user u
+        LEFT JOIN location AS loc ON u.location_id = loc.id
+        WHERE u.role_id = 5 AND u.enabled = 'Y' 
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_age}
+        ${query_zipcode}
+        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        GROUP BY name
+        ORDER BY name`,
+        [cabecera.client_id]
+      );
+
+      // Calcular el promedio
+      let sum = 0;
+      let count = 0;
+      for (const row of rows) {
+        sum += row.name * row.total;
+        count += row.total;
+      }
+      const average = Number((sum / count).toFixed(2));
+
+      // Calcular la mediana
+      let median;
+      let accumulatedCount = 0;
+      for (const row of rows) {
+        accumulatedCount += row.total;
+        if (accumulatedCount >= count / 2) {
+          median = row.name;
+          break;
+        }
+      }
+
+      // Convertir los números a cadenas
+      for (const row of rows) {
+        row.name = String(row.name);
+      }
+
+      res.json({average: average, median: median, data: rows});
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
