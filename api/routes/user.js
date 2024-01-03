@@ -1425,6 +1425,14 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
 
       console.log("download CSV ticket from_date: " + from_date + " to_date: " + to_date);
 
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
       var query_locations = '';
       if (locations.length > 0) {
         query_locations = 'AND u.location_id IN (' + locations.join() + ')';
@@ -1437,11 +1445,16 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       if (ethnicities.length > 0) {
         query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
       }
-      
-      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
-
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
       var query_zipcode = '';
-      if (zipcode) {
+      if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
@@ -1479,11 +1492,14 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
         LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 AND q.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE u.role_id = 5 AND q.enabled = 'Y' 
+        ${query_from_date}
+        ${query_to_date}
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
-        ${query_age}
+        ${query_min_age}
+        ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         GROUP BY u.id, q.id, a.id
@@ -1982,6 +1998,14 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       
       const language = req.query.language || 'en';
 
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
       var query_locations = '';
       if (locations.length > 0) {
         query_locations = 'AND u.location_id IN (' + locations.join() + ')';
@@ -1994,11 +2018,16 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       if (ethnicities.length > 0) {
         query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
       }
-      
-      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
-
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
       var query_zipcode = '';
-      if (zipcode) {
+      if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
@@ -2019,15 +2048,17 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
         WHERE u.role_id = 5 AND q.enabled = 'Y' AND (q.answer_type_id = 3 or q.answer_type_id = 4) 
-        AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ${query_from_date}
+        ${query_to_date}
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
-        ${query_age}
+        ${query_min_age}
+        ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         order by q.id, a.id`,
-        [from_date, to_date, cabecera.client_id]
+        [cabecera.client_id]
       );
       // crear array de objetos pregunta, cada pregunta tiene un array de objetos respuesta, donde cada respuesta tiene un nombre y la suma de usuarios que la eligieron
       // iterar el array rows y agregar el campo question, ir sumando sus respuestas sobre esa question hasta que cambie de question_id, luego se pushea el objeto question al array questions
@@ -2168,11 +2199,11 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       const language = req.query.language || 'en';
 
       var query_from_date = '';
-      if (from_date) {
+      if (filters.from_date) {
         query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
       }
       var query_to_date = '';
-      if (to_date) {
+      if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
@@ -2187,11 +2218,16 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       if (ethnicities.length > 0) {
         query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
       }
-      
-      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
-
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
       var query_zipcode = '';
-      if (zipcode) {
+      if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
@@ -2208,7 +2244,8 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
-        ${query_age}
+        ${query_min_age}
+        ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         GROUP BY g.name`,
@@ -2242,11 +2279,11 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       const language = req.query.language || 'en';
 
       var query_from_date = '';
-      if (from_date) {
+      if (filters.from_date) {
         query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
       }
       var query_to_date = '';
-      if (to_date) {
+      if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
@@ -2261,11 +2298,16 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       if (ethnicities.length > 0) {
         query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
       }
-      
-      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
-
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
       var query_zipcode = '';
-      if (zipcode) {
+      if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
@@ -2282,13 +2324,14 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
-        ${query_age}
+        ${query_min_age}
+        ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         GROUP BY e.name`,
         [cabecera.client_id]
       );
-
+      
       res.json(rows);
     } catch (err) {
       console.log(err);
@@ -2316,11 +2359,11 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       const language = req.query.language || 'en';
 
       var query_from_date = '';
-      if (from_date) {
+      if (filters.from_date) {
         query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
       }
       var query_to_date = '';
-      if (to_date) {
+      if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
@@ -2335,11 +2378,16 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       if (ethnicities.length > 0) {
         query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
       }
-      
-      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
-
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
       var query_zipcode = '';
-      if (zipcode) {
+      if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
@@ -2355,7 +2403,8 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
-        ${query_age}
+        ${query_min_age}
+        ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         GROUP BY u.household_size
@@ -2415,11 +2464,11 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       const language = req.query.language || 'en';
 
       var query_from_date = '';
-      if (from_date) {
+      if (filters.from_date) {
         query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
       }
       var query_to_date = '';
-      if (to_date) {
+      if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
@@ -2434,11 +2483,16 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       if (ethnicities.length > 0) {
         query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
       }
-      
-      var query_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age + ' AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
-
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
       var query_zipcode = '';
-      if (zipcode) {
+      if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
@@ -2454,7 +2508,8 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
-        ${query_age}
+        ${query_min_age}
+        ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         GROUP BY name
