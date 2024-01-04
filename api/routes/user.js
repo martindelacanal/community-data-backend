@@ -488,45 +488,77 @@ router.post('/upload/beneficiaryQR/:locationId', verifyToken, async (req, res) =
         const receiving_user_id = req.body.id;
         const approved = req.body.approved;
         const location_id = parseInt(req.params.locationId) || null;
-        // buscar en tabla delivery_beneficiary si existe un registro con client_id, delivering_user_id, receiving_user_id y location_id en el dia de hoy y filtrar el más reciente
+        // buscar en tabla delivery_beneficiary si existe un registro con client_id, receiving_user_id en el dia de hoy y filtrar el más reciente
         const [rows] = await mysqlConnection.promise().query(
-          'select id, approved \
+          'select id, approved, delivering_user_id, location_id \
           from delivery_beneficiary \
-          where client_id = ? and delivering_user_id = ? and receiving_user_id = ? and location_id = ? and date(creation_date) = curdate() \
+          where client_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
           order by creation_date desc limit 1',
-          [client_id, delivering_user_id, receiving_user_id, location_id]
+          [client_id, receiving_user_id]
         );
-
-        if (rows.length > 0 && rows[0].approved === 'N') {
-          if (approved === 'Y') {
-            // actualizar el campo approved a 'Y'
-            const [rows2] = await mysqlConnection.promise().query(
-              'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
-            );
-            if (rows2.affectedRows > 0) {
-              res.json('Beneficiary approved successfully');
-            } else {
-              res.status(500).json('Could not approve beneficiary');
-            }
-          } else {
-            res.json({ could_approve: 'Y' });
-          }
-        } else {
+        // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
+        if (rows.length > 0 && rows[0].delivering_user_id === null) {
           // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
-          // actualizar location_id del user beneficiary
+          // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
           const [rows2] = await mysqlConnection.promise().query(
-            'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
+            'update delivery_beneficiary set delivering_user_id = ?, location_id = ? where id = ?', [delivering_user_id, location_id, rows[0].id]
           );
-          // insertar en tabla delivery_beneficiary
-          const [rows3] = await mysqlConnection.promise().query(
-            'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
-            [client_id, delivering_user_id, receiving_user_id, location_id]
-          );
-          if (rows3.affectedRows > 0) {
-            res.status(200).json({ could_approve: 'Y' });
+          // si las location_id son distintas, actualizar location_id del user beneficiary
+          if (rows[0].location_id !== location_id) {
+            const [rows3] = await mysqlConnection.promise().query(
+              'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
+            );
+            // crear 2 registros en beneficiary_log con operation_id 4 (off boarded) y 3 (on boarded) con el location_id anterior y el nuevo
+            const [rows4] = await mysqlConnection.promise().query(
+              'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
+              [receiving_user_id, 4, rows[0].location_id]
+            );
+            const [rows5] = await mysqlConnection.promise().query(
+              'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
+              [receiving_user_id, 3, location_id]
+            );
+          }
+          if (rows2.affectedRows > 0) {
+            return res.status(200).json({ could_approve: 'Y' });
           } else {
-            res.status(500).json('Could not create delivery_beneficiary');
+            return res.status(500).json('Could not update delivering_user_id');
+          }
+        } else {
+          // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
+          if (rows.length > 0 && rows[0].approved === 'N') {
+            if (approved === 'Y') {
+              // actualizar el campo approved a 'Y'
+              const [rows2] = await mysqlConnection.promise().query(
+                'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
+              );
+              if (rows2.affectedRows > 0) {
+                res.json('Beneficiary approved successfully');
+              } else {
+                res.status(500).json('Could not approve beneficiary');
+              }
+            } else {
+              res.json({ could_approve: 'Y' });
+            }
+          } else {
+            // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
+
+            // actualizar location_id del user beneficiary
+            const [rows2] = await mysqlConnection.promise().query(
+              'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
+            );
+
+            // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
+            const [rows3] = await mysqlConnection.promise().query(
+              'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
+              [client_id, delivering_user_id, receiving_user_id, location_id]
+            );
+            if (rows3.affectedRows > 0) {
+              return res.status(200).json({ could_approve: 'Y' });
+            } else {
+              return res.status(500).json('Could not create delivery_beneficiary');
+            }
+
           }
         }
       } catch (error) {
@@ -545,7 +577,7 @@ router.post('/upload/beneficiaryQR/:locationId', verifyToken, async (req, res) =
 
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker' || cabecera.role === 'delivery') {
+  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,organization,community_city,address from location where enabled = "Y" and client_id = ? order by community_city',
@@ -670,7 +702,44 @@ router.post('/onBoard', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'beneficiary') {
+      try {
+        const user_id = cabecera.id;
+        const { value } = req.body;
+        const user_status_id = value ? 3 : 4;
+        const location_id = req.body.location_id ? req.body.location_id : null;
+        console.log("value: ", value);
+        console.log("user_status_id: ", user_status_id);
+        console.log("location_id: ", location_id);
+        const [rows] = await mysqlConnection.promise().query(
+          'update user set user_status_id = ?, location_id = ? where id = ?',
+          [user_status_id, location_id, user_id]
+        );
+        // insertar en tabla beneficiary_log la operation
+        const [rows2] = await mysqlConnection.promise().query(
+          'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
+          [user_id, user_status_id, location_id]
+        );
+        // si operation es 3 crear registro en tabla delivery_beneficiary con client_id, receiving_user_id y location_id
+        if (user_status_id === 3) {
+          const [rows3] = await mysqlConnection.promise().query(
+            'insert into delivery_beneficiary(client_id, receiving_user_id, location_id) values(?,?,?)',
+            [cabecera.client_id, user_id, location_id]
+          );
+        }
+
+        if (rows.affectedRows > 0) {
+          res.json('Status updated successfully');
+        } else {
+          res.status(500).json('Could not update status');
+        }
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -680,7 +749,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
   if (cabecera.role === 'delivery') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select user_status.id, user_status.name \
+        'select user_status.id, user_status.name, user.location_id \
         from user \
         inner join user_status on user.user_status_id = user_status.id \
         where user.id = ?',
@@ -700,39 +769,89 @@ router.get('/user/status', verifyToken, async (req, res) => {
             // const minutes = Math.floor(diff / (1000 * 60));
             if (hours >= 8) { // si pasaron 8hs, insertar en delivery_log con operation_id 4, actualizar status de user a 4 y su location_id a null
               const [rows3] = await mysqlConnection.promise().query(
-                'insert into delivery_log(user_id, operation_id) values(?,?)',
-                [cabecera.id, 4]
+                'insert into delivery_log(user_id, operation_id, location_id) values(?,?,?)',
+                [cabecera.id, 4, rows[0].location_id]
               );
               const [rows4] = await mysqlConnection.promise().query(
                 'update user set user_status_id = 4, location_id = null where id = ?',
                 [cabecera.id]
               );
-              res.json({ id: 4, name: 'Off boarded' });
+              return res.json({ id: 4, name: 'Off boarded' });
             } else {
-              res.json(rows[0]);
+              return res.json(rows[0]);
             }
           } else {
-            res.json(rows[0]);
+            return res.json(rows[0]);
           }
         } else {
-          res.json(rows[0]);
+          return res.json(rows[0]);
         }
       } else {
-        res.json({ id: null, name: null });
+        return res.json({ id: null, name: null });
       }
 
     } catch (err) {
       console.log(err);
-      res.status(500).json('Internal server error');
+      return res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'beneficiary') {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          'select user_status.id, user_status.name, user.location_id \
+          from user \
+          inner join user_status on user.user_status_id = user_status.id \
+          where user.id = ?',
+          [cabecera.id]
+        );
+        if (rows.length > 0) {
+          if (rows[0].id === 3) { //verificar si no pasaron 8hs desde que se acualizo el status a 3 usando su ultimo registor en la tabla delivery_beneficiary
+            const [rows2] = await mysqlConnection.promise().query(
+              'select * from delivery_beneficiary where receiving_user_id = ? order by creation_date desc limit 1',
+              [cabecera.id]
+            );
+            if (rows2.length > 0) {
+              const fecha = new Date(rows2[0].creation_date);
+              const fechaActual = new Date();
+              const diff = fechaActual.getTime() - fecha.getTime();
+              const hours = Math.floor(diff / (1000 * 60 * 60));
+              // const minutes = Math.floor(diff / (1000 * 60));
+              if (hours >= 8) { // si pasaron 8hs, actualizar status de user a 4
+                const [rows3] = await mysqlConnection.promise().query(
+                  'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
+                  [cabecera.id, 4, rows[0].location_id]
+                );
+                const [rows4] = await mysqlConnection.promise().query(
+                  'update user set user_status_id = 4 where id = ?',
+                  [cabecera.id]
+                );
+                return res.json({ id: 4, name: 'Off boarded' });
+              } else {
+                return res.json(rows[0]);
+              }
+            } else {
+              return res.json(rows[0]);
+            }
+          } else {
+            return res.json(rows[0]);
+          }
+        } else {
+          return res.json({ id: null, name: null });
+        }
+      } catch (err) {
+        console.log(err);
+        return res.status(500).json('Internal server error');
+      }
+
+    } else {
+      return res.status(401).json('Unauthorized');
+    }
   }
 });
 
 router.get('/user/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'delivery') {
+  if (cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select location.id, location.organization, location.address \
@@ -1995,7 +2114,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
-      
+
       const language = req.query.language || 'en';
 
       var query_from_date = '';
@@ -2146,7 +2265,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
           answerCounts[row.question_id][row.answer_id]++;
         }
       }
-      
+
       // Agregar las respuestas que no fueron elegidas
       for (const question of questions) {
         if (possibleAnswers[question.question_id]) {
@@ -2195,7 +2314,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
-      
+
       const language = req.query.language || 'en';
 
       var query_from_date = '';
@@ -2275,7 +2394,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
-      
+
       const language = req.query.language || 'en';
 
       var query_from_date = '';
@@ -2331,7 +2450,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
         GROUP BY e.name`,
         [cabecera.client_id]
       );
-      
+
       res.json(rows);
     } catch (err) {
       console.log(err);
@@ -2355,7 +2474,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
-      
+
       const language = req.query.language || 'en';
 
       var query_from_date = '';
@@ -2420,7 +2539,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
         count += row.total;
       }
       const average = Number((sum / count).toFixed(2));
-      
+
       // Calcular la mediana
       rows.sort((a, b) => a.name - b.name);
       let median;
@@ -2432,12 +2551,12 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
           break;
         }
       }
-      
+
       // Convertir los números a cadenas
       for (const row of rows) {
         row.name = String(row.name);
       }
-      res.json({average: average, median: median, data: rows});
+      res.json({ average: average, median: median, data: rows });
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
@@ -2460,7 +2579,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
-      
+
       const language = req.query.language || 'en';
 
       var query_from_date = '';
@@ -2542,7 +2661,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
         row.name = String(row.name);
       }
 
-      res.json({average: average, median: median, data: rows});
+      res.json({ average: average, median: median, data: rows });
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
