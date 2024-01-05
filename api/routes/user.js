@@ -1999,7 +1999,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
       var headers_array = [
         { id: 'location_id', title: 'Location ID' },
         { id: 'community_city', title: 'Community city' },
-        { id: 'count_beneficiaries_creation_date', title: 'Beneficiaries who registered in that location' },
+        { id: 'count_beneficiaries_creation_date', title: 'Beneficiaries who registered in that location and scanned QR' },
         { id: 'count_beneficiaries_same_location', title: 'Beneficiaries who always go to the same location' },
         { id: 'count_beneficiaries_same_and_other_location', title: 'Beneficiaries who have already gone to the location and have gone to others' },
         { id: 'count_beneficiaries_first_time', title: 'Beneficiaries who are going for the first time but have already gone to another location' },
