@@ -1593,6 +1593,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
                 u.other_ethnicity,
                 loc.community_city AS location,
                 COUNT(db.receiving_user_id) AS delivery_count,
+                SUM(IF(db.receiving_user_id IS NOT NULL AND db.delivering_user_id IS NULL, 1, 0)) AS delivery_count_not_scanned,
+                SUM(IF(db.receiving_user_id IS NOT NULL AND db.delivering_user_id IS NOT NULL, 1, 0)) AS delivery_count_scanned,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
                 q.id AS question_id,
@@ -1661,6 +1663,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
           row_filtered["other_ethnicity"] = rows[i].other_ethnicity;
           row_filtered["location"] = rows[i].location;
           row_filtered["delivery_count"] = rows[i].delivery_count;
+          row_filtered["delivery_count_scanned"] = rows[i].delivery_count_scanned;
+          row_filtered["delivery_count_not_scanned"] = rows[i].delivery_count_not_scanned;
           row_filtered["registration_date"] = rows[i].registration_date;
           row_filtered["registration_time"] = rows[i].registration_time;
         }
@@ -1712,6 +1716,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         { id: 'other_ethnicity', title: 'Other ethnicity' },
         { id: 'location', title: 'Location' },
         { id: 'delivery_count', title: 'Delivery count' },
+        { id: 'delivery_count_scanned', title: 'Delivery count scanned' },
+        { id: 'delivery_count_not_scanned', title: 'Delivery count not scanned' },
         { id: 'registration_date', title: 'Registration date' },
         { id: 'registration_time', title: 'Registration time' }
       ];
