@@ -2681,6 +2681,259 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
 }
 );
 
+router.post('/metrics/participant/register', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      let params = [];
+      let clientCondition = '';
+
+      if (cabecera.role === 'client') {
+        clientCondition = 'and u2.client_id = ?';
+        params.push(cabecera.client_id);
+      }
+
+      params.push(from_date, to_date);
+
+      if (cabecera.role === 'client') {
+        params.push(cabecera.client_id);
+      }
+
+      params.push(from_date, to_date, from_date);
+
+      if (cabecera.role === 'client') {
+        params.push(cabecera.client_id);
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          (SELECT COUNT(*) FROM user u2 WHERE u2.role_id = 5 AND u2.enabled = 'Y' ${clientCondition}) AS total,
+          (SELECT COUNT(*) FROM user u3 WHERE u3.role_id = 5 AND u3.enabled = 'Y' AND CONVERT_TZ(u3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? ${clientCondition}) AS new,
+          (SELECT COUNT(DISTINCT db2.receiving_user_id) FROM delivery_beneficiary db2 INNER JOIN user u4 ON db2.receiving_user_id = u4.id WHERE CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? AND CONVERT_TZ(u4.creation_date, '+00:00', 'America/Los_Angeles') < ? ${clientCondition}) AS recurring
+        FROM user u
+        WHERE u.role_id = 5 AND u.enabled = 'Y' 
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        ${clientCondition}
+        LIMIT 1`,
+        params
+      );
+
+      res.json({ total: rows[0].total, new: rows[0].new, recurring: rows[0].recurring });
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/participant/email', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          IF(u.email IS NULL, ${language === 'en' ? "'No'" : "'No'"}, ${language === 'en' ? "'Yes'" : "'Si'"}) AS name,
+          COUNT(*) AS total
+          FROM user u
+          WHERE u.role_id = 5 AND u.enabled = 'Y' 
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_genders}
+          ${query_ethnicities}
+          ${query_min_age}
+          ${query_max_age}
+          ${query_zipcode}
+          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+          GROUP BY name`,
+        [cabecera.client_id]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          IF(u.phone IS NULL, ${language === 'en' ? "'No'" : "'No'"}, ${language === 'en' ? "'Yes'" : "'Si'"}) AS name,
+          COUNT(*) AS total
+          FROM user u
+          WHERE u.role_id = 5 AND u.enabled = 'Y' 
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_genders}
+          ${query_ethnicities}
+          ${query_min_age}
+          ${query_max_age}
+          ${query_zipcode}
+          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+          GROUP BY name`,
+        [cabecera.client_id]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 router.get('/table/notification', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   let buscar = req.query.search;
