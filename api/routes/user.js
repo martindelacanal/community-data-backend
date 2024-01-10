@@ -1595,6 +1595,9 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
                 COUNT(db.receiving_user_id) AS delivery_count,
                 SUM(IF(db.receiving_user_id IS NOT NULL AND db.delivering_user_id IS NULL, 1, 0)) AS delivery_count_not_scanned,
                 SUM(IF(db.receiving_user_id IS NOT NULL AND db.delivering_user_id IS NOT NULL, 1, 0)) AS delivery_count_scanned,
+                (SELECT COUNT(*) FROM delivery_beneficiary db2 
+                 WHERE db2.receiving_user_id = u.id 
+                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?) AS delivery_count_between_dates,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
                 q.id AS question_id,
@@ -1614,8 +1617,9 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
         LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND q.enabled = 'Y' 
-        ${query_from_date}
-        ${query_to_date}
+        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+             OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
+                          WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -1625,9 +1629,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         GROUP BY u.id, q.id, a.id
         ORDER BY u.id, q.id, a.id`,
-        [from_date, to_date, cabecera.client_id]
+        [from_date, to_date, from_date, to_date, from_date, to_date, cabecera.client_id]
       );
-
       // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
       var question_id_array = [];
       if (rows.length > 0) {
@@ -1665,6 +1668,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
           row_filtered["delivery_count"] = rows[i].delivery_count;
           row_filtered["delivery_count_scanned"] = rows[i].delivery_count_scanned;
           row_filtered["delivery_count_not_scanned"] = rows[i].delivery_count_not_scanned;
+          row_filtered["delivery_count_between_dates"] = rows[i].delivery_count_between_dates;
           row_filtered["registration_date"] = rows[i].registration_date;
           row_filtered["registration_time"] = rows[i].registration_time;
         }
@@ -1718,6 +1722,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         { id: 'delivery_count', title: 'Delivery count' },
         { id: 'delivery_count_scanned', title: 'Delivery count scanned' },
         { id: 'delivery_count_not_scanned', title: 'Delivery count not scanned' },
+        { id: 'delivery_count_between_dates', title: 'Delivery count between dates' },
         { id: 'registration_date', title: 'Registration date' },
         { id: 'registration_time', title: 'Registration time' }
       ];
