@@ -2753,23 +2753,17 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
-          (SELECT COUNT(*) FROM user u2 WHERE u2.role_id = 5 AND u2.enabled = 'Y' ${clientCondition}) AS total,
-          (SELECT COUNT(*) FROM user u3 WHERE u3.role_id = 5 AND u3.enabled = 'Y' AND CONVERT_TZ(u3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? ${clientCondition}) AS new,
-          (SELECT COUNT(DISTINCT db2.receiving_user_id) FROM delivery_beneficiary db2 INNER JOIN user u4 ON db2.receiving_user_id = u4.id WHERE CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? AND CONVERT_TZ(u4.creation_date, '+00:00', 'America/Los_Angeles') < ? ${clientCondition}) AS recurring
-        FROM user u
-        WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        ${query_locations}
-        ${query_genders}
-        ${query_ethnicities}
-        ${query_min_age}
-        ${query_max_age}
-        ${query_zipcode}
-        ${clientCondition}
+          (SELECT COUNT(*) FROM user u WHERE u.role_id = 5 AND u.enabled = 'Y' ${clientCondition}) AS total,
+          (SELECT COUNT(*) FROM user u WHERE u.role_id = 5 AND u.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? ${clientCondition} ${query_locations} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS new,
+          (SELECT COUNT(DISTINCT db.receiving_user_id) FROM delivery_beneficiary db INNER JOIN user u ON db.receiving_user_id = u.id WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? ${clientCondition} ${query_locations} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS recurring
         LIMIT 1`,
         params
       );
-
-      res.json({ total: rows[0].total, new: rows[0].new, recurring: rows[0].recurring });
+      if (rows[0]) {
+        res.json({ total: rows[0].total, new: rows[0].new, recurring: rows[0].recurring });
+      } else {
+        res.json({ total: 0, new: 0, recurring: 0 });
+      }
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
