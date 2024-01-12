@@ -1577,6 +1577,9 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
                 u.id as user_id,
@@ -1597,7 +1600,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
                 SUM(IF(db.receiving_user_id IS NOT NULL AND db.delivering_user_id IS NOT NULL, 1, 0)) AS delivery_count_scanned,
                 (SELECT COUNT(*) FROM delivery_beneficiary db2 
                  WHERE db2.receiving_user_id = u.id 
-                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?) AS delivery_count_between_dates,
+                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < ?) AS delivery_count_between_dates,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
                 q.id AS question_id,
@@ -1618,8 +1622,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND q.enabled = 'Y' 
         AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-             OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                          WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
+        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
+                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -1629,7 +1633,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
         GROUP BY u.id, q.id, a.id
         ORDER BY u.id, q.id, a.id`,
-        [from_date, to_date, from_date, to_date, from_date, to_date, cabecera.client_id]
+        [from_date, toDate, from_date, toDate, from_date, toDate, cabecera.client_id]
       );
       // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
       var question_id_array = [];
