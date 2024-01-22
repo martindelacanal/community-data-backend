@@ -621,7 +621,7 @@ router.get('/register/locations', async (req, res) => {
 
 router.get('/providers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name from provider order by name',
@@ -646,6 +646,26 @@ router.get('/products', verifyToken, async (req, res) => {
       res.json(rows);
     } catch (err) {
       console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/product_types', verifyToken, async (req, res) => {
+  const id = req.query.id || null;
+  const language = req.query.language || 'en';
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker') {
+    try {
+      const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
+                  FROM product_type ${id ? ' WHERE id = ?' : ''} ORDER BY name`;
+      const params = id ? [id] : [];
+      const [rows] = await mysqlConnection.promise().query(query, params);
+      res.json(rows);
+    } catch (error) {
+      console.log(error);
       res.status(500).json('Internal server error');
     }
   } else {
@@ -2924,6 +2944,245 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       );
 
       res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/product/reach', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
+      const product_types = filters.product_types || [];
+
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      var query_from_date_product = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        query_from_date_product = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      var query_to_date_product = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date_product = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      var query_locations_product = '';
+      if (locations.length > 0) {
+        query_locations = 'AND db.location_id IN (' + locations.join() + ')';
+        query_locations_product = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+      var query_providers = '';
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      }
+      var query_product_types = '';
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+      }
+
+      const [rows_reach] = await mysqlConnection.promise().query(
+        `SELECT 
+          SUM(u.household_size) AS reach
+          FROM delivery_beneficiary as db
+          INNER JOIN user as u ON db.receiving_user_id = u.id
+          WHERE u.role_id = 5 AND u.enabled = 'Y' 
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+          `,
+        [cabecera.client_id]
+      );
+
+      const [rows_poundsDelivered] = await mysqlConnection.promise().query(
+        `SELECT 
+          SUM(pdt.quantity) AS poundsDelivered
+          FROM donation_ticket as dt
+          INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          INNER JOIN product as p ON pdt.product_id = p.id
+          WHERE 1=1
+          ${query_from_date_product}
+          ${query_to_date_product}
+          ${query_locations_product}
+          ${query_providers}
+          ${query_product_types}
+          ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+          `,
+        [cabecera.client_id]
+      );
+
+      rows_reach_total = rows_reach[0] ? rows_reach[0].reach : 0;
+      rows_poundsDelivered_total = rows_poundsDelivered[0] ? rows_poundsDelivered[0].poundsDelivered : 0;
+
+      res.json({ reach: rows_reach_total, poundsDelivered: rows_poundsDelivered_total });
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
+      const product_types = filters.product_types || [];
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+      var query_providers = '';
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      }
+      var query_product_types = '';
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+      }
+
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS name,
+          SUM(pdt.quantity) AS total
+          FROM donation_ticket as dt
+          INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          INNER JOIN product as p ON pdt.product_id = p.id
+          INNER JOIN product_type as pt ON p.product_type_id = pt.id
+          WHERE 1=1
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
+          ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+          GROUP BY name`,
+        [cabecera.client_id]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
+      const product_types = filters.product_types || [];
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+      var query_providers = '';
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      }
+      var query_product_types = '';
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        l.community_city AS name,
+        SUM(pdt.quantity) AS total
+        FROM donation_ticket as dt
+        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        INNER JOIN location as l ON dt.location_id = l.id
+        WHERE 1=1
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_providers}
+        ${query_product_types}
+        ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+        GROUP BY name
+        ORDER BY name`,
+        [cabecera.client_id]
+      );
+      
+      // Si no hay datos, devolver un objeto vacío
+      if (rows.length === 0) {
+        res.json({ average: 0, median: 0, data: [] });
+        return;
+      }
+
+      // Calcular el promedio
+      let sum = 0;
+      let count = 0;
+      for (const row of rows) {
+        sum += row.total;
+        count++;
+      }
+      const average = Number((sum / count).toFixed(2));
+
+      // Calcular la mediana
+      let median;
+      let sortedRows = [...rows].sort((a, b) => a.total - b.total);
+      if (sortedRows.length % 2 === 0) {
+        median = (sortedRows[sortedRows.length / 2 - 1].total + sortedRows[sortedRows.length / 2].total) / 2;
+      } else {
+        median = sortedRows[Math.floor(sortedRows.length / 2)].total;
+      }
+
+      // Convertir los números a cadenas
+      for (const row of rows) {
+        row.name = String(row.name);
+      }
+
+      res.json({ average: average, median: median, data: rows });
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
