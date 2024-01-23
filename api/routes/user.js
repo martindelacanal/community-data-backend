@@ -3009,15 +3009,14 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
 
       const [rows_reach] = await mysqlConnection.promise().query(
         `SELECT 
-          SUM(u.household_size) AS reach
+          SUM(DISTINCT u.household_size) AS reach
           FROM delivery_beneficiary as db
           INNER JOIN user as u ON db.receiving_user_id = u.id
           WHERE u.role_id = 5 AND u.enabled = 'Y' 
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
-          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
-          `,
+          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}`,
         [cabecera.client_id]
       );
 
