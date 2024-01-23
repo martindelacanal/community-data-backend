@@ -3204,6 +3204,107 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
 }
 );
 
+router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      var page = req.query.page ? Number(req.query.page) : 1;
+      if (page < 1) {
+        page = 1;
+      }
+      var resultsPerPage = 10;
+      var start = (page - 1) * resultsPerPage;
+
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
+      const product_types = filters.product_types || [];
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+      var query_providers = '';
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      }
+      var query_product_types = '';
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        p.name AS name,
+        SUM(pdt.quantity) AS total
+        FROM donation_ticket as dt
+        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        INNER JOIN product as p ON pdt.product_id = p.id
+        WHERE 1=1
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_providers}
+        ${query_product_types}
+        ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+        GROUP BY name
+        ORDER BY total DESC`,
+        [cabecera.client_id]
+      );
+      
+      // Si no hay datos, devolver un objeto vacío
+      if (rows.length === 0) {
+        res.json({ average: 0, median: 0, totalItems: 0, page: page - 1, data: [] });
+        return;
+      }
+
+      // Calcular el promedio
+      let sum = 0;
+      let count = 0;
+      for (const row of rows) {
+        sum += row.total;
+        count++;
+      }
+      const average = Number((sum / count).toFixed(2));
+
+      // Calcular la mediana
+      let median;
+      let sortedRows = [...rows].sort((a, b) => a.total - b.total);
+      if (sortedRows.length % 2 === 0) {
+        median = (sortedRows[sortedRows.length / 2 - 1].total + sortedRows[sortedRows.length / 2].total) / 2;
+      } else {
+        median = sortedRows[Math.floor(sortedRows.length / 2)].total;
+      }
+
+      // Convertir los números a cadenas
+      for (const row of rows) {
+        row.name = String(row.name);
+      }
+
+      const totalItems = rows.length;
+      const data = rows.slice(start, start + resultsPerPage);
+
+      res.json({ average: average, median: median, totalItems: totalItems, page: page - 1, data: data });
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 router.get('/table/notification', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   let buscar = req.query.search;
