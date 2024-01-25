@@ -3595,6 +3595,8 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
 
 router.get('/table/product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
+  const language = req.query.language || 'en';
+
   let buscar = req.query.search;
   let queryBuscar = '';
   let queryBuscarCount = '';
@@ -3615,8 +3617,8 @@ router.get('/table/product', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or creation_date like '${buscar}')`;
-      queryBuscarCount = `AND (product.id like '${buscar}' or product.name like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or pt.name like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or creation_date like '${buscar}')`;
+      queryBuscarCount = `AND (product.id like '${buscar}' or product.name like '${buscar}' or product_type.name like '${buscar}' or product_type.name_es like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -3627,10 +3629,12 @@ router.get('/table/product', verifyToken, async (req, res) => {
         SELECT
           product.id,
           product.name,
+          ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS product_type,
           product.value_usd,
           DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
           SUM(product_donation_ticket.quantity) as total_quantity
         FROM product
+        INNER JOIN product_type as pt ON product.product_type_id = pt.id
         LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
         GROUP BY product.id
       ) as subquery
