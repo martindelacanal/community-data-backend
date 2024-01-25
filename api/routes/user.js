@@ -256,12 +256,12 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             [cabecera.id, 5, provider]
           );
         }
-        // iterar el array de objetos products (product,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
+        // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
         for (let i = 0; i < products.length; i++) {
           if (!Number.isInteger(products[i].product)) {
             const [rows] = await mysqlConnection.promise().query(
-              'insert into product(name) values(?)',
-              [products[i].product]
+              'insert into product(name,product_type_id) values(?,?)',
+              [products[i].product, products[i].product_type]
             );
             products[i].product = rows.insertId;
             // insertar en stocker_log la operation 5 (create), el product insertado y el id del usuario logueado
@@ -641,7 +641,7 @@ router.get('/products', verifyToken, async (req, res) => {
   if (cabecera.role === 'stocker') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select id,name from product order by name',
+        'select id,name,product_type_id from product order by name',
       );
       res.json(rows);
     } catch (err) {
