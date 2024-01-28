@@ -1444,11 +1444,11 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
         case 'operations':
           name = 'Operations';
           if (language === 'es') {
-            name = 'Operaciones';
+            name = 'Días de operación';
           }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
-                COUNT(DISTINCT delivery_beneficiary.location_id) AS value,
+                COUNT(DISTINCT DAY(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM delivery_beneficiary
               ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
