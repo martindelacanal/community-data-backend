@@ -1442,9 +1442,9 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           isTabSelectedCorrect = true;
           break;
         case 'beneficiaries':
-          name = 'Beneficiaries';
+          name = 'Beneficiaries registered';
           if (language === 'es') {
-            name = 'Beneficiarios';
+            name = 'Beneficiarios registrados';
           }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
