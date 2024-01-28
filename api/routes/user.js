@@ -1391,15 +1391,49 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
       var isTabSelectedCorrect = false;
       switch (tabSelected) {
         case 'pounds':
-          name = 'Pounds';
+          name = 'Pounds delivered';
           if (language === 'es') {
-            name = 'Libras';
+            name = 'Libras entregadas';
           }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
                 SUM(total_weight) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM donation_ticket
+              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
+              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+            [cabecera.client_id]
+          );
+          isTabSelectedCorrect = true;
+          break;
+        case 'locationsWorking':
+          name = 'Locations working';
+          if (language === 'es') {
+            name = 'Ubicaciones trabajando';
+          }
+          [rows] = await mysqlConnection.promise().query(
+            `SELECT
+                COUNT(DISTINCT DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), location_id) AS value,
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+              FROM delivery_beneficiary
+              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
+              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+            [cabecera.client_id]
+          );
+          isTabSelectedCorrect = true;
+          break;
+        case 'operations':
+          name = 'Days of operation';
+          if (language === 'es') {
+            name = 'Días de operación';
+          }
+          [rows] = await mysqlConnection.promise().query(
+            `SELECT
+                COUNT(DISTINCT DAY(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))) AS value,
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+              FROM delivery_beneficiary
               ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
@@ -1418,40 +1452,6 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM user
               WHERE user.role_id = 5 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
-              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-            [cabecera.client_id]
-          );
-          isTabSelectedCorrect = true;
-          break;
-        case 'deliveryPeople':
-          name = 'Delivery people';
-          if (language === 'es') {
-            name = 'Repartidores';
-          }
-          [rows] = await mysqlConnection.promise().query(
-            `SELECT
-                COUNT(DISTINCT user.id) AS value,
-                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
-              FROM user
-              WHERE user.role_id = 4 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
-              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-            [cabecera.client_id]
-          );
-          isTabSelectedCorrect = true;
-          break;
-        case 'operations':
-          name = 'Operations';
-          if (language === 'es') {
-            name = 'Días de operación';
-          }
-          [rows] = await mysqlConnection.promise().query(
-            `SELECT
-                COUNT(DISTINCT DAY(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))) AS value,
-                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
-              FROM delivery_beneficiary
-              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
             [cabecera.client_id]
@@ -3165,7 +3165,7 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         ORDER BY name`,
         [cabecera.client_id]
       );
-      
+
       // Si no hay datos, devolver un objeto vacío
       if (rows.length === 0) {
         res.json({ average: 0, median: 0, data: [] });
@@ -3263,7 +3263,7 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
         ORDER BY total DESC`,
         [cabecera.client_id]
       );
-      
+
       // Si no hay datos, devolver un objeto vacío
       if (rows.length === 0) {
         res.json({ average: 0, median: 0, totalItems: 0, page: page - 1, data: [] });
