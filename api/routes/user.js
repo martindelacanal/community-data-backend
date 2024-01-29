@@ -1244,6 +1244,27 @@ router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/total-clients', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+          COUNT(DISTINCT user.id) AS total_clients
+        FROM user
+        WHERE user.role_id = 2`,
+        [cabecera.client_id]
+      );
+      res.json(rows[0].total_clients);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/total-enabled-users', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
@@ -3374,8 +3395,10 @@ router.get('/table/notification', verifyToken, async (req, res) => {
 
 router.get('/table/user', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
+
   let buscar = req.query.search;
   let queryBuscar = '';
+  var queryTableRole = '';
 
   var page = req.query.page ? Number(req.query.page) : 1;
 
@@ -3392,7 +3415,25 @@ router.get('/table/user', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `(user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  var tableRole = req.query.tableRole;
+
+  if (tableRole) {
+    switch (tableRole) {
+      case 'all':
+        queryTableRole = 'AND (role.id != 2 AND role.id != 5)';
+        break;
+      case 'beneficiary':
+        queryTableRole = 'AND role.id = 5';
+        break;
+      case 'client':
+        queryTableRole = 'AND role.id = 2';
+        break;
+      default:
+        queryTableRole = '';
     }
   }
 
@@ -3409,7 +3450,9 @@ router.get('/table/user', verifyToken, async (req, res) => {
       DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM user
       INNER JOIN role ON user.role_id = role.id
-      ${queryBuscar ? 'WHERE ' + queryBuscar : ''}
+      WHERE 1=1 
+      ${queryBuscar}
+      ${queryTableRole}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
@@ -3421,7 +3464,9 @@ router.get('/table/user', verifyToken, async (req, res) => {
         SELECT COUNT(*) as count
         FROM user
         INNER JOIN role ON user.role_id = role.id
-        WHERE user.enabled = "Y" ${queryBuscar ? 'AND ' + queryBuscar : ''}
+        WHERE 1=1
+        ${queryBuscar}
+        ${queryTableRole}
       `);
 
         const numOfResults = countRows[0].count;
