@@ -3780,6 +3780,69 @@ router.get('/table/location', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idProduct } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT p.id,
+          p.name,
+          pt.name as product_type,
+          pdt.quantity,
+          p.value_usd,
+          DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          t.id as ticket_id,
+          t.donation_id as ticket_donation_id,
+          DATE_FORMAT(CONVERT_TZ(t.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS ticket_creation_date
+        FROM product as p
+        INNER JOIN product_type as pt ON p.product_type_id = pt.id
+        LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
+        LEFT JOIN donation_ticket as t ON pdt.donation_ticket_id = t.id
+        WHERE p.id = ?
+        ORDER BY t.donation_id DESC`,
+        [idProduct]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with product data and field 'tickets' with array of tickets
+        var product = {};
+        var tickets = [];
+        var total_quantity = 0;
+
+        product["id"] = rows[0].id;
+        product["name"] = rows[0].name;
+        product["product_type"] = rows[0].product_type;
+        product["value_usd"] = rows[0].value_usd;
+        product["creation_date"] = rows[0].creation_date;
+        product["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].ticket_id) {
+            total_quantity += rows[i].quantity;
+            tickets.push({ ticket_id: rows[i].ticket_id, donation_id: rows[i].ticket_donation_id, quantity: rows[i].quantity, creation_date: rows[i].ticket_creation_date });
+          }
+        }
+
+        product["total_quantity"] = total_quantity;
+        product["tickets"] = tickets;
+
+        res.json(product);
+      } else {
+        res.status(404).json('Product no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
