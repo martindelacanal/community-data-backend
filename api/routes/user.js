@@ -3788,46 +3788,41 @@ router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT db.id,
-          db.delivering_user_id,
-          u1.username as delivery_username, 
-        db.receiving_user_id, 
-        u2.username as beneficiary_username, 
-        db.location_id, 
-        l.community_city, 
-        db.approved, 
+            db.delivering_user_id,
+            user_delivery.username as delivery_username, 
+          db.receiving_user_id, 
+          user_beneficiary.username as beneficiary_username, 
+          db.location_id, 
+          l.community_city, 
+          db.approved, 
           DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
-        FROM product as p
-        INNER JOIN product_type as pt ON p.product_type_id = pt.id
-        LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
-        LEFT JOIN donation_ticket as t ON pdt.donation_ticket_id = t.id
-        WHERE p.id = ?
-        ORDER BY t.donation_id DESC`,
+          (SELECT JSON_ARRAYAGG(JSON_OBJECT('delivered_id', db2.id, 'delivery_username', u1.username, 'receiving_user_id', db2.receiving_user_id, 'community_city', l.community_city, 'approved', db2.approved, 'creation_date', DATE_FORMAT(CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T'))) 
+          FROM delivery_beneficiary as db2
+          LEFT JOIN user as u1 ON db2.delivering_user_id = u1.id
+          WHERE db2.receiving_user_id = db.receiving_user_id
+          ) as deliveries
+          FROM delivery_beneficiary as db
+          INNER JOIN location as l ON db.location_id = l.id
+          INNER JOIN user as user_beneficiary ON db.receiving_user_id = user_beneficiary.id
+          LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
+          WHERE db.id = ?`,
         [idDelivered]
       );
 
       if (rows.length > 0) {
-
-        // create object with delivered data and field 'tickets' with array of tickets
         var delivered = {};
-        var tickets = [];
-        var total_quantity = 0;
 
         delivered["id"] = rows[0].id;
-        delivered["name"] = rows[0].name;
-        delivered["delivered_type"] = rows[0].delivered_type;
-        delivered["value_usd"] = rows[0].value_usd;
+        delivered["delivering_user_id"] = rows[0].delivering_user_id;
+        delivered["delivery_username"] = rows[0].delivery_username;
+        delivered["receiving_user_id"] = rows[0].receiving_user_id;
+        delivered["beneficiary_username"] = rows[0].beneficiary_username;
+        delivered["location_id"] = rows[0].location_id;
+        delivered["community_city"] = rows[0].community_city;
+        delivered["approved"] = rows[0].approved;
         delivered["creation_date"] = rows[0].creation_date;
-        delivered["modification_date"] = rows[0].modification_date;
-
-        for (let i = 0; i < rows.length; i++) {
-          if (rows[i].ticket_id) {
-            total_quantity += rows[i].quantity;
-            tickets.push({ ticket_id: rows[i].ticket_id, donation_id: rows[i].ticket_donation_id, quantity: rows[i].quantity, creation_date: rows[i].ticket_creation_date });
-          }
-        }
-
-        delivered["total_quantity"] = total_quantity;
-        delivered["tickets"] = tickets;
+        delivered["deliveries"] = rows[0].deliveries;
+        delivered["deliveries"].sort((a, b) => new Date(b.creation_date) - new Date(a.creation_date));
 
         res.json(delivered);
       } else {
@@ -3838,6 +3833,8 @@ router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(401).json('No autorizado');
   }
 }
 );
@@ -3901,6 +3898,8 @@ router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(401).json('No autorizado');
   }
 }
 );
@@ -3966,6 +3965,8 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(401).json('No autorizado');
   }
 }
 );
