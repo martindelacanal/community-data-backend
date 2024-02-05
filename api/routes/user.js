@@ -1834,9 +1834,9 @@ router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
         DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
                         DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time
         FROM delivery_beneficiary as db
-        INNER JOIN user as u1 ON db.delivering_user_id = u1.id
-        INNER JOIN user as u2 ON db.receiving_user_id = u2.id
         INNER JOIN location as l ON db.location_id = l.id
+        INNER JOIN user as u2 ON db.receiving_user_id = u2.id
+        LEFT JOIN user as u1 ON db.delivering_user_id = u1.id
         WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ORDER BY db.id`,
         [from_date, to_date]
@@ -3779,6 +3779,68 @@ router.get('/table/location', verifyToken, async (req, res) => {
     res.status(401).json('No autorizado');
   }
 });
+
+router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idDelivered } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT db.id,
+          db.delivering_user_id,
+          u1.username as delivery_username, 
+        db.receiving_user_id, 
+        u2.username as beneficiary_username, 
+        db.location_id, 
+        l.community_city, 
+        db.approved, 
+          DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+        FROM product as p
+        INNER JOIN product_type as pt ON p.product_type_id = pt.id
+        LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
+        LEFT JOIN donation_ticket as t ON pdt.donation_ticket_id = t.id
+        WHERE p.id = ?
+        ORDER BY t.donation_id DESC`,
+        [idDelivered]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with delivered data and field 'tickets' with array of tickets
+        var delivered = {};
+        var tickets = [];
+        var total_quantity = 0;
+
+        delivered["id"] = rows[0].id;
+        delivered["name"] = rows[0].name;
+        delivered["delivered_type"] = rows[0].delivered_type;
+        delivered["value_usd"] = rows[0].value_usd;
+        delivered["creation_date"] = rows[0].creation_date;
+        delivered["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].ticket_id) {
+            total_quantity += rows[i].quantity;
+            tickets.push({ ticket_id: rows[i].ticket_id, donation_id: rows[i].ticket_donation_id, quantity: rows[i].quantity, creation_date: rows[i].ticket_creation_date });
+          }
+        }
+
+        delivered["total_quantity"] = total_quantity;
+        delivered["tickets"] = tickets;
+
+        res.json(delivered);
+      } else {
+        res.status(404).json('delivered no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
 
 router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
