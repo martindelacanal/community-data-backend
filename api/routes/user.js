@@ -3507,26 +3507,26 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (delivery_beneficiary.id like '${buscar}' or delivery_beneficiary.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or delivery_beneficiary.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or delivery_beneficiary.location_id like '${buscar}' or location.community_city like '${buscar}' or delivery_beneficiary.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `WHERE (db.id like '${buscar}' or db.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or db.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or db.location_id like '${buscar}' or location.community_city like '${buscar}' or db.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
   if (cabecera.role === 'admin') {
     try {
       const query = `SELECT
-      delivery_beneficiary.id,
-      delivery_beneficiary.delivering_user_id,
+      db.id,
+      db.delivering_user_id,
       user_delivery.username as delivery_username,
-      delivery_beneficiary.receiving_user_id,
+      db.receiving_user_id,
       user_beneficiary.username as beneficiary_username,
-      delivery_beneficiary.location_id,
+      db.location_id,
       location.community_city,
-      delivery_beneficiary.approved,
-      DATE_FORMAT(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
-      FROM delivery_beneficiary
-      INNER JOIN user as user_delivery ON delivery_beneficiary.delivering_user_id = user_delivery.id
-      INNER JOIN user as user_beneficiary ON delivery_beneficiary.receiving_user_id = user_beneficiary.id
-      INNER JOIN location ON delivery_beneficiary.location_id = location.id
+      db.approved,
+      DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+      FROM delivery_beneficiary as db
+      INNER JOIN location ON db.location_id = location.id
+      INNER JOIN user as user_beneficiary ON db.receiving_user_id = user_beneficiary.id
+      LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
       ${queryBuscar}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
@@ -3536,11 +3536,11 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
         , [start, resultsPerPage]);
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
-        SELECT COUNT(DISTINCT delivery_beneficiary.id) as count
-        FROM delivery_beneficiary
-        INNER JOIN user as user_delivery ON delivery_beneficiary.delivering_user_id = user_delivery.id
-        INNER JOIN user as user_beneficiary ON delivery_beneficiary.receiving_user_id = user_beneficiary.id
-        INNER JOIN location ON delivery_beneficiary.location_id = location.id
+        SELECT COUNT(DISTINCT db.id) as count
+        FROM delivery_beneficiary as db
+        INNER JOIN location ON db.location_id = location.id
+        INNER JOIN user as user_beneficiary ON db.receiving_user_id = user_beneficiary.id
+        LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
         ${queryBuscar}
       `);
 
