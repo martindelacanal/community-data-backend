@@ -3780,6 +3780,57 @@ router.get('/table/location', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/view/notification/:idNotification', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idNotification } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT m.id,
+            m.user_id,
+            u.username as user_name, 
+          u.email user_email,
+          m.name as message,
+          DATE_FORMAT(CONVERT_TZ(m.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          (SELECT JSON_ARRAYAGG(JSON_OBJECT('notification_id', m2.id, 'user_id', u2.id, 'message', m2.name, 'creation_date', DATE_FORMAT(CONVERT_TZ(m2.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T'))) 
+          FROM message as m2
+          INNER JOIN user as u2 ON m2.user_id = u2.id
+          WHERE m2.user_id = m.user_id
+          ) as notifications
+          FROM message as m
+          INNER JOIN user as u ON m.user_id = u.id
+          WHERE m.id = ?`,
+        [idNotification]
+      );
+
+      if (rows.length > 0) {
+        var notification = {};
+
+        notification["id"] = rows[0].id;
+        notification["user_id"] = rows[0].user_id;
+        notification["user_name"] = rows[0].user_name;
+        notification["user_email"] = rows[0].user_email;
+        notification["message"] = rows[0].message;
+        notification["creation_date"] = rows[0].creation_date;
+        notification["notifications"] = rows[0].notifications;
+        notification["notifications"].sort((a, b) => new Date(b.creation_date) - new Date(a.creation_date));
+
+        res.json(notification);
+      } else {
+        res.status(404).json('notification no encontrada');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
 router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
