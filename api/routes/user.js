@@ -1372,14 +1372,38 @@ router.get('/map/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT
-        ST_X(coordinates) as lng, ST_Y(coordinates) as lat, organization as label
+      let enabled = req.query.enabled ? req.query.enabled : null;
+      let ids = req.query.ids ? req.query.ids.split(',') : [];
+      console.log("ids: ", ids);
+      console.log("enabled: ", enabled);
+      let query = `SELECT
+        ST_X(coordinates) as lng, 
+        ST_Y(coordinates) as lat, 
+        organization as label
         FROM location
-        WHERE location.enabled = 'Y'
-        ${cabecera.role === 'client' ? 'AND location.client_id = ?' : ''}`,
-        [cabecera.client_id]
-      );
+        WHERE 1=1`;
+
+      let params = [];
+
+      if (cabecera.role === 'client') {
+        params.push(cabecera.client_id);
+        query += 'AND location.client_id = ?';
+      }
+      if (enabled) {
+        params.push(enabled);
+        query += ' AND location.enabled = ?'; 
+      }
+      if (ids.length > 0) {
+        query += ' AND location.id IN (?)';
+        for(let i = 0; i < ids.length; i++) {
+          ids[i] = parseInt(ids[i]);
+          params.push(ids[i]);
+        }
+      }
+
+      const [rows] = await mysqlConnection.promise().query(query, params);
+
+      console.log(rows);
       const locations = rows.map(row => ({
         position: { lat: row.lat, lng: row.lng },
         label: row.label
@@ -3779,6 +3803,53 @@ router.get('/table/location', verifyToken, async (req, res) => {
     res.status(401).json('No autorizado');
   }
 });
+
+router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idLocation } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT l.id,
+            l.organization,
+            l.community_city,
+            l.partner,
+            l.address,
+            l.enabled,
+            CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates, 
+            DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
+          FROM location as l
+          WHERE l.id = ?`,
+        [idLocation]
+      );
+
+      if (rows.length > 0) {
+        var location = {};
+
+        location["id"] = rows[0].id;
+        location["organization"] = rows[0].organization;
+        location["community_city"] = rows[0].community_city;
+        location["partner"] = rows[0].partner;
+        location["address"] = rows[0].address;
+        location["enabled"] = rows[0].enabled;
+        location["coordinates"] = rows[0].coordinates; // coordenadas: latitud, longitud como google maps
+        location["creation_date"] = rows[0].creation_date;
+
+        res.json(location);
+      } else {
+        res.status(404).json('location no encontrada');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
 
 router.get('/view/notification/:idNotification', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
