@@ -1394,7 +1394,8 @@ router.get('/map/locations', verifyToken, async (req, res) => {
         query += ' AND location.enabled = ?'; 
       }
       if (ids.length > 0) {
-        query += ' AND location.id IN (?)';
+        let placeholders = new Array(ids.length).fill('?').join(',');
+        query += ` AND location.id IN (${placeholders})`;
         for(let i = 0; i < ids.length; i++) {
           ids[i] = parseInt(ids[i]);
           params.push(ids[i]);
@@ -1402,8 +1403,6 @@ router.get('/map/locations', verifyToken, async (req, res) => {
       }
 
       const [rows] = await mysqlConnection.promise().query(query, params);
-
-      console.log(rows);
       const locations = rows.map(row => ({
         position: { lat: row.lat, lng: row.lng },
         label: row.label
@@ -2816,19 +2815,21 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
 
       let params = [];
       let clientCondition = '';
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final para que la comparación sea menor que la fecha final
 
       if (cabecera.role === 'client') {
         clientCondition = 'and u2.client_id = ?';
         params.push(cabecera.client_id);
       }
 
-      params.push(from_date, to_date);
+      params.push(from_date, toDate);
 
       if (cabecera.role === 'client') {
         params.push(cabecera.client_id);
       }
 
-      params.push(from_date, to_date, from_date);
+      params.push(from_date, toDate, from_date);
 
       if (cabecera.role === 'client') {
         params.push(cabecera.client_id);
