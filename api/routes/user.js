@@ -1374,8 +1374,6 @@ router.get('/map/locations', verifyToken, async (req, res) => {
     try {
       let enabled = req.query.enabled ? req.query.enabled : null;
       let ids = req.query.ids ? req.query.ids.split(',') : [];
-      console.log("ids: ", ids);
-      console.log("enabled: ", enabled);
       let query = `SELECT
         ST_X(coordinates) as lng, 
         ST_Y(coordinates) as lat, 
@@ -1391,12 +1389,12 @@ router.get('/map/locations', verifyToken, async (req, res) => {
       }
       if (enabled) {
         params.push(enabled);
-        query += ' AND location.enabled = ?'; 
+        query += ' AND location.enabled = ?';
       }
       if (ids.length > 0) {
         let placeholders = new Array(ids.length).fill('?').join(',');
         query += ` AND location.id IN (${placeholders})`;
-        for(let i = 0; i < ids.length; i++) {
+        for (let i = 0; i < ids.length; i++) {
           ids[i] = parseInt(ids[i]);
           params.push(ids[i]);
         }
@@ -3804,6 +3802,239 @@ router.get('/table/location', verifyToken, async (req, res) => {
     res.status(401).json('No autorizado');
   }
 });
+
+router.get('/view/user/:idUser', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idUser } = req.params;
+      const language = req.query.language || 'en';
+
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+            u.id,
+            u.username,
+            u.email,
+            u.firstname,
+            u.lastname,
+            c.name as client_name,
+            DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
+            l.community_city as last_location_community_city,
+            r.name as role_name,
+            u.reset_password,
+            u.enabled,
+            DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+            DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+            ${language === 'en' ? 'e.name' : 'e.name_es'} as ethnicity_name,
+            u.other_ethnicity,
+            ${language === 'en' ? 'g.name' : 'g.name_es'} as gender_name,
+            u.phone,
+            u.zipcode,
+            u.household_size
+          FROM user as u
+          INNER JOIN role as r ON u.role_id = r.id
+          LEFT JOIN client as c ON u.client_id = c.id
+          LEFT JOIN location as l ON u.location_id = l.id
+          LEFT JOIN ethnicity as e ON u.ethnicity_id = e.id
+          LEFT JOIN gender as g ON u.gender_id = g.id
+          WHERE u.id = ?`,
+        [idUser]
+      );
+
+      if (rows.length > 0) {
+        var user = {};
+
+        user["id"] = rows[0].id;
+        user["username"] = rows[0].username;
+        user["firstname"] = rows[0].firstname;
+        user["lastname"] = rows[0].lastname;
+        user["client_name"] = rows[0].client_name;
+        user["date_of_birth"] = rows[0].date_of_birth;
+        user["last_location_community_city"] = rows[0].last_location_community_city;
+        user["role_name"] = rows[0].role_name;
+        user["reset_password"] = rows[0].reset_password;
+        user["enabled"] = rows[0].enabled;
+        user["modification_date"] = rows[0].modification_date;
+        user["creation_date"] = rows[0].creation_date;
+        user["role_name"] = rows[0].role_name;
+        user["ethnicity_name"] = rows[0].ethnicity_name;
+        user["other_ethnicity"] = rows[0].other_ethnicity;
+        user["gender_name"] = rows[0].gender_name;
+        user["phone"] = rows[0].phone;
+        user["zipcode"] = rows[0].zipcode;
+        user["household_size"] = rows[0].household_size;
+
+        switch (user["role_name"]) {
+
+          case 'beneficiary':
+            if (language === 'en') {
+              user["table_header"] = ['ID', 'Question', 'Answer', 'Creation date'];
+            } else {
+              user["table_header"] = ['ID', 'Pregunta', 'Respuesta', 'Fecha de creación'];
+            }
+
+            user["table_rows"] = [[]];
+
+            const [table_rows_beneficiary] = await mysqlConnection.promise().query(
+              `SELECT 
+                      q.id AS question_id,
+                      at.id AS answer_type_id,
+                      ${language === 'en' ? 'q.name' : 'q.name_es'} as question,
+                      ${language === 'en' ? 'a.name' : 'a.name_es'} as answer,
+                      uq.answer_text AS answer_text,
+                      uq.answer_number AS answer_number,
+                      DATE_FORMAT(CONVERT_TZ(uq.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') as creation_date
+              FROM user u
+              CROSS JOIN question AS q
+              LEFT JOIN answer_type as at ON q.answer_type_id = at.id
+              LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
+              LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+              LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+              WHERE u.role_id = 5 AND u.id = ?
+              GROUP BY q.id, a.id
+              ORDER BY q.id, a.id`,
+              [idUser]
+            );
+
+            let result = [];
+            let map = {};
+
+            // Agrupar las respuestas por pregunta
+            table_rows_beneficiary.forEach(row => {
+              if (!map[row.question_id]) {
+                map[row.question_id] = {
+                  question_id: row.question_id,
+                  question: row.question,
+                  answers: [],
+                  creation_date: row.creation_date
+                };
+                result.push(map[row.question_id]);
+              }
+
+              let answer;
+              switch (row.answer_type_id) {
+                case 1:
+                  answer = row.answer_text;
+                  break;
+                case 2:
+                  answer = row.answer_number;
+                  break;
+                case 3:
+                  answer = row.answer;
+                  break;
+                case 4:
+                  answer = row.answer;
+                  break;
+              }
+
+              if (row.answer_type_id === 4 && map[row.question_id].answers.length > 0) {
+                map[row.question_id].answers[map[row.question_id].answers.length - 1] += ', ' + answer;
+              } else {
+                map[row.question_id].answers.push(answer);
+              }
+            });
+
+            // Convertir las respuestas a cadenas
+            result.forEach(item => {
+              item.answers = item.answers.join(', ');
+            });
+
+            user["table_rows"] = result.map(row => {
+              return [
+                row.question_id,
+                row.question,
+                row.answers,
+                row.creation_date
+              ];
+            });
+
+            break;
+
+          case 'delivery':
+            if (language === 'en') {
+              user["table_header"] = ['ID', 'Beneficiary user ID', 'Username', 'Location', 'Creation date', 'View delivered'];
+            } else {
+              user["table_header"] = ['ID', 'ID de beneficiario', 'Nombre de usuario', 'Ubicación', 'Fecha de creación', 'Ver entrega'];
+            }
+            user["table_rows"] = [[]];
+            const [table_rows_delivery] = await mysqlConnection.promise().query(
+              `SELECT
+                db.id,
+                db.receiving_user_id,
+                user.username as username,
+                location.community_city as location,
+                DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+              FROM delivery_beneficiary as db
+              INNER JOIN user ON db.receiving_user_id = user.id
+              INNER JOIN location ON db.location_id = location.id
+              WHERE db.delivering_user_id = ?`,
+              [idUser]
+            );
+            user["table_rows"] = table_rows_delivery.map(row => {
+              return [
+                row.id,
+                row.receiving_user_id,
+                row.username,
+                row.location,
+                row.creation_date
+              ];
+            });
+            break;
+
+          case 'stocker':
+            if (language === 'en') {
+              user["table_header"] = ['ID', 'Donation ID', 'Provider', 'Location', 'Date', 'Creation date', 'View ticket'];
+            } else {
+              user["table_header"] = ['ID', 'ID de donación', 'Proveedor', 'Ubicación', 'Fecha', 'Fecha de creación', 'Ver ticket'];
+            }
+            user["table_rows"] = [[]];
+            const [table_rows_stocker] = await mysqlConnection.promise().query(
+              `SELECT
+                dt.id,
+                dt.donation_id,
+                provider.name as provider,
+                location.community_city as location,
+                DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+              FROM donation_ticket as dt
+              INNER JOIN provider ON dt.provider_id = provider.id
+              INNER JOIN location ON dt.location_id = location.id
+              INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+              WHERE sl.user_id = ?`,
+              [idUser]
+            );
+            user["table_rows"] = table_rows_stocker.map(row => {
+              return [
+                row.id,
+                row.donation_id,
+                row.provider,
+                row.location,
+                row.date,
+                row.creation_date
+              ];
+            });
+            break;
+
+          default:
+            user["table_header"] = [];
+            user["table_rows"] = [[]];
+        }
+
+        res.json(user);
+      } else {
+        res.status(404).json('user no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
 
 router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
