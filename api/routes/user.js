@@ -433,6 +433,40 @@ router.delete('/user/reset-password/:idUser', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/new/user/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        username,
+        firstname,
+        lastname,
+        email,
+        date_of_birth,
+        gender_id, 
+        role_id, 
+        client_id, 
+        phone
+        from user u
+        where u.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('User not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.post('/new/user', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -448,6 +482,8 @@ router.post('/new/user', verifyToken, async (req, res) => {
       const date_of_birth = formulario.date_of_birth || null;
       const gender_id = formulario.gender_id || null;
       const role_id = formulario.role_id || null;
+      const phone = formulario.phone || null;
+      const client_id = formulario.client_id || null;
 
       // const newPassword = Math.random().toString(36).slice(-8);
       var newPassword = 'communitydata';
@@ -457,8 +493,8 @@ router.post('/new/user', verifyToken, async (req, res) => {
       let passwordHash = await bcryptjs.hash(newPassword, 8);
       var reset_password = "Y";
       const [rows2] = await mysqlConnection.promise().query(
-        'insert into user (username, email, firstname, lastname, date_of_birth, password, reset_password, gender_id, role_id) values(?,?,?,?,?,?,?,?,?)',
-        [username, email, firstname, lastname, date_of_birth, passwordHash, reset_password, gender_id, role_id]
+        'insert into user (username, email, firstname, lastname, date_of_birth, password, reset_password, gender_id, role_id, client_id, phone) values(?,?,?,?,?,?,?,?,?,?,?)',
+        [username, email, firstname, lastname, date_of_birth, passwordHash, reset_password, gender_id, role_id, client_id, phone]
       );
 
       if (rows2.affectedRows > 0) {
@@ -470,6 +506,41 @@ router.post('/new/user', verifyToken, async (req, res) => {
     } catch (error) {
       console.log(error);
       logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/user/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const username = formulario.username || null;
+      const email = formulario.email || null;
+      const firstname = formulario.firstname || null;
+      const lastname = formulario.lastname || null;
+      const date_of_birth = formulario.date_of_birth || null;
+      const gender_id = formulario.gender_id || null;
+      const phone = formulario.phone || null;
+      console.log("formulario: ", formulario)
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update user set username = ?, email = ?, firstname = ?, lastname = ?, date_of_birth = ?, gender_id = ?, phone = ? where id = ?',
+        [username, email, firstname, lastname, date_of_birth, gender_id, phone, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('User updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update user');
+      }
+    } catch (err) {
+      console.log(err);
       res.status(500).json('Internal server error');
     }
   } else {
@@ -666,6 +737,25 @@ router.get('/product_types', verifyToken, async (req, res) => {
       res.json(rows);
     } catch (error) {
       console.log(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/clients', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        'select id,name \
+        from client \
+        order by name',
+      );
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
       res.status(500).json('Internal server error');
     }
   } else {
