@@ -224,7 +224,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage: storage }).array('ticket[]');
 router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
     try {
       if (req.files.length > 0) {
         formulario = JSON.parse(req.body.form);
@@ -709,7 +709,7 @@ router.get('/providers', verifyToken, async (req, res) => {
 
 router.get('/products', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name,product_type_id from product order by name',
@@ -1041,18 +1041,23 @@ router.get('/email/exists/search', async (req, res) => {
   }
 });
 
-router.get('/donation_id/exists/search', async (req, res) => {
+router.get('/donation_id/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
   const donation_id = req.query.donation_id || null;
   try {
-    if (donation_id) {
-      const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ?', [donation_id]);
-      if (rows.length > 0) {
-        res.json(true);
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+      if (donation_id) {
+        const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ?', [donation_id]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
       } else {
         res.json(false);
       }
     } else {
-      res.json(false);
+      res.status(401).json('Unauthorized');
     }
   } catch (err) {
     console.log(err);
