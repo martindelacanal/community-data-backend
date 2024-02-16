@@ -433,6 +433,94 @@ router.delete('/user/reset-password/:idUser', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/new/product/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name,
+        product_type_id,
+        value_usd
+        from product as p
+        where p.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Product not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/product', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+      const product_type_id = formulario.product_type_id || null;
+      const value_usd = formulario.value_usd || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into product (name, product_type_id, value_usd) values(?,?,?)',
+        [name, product_type_id, value_usd]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Product created successfully');
+      } else {
+        res.status(500).json('Could not create product');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/product/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+      const product_type_id = formulario.product_type_id || null;
+      const value_usd = formulario.value_usd || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update product set name = ?, product_type_id = ?, value_usd = ? where id = ?',
+        [name, product_type_id, value_usd, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Product updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update product');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/new/user/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -471,9 +559,7 @@ router.post('/new/user', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
     try {
-      console.log("entre a new user")
       formulario = req.body;
-      console.log("formulario: ", formulario);
       const username = formulario.username || null;
       const password = formulario.password || null;
       const email = formulario.email || null;
@@ -526,7 +612,6 @@ router.put('/new/user/:id', verifyToken, async (req, res) => {
       const date_of_birth = formulario.date_of_birth || null;
       const gender_id = formulario.gender_id || null;
       const phone = formulario.phone || null;
-      console.log("formulario: ", formulario)
 
       const [rows] = await mysqlConnection.promise().query(
         'update user set username = ?, email = ?, firstname = ?, lastname = ?, date_of_birth = ?, gender_id = ?, phone = ? where id = ?',
@@ -1048,6 +1133,30 @@ router.get('/donation_id/exists/search', verifyToken, async (req, res) => {
     if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
       if (donation_id) {
         const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ?', [donation_id]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/product/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const product = req.query.product || null;
+  try {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+      if (product) {
+        const [rows] = await mysqlConnection.promise().query('select name from product where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [product]);
         if (rows.length > 0) {
           res.json(true);
         } else {
