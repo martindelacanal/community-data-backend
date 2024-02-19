@@ -433,6 +433,141 @@ router.delete('/user/reset-password/:idUser', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/new/location/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select l.id,
+        l.organization,
+        l.community_city,
+        l.address,
+        GROUP_CONCAT(cl.client_id) as client_ids,
+        CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates
+        from location as l
+        left join client_location as cl on l.id = cl.location_id
+        where l.id = ?
+        group by l.id
+        order by l.id
+        `,
+        [id]
+      );
+      if (rows.length > 0) {
+        // Convert client_ids from string to array of integers
+        rows[0].client_ids = rows[0].client_ids ? rows[0].client_ids.split(',').map(Number) : [];
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Location not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/location', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const organization = formulario.organization || null;
+      const community_city = formulario.community_city || null;
+      const address = formulario.address || null;
+      const coordinates = formulario.coordinates || null;
+      const client_ids = formulario.client_ids || [];
+      // separate coordinates into longitude and latitude and eliminate spaces
+      const coordinatesArray = coordinates.split(',').map(coord => coord.trim());
+      const longitude = coordinatesArray[0];
+      const latitude = coordinatesArray[1];
+      const point = `POINT(${latitude} ${longitude})`;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `INSERT INTO location (organization, community_city, address, coordinates)
+        VALUES (?, ?, ?, ST_GeomFromText(?))`,
+        [organization, community_city, address, point]
+      );
+
+      if (rows.affectedRows > 0) {
+        const location_id = rows.insertId;
+        if (client_ids.length > 0) {
+          for (let i = 0; i < client_ids.length; i++) {
+            await mysqlConnection.promise().query(
+              'insert into client_location(client_id, location_id) values(?,?)',
+              [client_ids[i], location_id]
+            );
+          }
+        }
+
+        res.json('Location created successfully');
+      } else {
+        res.status(500).json('Could not create location');
+      }
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/location/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const organization = formulario.organization || null;
+      const community_city = formulario.community_city || null;
+      const address = formulario.address || null;
+      const coordinates = formulario.coordinates || null;
+      const client_ids = formulario.client_ids || [];
+      // separate coordinates into longitude and latitude and eliminate spaces
+      const coordinatesArray = coordinates.split(',').map(coord => coord.trim());
+      const longitude = coordinatesArray[0];
+      const latitude = coordinatesArray[1];
+      const point = `POINT(${latitude} ${longitude})`;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `UPDATE location SET organization = ?, community_city = ?, address = ?, coordinates = ST_GeomFromText(?) WHERE id = ?`,
+        [organization, community_city, address, point, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        // delete all client_location records for the location
+        await mysqlConnection.promise().query(
+          'delete from client_location where location_id = ?',
+          [id]
+        );
+        // insert new client_location records
+        if (client_ids.length > 0) {
+          for (let i = 0; i < client_ids.length; i++) {
+            await mysqlConnection.promise().query(
+              'insert into client_location(client_id, location_id) values(?,?)',
+              [client_ids[i], id]
+            );
+          }
+        }
+
+        res.json('Location updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update location');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/new/product/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -736,8 +871,7 @@ router.get('/locations', verifyToken, async (req, res) => {
   if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select id,organization,community_city,address from location where enabled = "Y" and client_id = ? order by community_city',
-        [cabecera.client_id]
+        'select id,organization,community_city,address from location where enabled = "Y" order by community_city'
       );
       res.json(rows);
     } catch (err) {
@@ -834,7 +968,7 @@ router.get('/clients', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select id,name \
+        'select id,name,short_name \
         from client \
         order by name',
       );
@@ -1174,6 +1308,30 @@ router.get('/product/exists/search', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/location/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const community_city = req.query.community_city || null;
+  try {
+    if (cabecera.role === 'admin') {
+      if (community_city) {
+        const [rows] = await mysqlConnection.promise().query('select community_city from location where REPLACE(LOWER(community_city), " ", "") = REPLACE(LOWER(?), " ", "")', [community_city]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
 router.get('/register/questions', async (req, res) => {
   const language = req.query.language || 'en';
   try {
@@ -1277,13 +1435,12 @@ router.get('/pounds-delivered', verifyToken, async (req, res) => {
 
 router.get('/total-locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
-      // count location from table location, if cabecera.role === 'client' then sum only locations from client_id (cabecera.client_id)
       const [rows] = await mysqlConnection.promise().query(
-        `select count(id) as total_locations from location
-        ${cabecera.role === 'client' ? 'where client_id = ?' : ''}`,
-        [cabecera.client_id]
+        `select count(id) as total_locations 
+        from location
+        `
       );
       res.json(rows[0].total_locations);
     } catch (err) {
@@ -1291,7 +1448,23 @@ router.get('/total-locations', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `select count(l.id) as total_locations 
+          from location as l
+          inner join client_location as cl on l.id = cl.location_id
+          where cl.client_id = ?`,
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total_locations);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -1514,14 +1687,13 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
 
 router.get('/total-locations-enabled', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           COUNT(DISTINCT location.id) AS total_locations_enabled
           FROM location
-          WHERE location.enabled = 'Y' ${cabecera.role === 'client' ? 'and location.client_id = ?' : ''}`,
-        [cabecera.client_id]
+          WHERE location.enabled = 'Y'`
       );
       res.json(rows[0].total_locations_enabled);
     } catch (err) {
@@ -1529,7 +1701,24 @@ router.get('/total-locations-enabled', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `SELECT
+            COUNT(DISTINCT l.id) AS total_locations_enabled
+            FROM location as l
+            INNER JOIN client_location as cl ON l.id = cl.location_id
+            WHERE l.enabled = 'Y' AND cl.client_id = ?`,
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total_locations_enabled);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -1589,7 +1778,13 @@ router.get('/map/locations', verifyToken, async (req, res) => {
 
       if (cabecera.role === 'client') {
         params.push(cabecera.client_id);
-        query += 'AND location.client_id = ?';
+        query = `SELECT
+          ST_X(location.coordinates) as lng, 
+          ST_Y(location.coordinates) as lat, 
+          location.organization as label
+          FROM location
+          INNER JOIN client_location ON location.id = client_location.location_id
+          WHERE client_location.client_id = ?`;
       }
       if (enabled) {
         params.push(enabled);
@@ -3943,7 +4138,6 @@ router.get('/table/product', verifyToken, async (req, res) => {
 router.get('/table/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   let buscar = req.query.search;
-  let queryBuscar = '';
 
   var page = req.query.page ? Number(req.query.page) : 1;
 
@@ -3956,37 +4150,52 @@ router.get('/table/location', verifyToken, async (req, res) => {
   var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
   var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
   var queryOrderBy = `${orderBy} ${orderType}`;
-
+  let havingClause = '';
   if (buscar) {
     buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or location.partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
+    havingClause = `HAVING (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or creation_date like '${buscar}')`;
   }
 
   if (cabecera.role === 'admin') {
     try {
       const query = `SELECT
-      location.id,
-      location.organization,
-      location.community_city,
-      location.partner,
-      location.address,
-      location.enabled,
-      DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
-      FROM location
-      ${queryBuscar}
-      ORDER BY ${queryOrderBy}
-      LIMIT ?, ?`
+        location.id,
+        location.organization,
+        location.community_city,
+        GROUP_CONCAT(client.short_name SEPARATOR ', ') as partner,
+        location.address,
+        location.enabled,
+        DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+        FROM location
+        LEFT JOIN client_location ON location.id = client_location.location_id
+        LEFT JOIN client ON client_location.client_id = client.id
+        GROUP BY location.id
+        ${havingClause}
+        ORDER BY ${queryOrderBy}
+        LIMIT ?, ?`
 
       const [rows] = await mysqlConnection.promise().query(
         query
         , [start, resultsPerPage]);
+
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
         SELECT COUNT(*) as count
-        FROM location
-        ${queryBuscar}
+        FROM (
+          SELECT
+          location.id,
+          location.organization,
+          location.community_city,
+          GROUP_CONCAT(client.short_name SEPARATOR ', ') as partner,
+          location.address,
+          location.enabled,
+          DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+          FROM location
+          LEFT JOIN client_location ON location.id = client_location.location_id
+          LEFT JOIN client ON client_location.client_id = client.id
+          GROUP BY location.id
+          ${havingClause}
+        ) as subquery
       `);
 
         const numOfResults = countRows[0].count;
@@ -4250,13 +4459,16 @@ router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
         `SELECT l.id,
             l.organization,
             l.community_city,
-            l.partner,
+            GROUP_CONCAT(client.short_name SEPARATOR ', ') as partner,
             l.address,
             l.enabled,
             CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates, 
             DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
           FROM location as l
-          WHERE l.id = ?`,
+          LEFT JOIN client_location ON l.id = client_location.location_id
+          LEFT JOIN client ON client_location.client_id = client.id
+          WHERE l.id = ?
+          GROUP BY l.id`,
         [idLocation]
       );
 
