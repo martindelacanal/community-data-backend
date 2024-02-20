@@ -4084,7 +4084,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or pt.name like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or creation_date like '${buscar}')`;
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or pt.name like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
       queryBuscarCount = `AND (product.id like '${buscar}' or product.name like '${buscar}' or product_type.name like '${buscar}' or product_type.name_es like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
@@ -4115,6 +4115,205 @@ router.get('/table/product', verifyToken, async (req, res) => {
           SELECT COUNT(*) as count
           FROM product
           WHERE 1=1 ${queryBuscarCount}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/product-type', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const language = req.query.language || 'en';
+
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `
+      SELECT
+        id,
+        ${language === 'en' ? 'name' : 'name_es'} AS name,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM product_type
+      WHERE 1=1 ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM product_type
+          WHERE 1=1 ${queryBuscar}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/provider', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const language = req.query.language || 'en';
+
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `
+      SELECT
+        id,
+        name,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM provider
+      WHERE 1=1 ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM provider
+          WHERE 1=1 ${queryBuscar}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/client', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const language = req.query.language || 'en';
+
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or short_name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `
+      SELECT
+        id,
+        name,
+        short_name,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM client
+      WHERE 1=1 ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM client
+          WHERE 1=1 ${queryBuscar}
         `);
 
         const numOfResults = countRows[0].count;
