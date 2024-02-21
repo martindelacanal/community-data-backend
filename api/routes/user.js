@@ -4099,7 +4099,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
           ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS product_type,
           product.value_usd,
           DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
-          SUM(product_donation_ticket.quantity) as total_quantity
+          IFNULL(SUM(product_donation_ticket.quantity), 0) as total_quantity
         FROM product
         INNER JOIN product_type as pt ON product.product_type_id = pt.id
         LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
@@ -4808,6 +4808,133 @@ router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
 }
 );
 
+router.get('/view/client/:idClient', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idClient } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT c.id,
+          c.name,
+          c.short_name,
+          c.email,
+          c.phone,
+          c.address,
+          c.webpage,
+          DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          l.id as location_id,
+          l.community_city,
+          l.enabled,
+          DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS location_creation_date
+        FROM client as c
+        LEFT JOIN client_location as cl ON c.id = cl.client_id
+        LEFT JOIN location as l ON cl.location_id = l.id
+        WHERE c.id = ?`,
+        [idClient]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with client data and field 'locations' with array of locations
+        var client = {};
+        var locations = [];
+
+        client["id"] = rows[0].id;
+        client["name"] = rows[0].name;
+        client["short_name"] = rows[0].short_name;
+        client["email"] = rows[0].email;
+        client["phone"] = rows[0].phone;
+        client["address"] = rows[0].address;
+        client["webpage"] = rows[0].webpage;
+        client["creation_date"] = rows[0].creation_date;
+        client["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].location_id) {
+            locations.push({ location_id: rows[i].location_id, community_city: rows[i].community_city, enabled: rows[i].enabled, creation_date: rows[i].location_creation_date });
+          }
+        }
+
+        client["locations"] = locations;
+
+        res.json(client);
+      } else {
+        res.status(404).json('Client no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
+router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idProvider } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT p.id,
+          p.name,
+          DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          t.id as ticket_id,
+          t.donation_id as ticket_donation_id,
+          IFNULL(SUM(pdt.quantity), 0) as quantity,
+          DATE_FORMAT(CONVERT_TZ(t.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS ticket_creation_date
+        FROM provider as p
+        LEFT JOIN donation_ticket as t ON p.id = t.provider_id
+        LEFT JOIN product_donation_ticket as pdt ON t.id = pdt.donation_ticket_id
+        WHERE p.id = ?
+        GROUP BY t.id
+        ORDER BY t.donation_id DESC`,
+        [idProvider]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with provider data and field 'tickets' with array of tickets
+        var provider = {};
+        var tickets = [];
+        var total_quantity = 0;
+
+        provider["id"] = rows[0].id;
+        provider["name"] = rows[0].name;
+        provider["creation_date"] = rows[0].creation_date;
+        provider["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].ticket_id) {
+            total_quantity += rows[i].quantity;
+            tickets.push({ ticket_id: rows[i].ticket_id, donation_id: rows[i].ticket_donation_id, quantity: rows[i].quantity, creation_date: rows[i].ticket_creation_date });
+          }
+        }
+
+        provider["total_quantity"] = total_quantity;
+        provider["tickets"] = tickets;
+
+        res.json(provider);
+      } else {
+        res.status(404).json('Provider no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
 router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -4861,6 +4988,66 @@ router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
         res.json(product);
       } else {
         res.status(404).json('Product no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
+router.get('/view/product-type/:idProductType', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idProductType } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT pt.id,
+          pt.name,
+          pt.name_es,
+          DATE_FORMAT(CONVERT_TZ(pt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(pt.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          p.id as product_id,
+          p.name as product_name,
+          IFNULL(SUM(pdt.quantity), 0) as total_quantity,
+          DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS product_creation_date
+        FROM product_type as pt
+        INNER JOIN product as p ON pt.id = p.product_type_id
+        LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
+        WHERE pt.id = ?
+        GROUP BY p.id
+        ORDER BY p.id DESC`,
+        [idProductType]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with product type data and field 'products' with array of products
+        var product_type = {};
+        var products = [];
+
+        product_type["id"] = rows[0].id;
+        product_type["name"] = rows[0].name;
+        product_type["name_es"] = rows[0].name_es;
+        product_type["creation_date"] = rows[0].creation_date;
+        product_type["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].product_id) {
+            products.push({ product_id: rows[i].product_id, name: rows[i].product_name, total_quantity: rows[i].total_quantity, creation_date: rows[i].product_creation_date });
+          }
+        }
+
+        product_type["products"] = products;
+
+        res.json(product_type);
+      } else {
+        res.status(404).json('Product type no encontrado');
       }
 
     } catch (err) {
