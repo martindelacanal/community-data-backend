@@ -656,6 +656,270 @@ router.put('/new/product/:id', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/new/product-type/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name,
+        name_es
+        from product_type as pt
+        where pt.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Product type not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/product-type', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+      const name_es = formulario.name_es || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into product_type (name, name_es) values(?,?)',
+        [name, name_es]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Product type created successfully');
+      } else {
+        res.status(500).json('Could not create product type');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/product-type/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+      const name_es = formulario.name_es || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update product_type set name = ?, name_es = ? where id = ?',
+        [name, name_es, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Product type updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update product type');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/new/provider/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name
+        from provider as p
+        where p.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Provider not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/provider', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into provider (name) values(?)',
+        [name]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Provider created successfully');
+      } else {
+        res.status(500).json('Could not create provider');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/provider/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update provider set name = ? where id = ?',
+        [name, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Provider updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update provider');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/new/client/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name,
+        short_name,
+        email,
+        phone,
+        address,
+        webpage
+        from client as c
+        where c.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Client not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/client', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+      const short_name = formulario.short_name || null;
+      const email = formulario.email || null;
+      const phone = formulario.phone || null;
+      const address = formulario.address || null;
+      const webpage = formulario.webpage || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into client (name, short_name, email, phone, address, webpage) values(?,?,?,?,?,?)',
+        [name, short_name, email, phone, address, webpage]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Client created successfully');
+      } else {
+        res.status(500).json('Could not create client');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/client/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+      const short_name = formulario.short_name || null;
+      const email = formulario.email || null;
+      const phone = formulario.phone || null;
+      const address = formulario.address || null;
+      const webpage = formulario.webpage || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update client set name = ?, short_name = ?, email = ?, phone = ?, address = ?, webpage = ? where id = ?',
+        [name, short_name, email, phone, address, webpage, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Client updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update client');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/new/user/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -1286,11 +1550,11 @@ router.get('/donation_id/exists/search', verifyToken, async (req, res) => {
 
 router.get('/product/exists/search', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  const product = req.query.product || null;
+  const name = req.query.name || null;
   try {
     if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
-      if (product) {
-        const [rows] = await mysqlConnection.promise().query('select name from product where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [product]);
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from product where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
         if (rows.length > 0) {
           res.json(true);
         } else {
@@ -1299,6 +1563,86 @@ router.get('/product/exists/search', verifyToken, async (req, res) => {
       } else {
         res.json(false);
       }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/product-type/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const name = req.query.name || null;
+  try {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from product_type where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/provider/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const name = req.query.name || null;
+  try {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from provider where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/client/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const name = req.query.name || null;
+  const short_name = req.query.short_name || null;
+  try {
+    if (cabecera.role === 'admin') {
+      let nameExists = false;
+      let shortNameExists = false;
+
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from client where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
+        if (rows.length > 0) {
+          nameExists = true;
+        }
+      }
+
+      if (short_name) {
+        const [rows] = await mysqlConnection.promise().query('select short_name from client where REPLACE(LOWER(short_name), " ", "") = REPLACE(LOWER(?), " ", "")', [short_name]);
+        if (rows.length > 0) {
+          shortNameExists = true;
+        }
+      }
+      res.json({name: nameExists, short_name: shortNameExists});
     } else {
       res.status(401).json('Unauthorized');
     }
