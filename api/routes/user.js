@@ -741,6 +741,176 @@ router.put('/new/product-type/:id', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/new/gender/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name,
+        name_es
+        from gender as g
+        where g.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Gender not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/gender', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+      const name_es = formulario.name_es || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into gender (name, name_es) values(?,?)',
+        [name, name_es]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Gender created successfully');
+      } else {
+        res.status(500).json('Could not create gender');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/gender/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+      const name_es = formulario.name_es || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update gender set name = ?, name_es = ? where id = ?',
+        [name, name_es, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Gender updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update gender');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/new/ethnicity/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name,
+        name_es
+        from ethnicity as g
+        where g.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Ethnicity not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/ethnicity', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+      const name_es = formulario.name_es || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into ethnicity (name, name_es) values(?,?)',
+        [name, name_es]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Ethnicity created successfully');
+      } else {
+        res.status(500).json('Could not create ethnicity');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/ethnicity/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+      const name_es = formulario.name_es || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update ethnicity set name = ?, name_es = ? where id = ?',
+        [name, name_es, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Ethnicity updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update ethnicity');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/new/provider/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -1579,6 +1749,54 @@ router.get('/product-type/exists/search', verifyToken, async (req, res) => {
     if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
       if (name) {
         const [rows] = await mysqlConnection.promise().query('select name from product_type where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/gender/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const name = req.query.name || null;
+  try {
+    if (cabecera.role === 'admin') {
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from gender where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/ethnicity/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const name = req.query.name || null;
+  try {
+    if (cabecera.role === 'admin') {
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from ethnicity where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
         if (rows.length > 0) {
           res.json(true);
         } else {
@@ -4545,6 +4763,138 @@ router.get('/table/product-type', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/table/gender', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const language = req.query.language || 'en';
+
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `
+      SELECT
+        id,
+        ${language === 'en' ? 'name' : 'name_es'} AS name,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM gender
+      WHERE 1=1 ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM gender
+          WHERE 1=1 ${queryBuscar}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.get('/table/ethnicity', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const language = req.query.language || 'en';
+
+  let buscar = req.query.search;
+  let queryBuscar = '';
+
+  var page = req.query.page ? Number(req.query.page) : 1;
+
+  if (page < 1) {
+    page = 1;
+  }
+  var resultsPerPage = 10;
+  var start = (page - 1) * resultsPerPage;
+
+  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+  var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+  if (buscar) {
+    buscar = '%' + buscar + '%';
+    if (cabecera.role === 'admin') {
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+  }
+
+  if (cabecera.role === 'admin') {
+    try {
+      const query = `
+      SELECT
+        id,
+        ${language === 'en' ? 'name' : 'name_es'} AS name,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM ethnicity
+      WHERE 1=1 ${queryBuscar}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM ethnicity
+          WHERE 1=1 ${queryBuscar}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
 router.get('/table/provider', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const language = req.query.language || 'en';
@@ -5392,6 +5742,119 @@ router.get('/view/product-type/:idProductType', verifyToken, async (req, res) =>
         res.json(product_type);
       } else {
         res.status(404).json('Product type no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
+router.get('/view/gender/:idGender', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idGender } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT g.id,
+          g.name,
+          g.name_es,
+          DATE_FORMAT(CONVERT_TZ(g.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(g.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          u.id as beneficiary_id,
+          u.username,
+          DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS beneficiary_creation_date
+        FROM gender as g
+        LEFT JOIN user as u ON g.id = u.gender_id
+        WHERE (g.id = ? and u.role_id = 5) or (g.id = ? and u.role_id IS NULL)
+        ORDER BY u.id DESC`,
+        [idGender, idGender]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with gender data and field 'beneficiaries' with array of beneficiaries
+        var gender = {};
+        var beneficiaries = [];
+
+        gender["id"] = rows[0].id;
+        gender["name"] = rows[0].name;
+        gender["name_es"] = rows[0].name_es;
+        gender["creation_date"] = rows[0].creation_date;
+        gender["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].beneficiary_id) {
+            beneficiaries.push({ beneficiary_id: rows[i].beneficiary_id, username: rows[i].username, creation_date: rows[i].beneficiary_creation_date });
+          }
+        }
+
+        gender["beneficiaries"] = beneficiaries;
+
+        res.json(gender);
+      } else {
+        res.status(404).json('Gender no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
+router.get('/view/ethnicity/:idEthnicity', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idEthnicity } = req.params;
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT e.id,
+          e.name,
+          e.name_es,
+          DATE_FORMAT(CONVERT_TZ(e.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(e.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          u.id as beneficiary_id,
+          u.username,
+          DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS beneficiary_creation_date
+        FROM ethnicity as e
+        LEFT JOIN user as u ON e.id = u.ethnicity_id
+        WHERE (e.id = ? and u.role_id = 5) or (e.id = ? and u.role_id IS NULL)
+        ORDER BY u.id DESC`,
+        [idEthnicity, idEthnicity]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with ethnicity data and field 'beneficiaries' with array of beneficiaries
+        var ethnicity = {};
+        var beneficiaries = [];
+
+        ethnicity["id"] = rows[0].id;
+        ethnicity["name"] = rows[0].name;
+        ethnicity["name_es"] = rows[0].name_es;
+        ethnicity["creation_date"] = rows[0].creation_date;
+        ethnicity["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].beneficiary_id) {
+            beneficiaries.push({ beneficiary_id: rows[i].beneficiary_id, username: rows[i].username, creation_date: rows[i].beneficiary_creation_date });
+          }
+        }
+
+        ethnicity["beneficiaries"] = beneficiaries;
+
+        res.json(ethnicity);
+      } else {
+        res.status(404).json('Ethnicity no encontrado');
       }
 
     } catch (err) {
