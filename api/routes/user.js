@@ -999,18 +999,25 @@ router.get('/new/client/:id', verifyToken, async (req, res) => {
     try {
       const id = req.params.id || null;
       const [rows] = await mysqlConnection.promise().query(
-        `select id,
-        name,
-        short_name,
-        email,
-        phone,
-        address,
-        webpage
+        `select c.id,
+        c.name,
+        c.short_name,
+        c.email,
+        c.phone,
+        c.address,
+        c.webpage,
+        GROUP_CONCAT(cl.location_id) as location_ids
         from client as c
-        where c.id = ?`,
+        left join client_location as cl on c.id = cl.client_id
+        where c.id = ?
+        group by c.id
+        order by c.id
+        `,
         [id]
       );
       if (rows.length > 0) {
+        // Convert location_ids from string to array of integers
+        rows[0].location_ids = rows[0].location_ids ? rows[0].location_ids.split(',').map(Number) : [];
         res.json(rows[0]);
       } else {
         res.status(404).json('Client not found');
@@ -1035,6 +1042,7 @@ router.post('/new/client', verifyToken, async (req, res) => {
       const phone = formulario.phone || null;
       const address = formulario.address || null;
       const webpage = formulario.webpage || null;
+      const location_ids = formulario.location_ids || [];
 
       const [rows] = await mysqlConnection.promise().query(
         'insert into client (name, short_name, email, phone, address, webpage) values(?,?,?,?,?,?)',
@@ -1042,6 +1050,16 @@ router.post('/new/client', verifyToken, async (req, res) => {
       );
 
       if (rows.affectedRows > 0) {
+        const client_id = rows.insertId;
+        if (location_ids.length > 0) {
+          for (let i = 0; i < location_ids.length; i++) {
+            await mysqlConnection.promise().query(
+              'insert into client_location(client_id, location_id) values(?,?)',
+              [client_id, location_ids[i]]
+            );
+          }
+        }
+
         res.json('Client created successfully');
       } else {
         res.status(500).json('Could not create client');
@@ -1069,6 +1087,7 @@ router.put('/new/client/:id', verifyToken, async (req, res) => {
       const phone = formulario.phone || null;
       const address = formulario.address || null;
       const webpage = formulario.webpage || null;
+      const location_ids = formulario.location_ids || [];
 
       const [rows] = await mysqlConnection.promise().query(
         'update client set name = ?, short_name = ?, email = ?, phone = ?, address = ?, webpage = ? where id = ?',
@@ -1076,6 +1095,21 @@ router.put('/new/client/:id', verifyToken, async (req, res) => {
       );
 
       if (rows.affectedRows > 0) {
+        // delete all client_location records for the client
+        await mysqlConnection.promise().query(
+          'delete from client_location where client_id = ?',
+          [id]
+        );
+        // insert new client_location records
+        if (location_ids.length > 0) {
+          for (let i = 0; i < location_ids.length; i++) {
+            await mysqlConnection.promise().query(
+              'insert into client_location(client_id, location_id) values(?,?)',
+              [id, location_ids[i]]
+            );
+          }
+        }
+
         res.json('Client updated successfully');
       }
       else {
