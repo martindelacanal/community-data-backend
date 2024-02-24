@@ -1526,10 +1526,23 @@ router.post('/onBoard', verifyToken, async (req, res) => {
         );
         // si operation es 3 crear registro en tabla delivery_beneficiary con receiving_user_id y location_id
         if (user_status_id === 3) {
-          const [rows3] = await mysqlConnection.promise().query(
-            'insert into delivery_beneficiary(receiving_user_id, location_id) values(?,?)',
+          // verificar si ya existe un registro en delivery_beneficiary con receiving_user_id y location_id en el dia de hoy 
+          // filtrar el más reciente y si existe actualizar last_onboarding_date por la fecha actual, sino insertar
+          const [rows2] = await mysqlConnection.promise().query(
+            'select * from delivery_beneficiary where receiving_user_id = ? and location_id = ? and date(creation_date) = curdate() order by creation_date desc limit 1',
             [user_id, location_id]
           );
+          if (rows2.length > 0) {
+            const [rows3] = await mysqlConnection.promise().query(
+              'update delivery_beneficiary set last_onboarding_date = now() where id = ?',
+              [rows2[0].id]
+            );
+          } else {
+            const [rows3] = await mysqlConnection.promise().query(
+              'insert into delivery_beneficiary(receiving_user_id, location_id) values(?,?)',
+              [user_id, location_id]
+            );
+          }
         }
 
         if (rows.affectedRows > 0) {
