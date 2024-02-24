@@ -5018,7 +5018,7 @@ router.get('/table/client', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or short_name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or short_name like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -5029,6 +5029,7 @@ router.get('/table/client', verifyToken, async (req, res) => {
         id,
         name,
         short_name,
+        enabled,
         DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
       FROM client
@@ -5550,11 +5551,12 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
           c.phone,
           c.address,
           c.webpage,
+          c.enabled,
           DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
           DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
           l.id as location_id,
           l.community_city,
-          l.enabled,
+          l.enabled as location_enabled,
           DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS location_creation_date
         FROM client as c
         LEFT JOIN client_location as cl ON c.id = cl.client_id
@@ -5576,12 +5578,13 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
         client["phone"] = rows[0].phone;
         client["address"] = rows[0].address;
         client["webpage"] = rows[0].webpage;
+        client["enabled"] = rows[0].enabled;
         client["creation_date"] = rows[0].creation_date;
         client["modification_date"] = rows[0].modification_date;
 
         for (let i = 0; i < rows.length; i++) {
           if (rows[i].location_id) {
-            locations.push({ location_id: rows[i].location_id, community_city: rows[i].community_city, enabled: rows[i].enabled, creation_date: rows[i].location_creation_date });
+            locations.push({ location_id: rows[i].location_id, community_city: rows[i].community_city, enabled: rows[i].location_enabled, creation_date: rows[i].location_creation_date });
           }
         }
 
@@ -5997,6 +6000,35 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   }
 })
 
+router.put('/enable-disable/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    const { id } = req.params;
+    const { table, enabled } = req.body;
+
+    if (id && table && enabled) {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `update ${table} set enabled = ? where id = ?`,
+          [enabled, id]
+        );
+        if (rows.affectedRows > 0) {
+          res.json('Registro actualizado correctamente');
+        } else {
+          res.status(500).json('No se pudo actualizar el registro');
+        }
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(400).json('Faltan datos');
+    }
+  } else {
+    res.status(401).send();
+  }
+});
 
 function verifyToken(req, res, next) {
 
