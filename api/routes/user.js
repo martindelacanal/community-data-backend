@@ -97,8 +97,6 @@ router.post('/signup', async (req, res) => {
   firstForm = req.body.firstForm;
   secondForm = req.body.secondForm;
 
-  const client_id = 1; // TO-DO obtener client_id de la cabecera
-
   const role_id = 5;
   const username = firstForm.username || null;
   let passwordHash = await bcryptjs.hash(firstForm.password, 8);
@@ -119,7 +117,6 @@ router.post('/signup', async (req, res) => {
                                                           password, \
                                                           email, \
                                                           role_id, \
-                                                          client_id, \
                                                           firstname, \
                                                           lastname, \
                                                           date_of_birth, \
@@ -130,8 +127,8 @@ router.post('/signup', async (req, res) => {
                                                           gender_id, \
                                                           ethnicity_id, \
                                                           other_ethnicity) \
-                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, householdSize, gender, ethnicity, otherEthnicity]);
+                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [username, passwordHash, email, role_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, householdSize, gender, ethnicity, otherEthnicity]);
     if (rows.affectedRows > 0) {
       // save inserted user id
       const user_id = rows.insertId;
@@ -272,8 +269,8 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           }
         }
         const [rows] = await mysqlConnection.promise().query(
-          'insert into donation_ticket(client_id, donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?,?)',
-          [cabecera.client_id, donation_id, total_weight, provider, destination, date, delivered_by]
+          'insert into donation_ticket(donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?)',
+          [donation_id, total_weight, provider, destination, date, delivered_by]
         );
 
         if (rows.affectedRows > 0) {
@@ -1236,89 +1233,94 @@ router.put('/new/user/:id', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/upload/beneficiaryQR/:locationId', verifyToken, async (req, res) => {
+router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'delivery') {
     if (req.body && req.body.role === 'beneficiary') {
       try {
-        const client_id = cabecera.client_id;
         const delivering_user_id = cabecera.id;
         // QR
         const receiving_user_id = req.body.id;
         const approved = req.body.approved;
-        const location_id = parseInt(req.params.locationId) || null;
-        // buscar en tabla delivery_beneficiary si existe un registro con client_id, receiving_user_id en el dia de hoy y filtrar el más reciente
-        const [rows] = await mysqlConnection.promise().query(
-          'select id, approved, delivering_user_id, location_id \
+        const receiving_location_id = req.body.location_id;
+        const location_id = req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null;
+        const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
+        if (receiving_location_id === location_id) {
+          // buscar en tabla delivery_beneficiary si existe un registro con client_id, receiving_user_id en el dia de hoy y filtrar el más reciente
+          const [rows] = await mysqlConnection.promise().query(
+            'select id, approved, delivering_user_id, location_id, client_id \
           from delivery_beneficiary \
-          where client_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
+          where (client_id = ? OR client_id IS NULL) and receiving_user_id = ? and date(creation_date) = curdate() \
           order by creation_date desc limit 1',
-          [client_id, receiving_user_id]
-        );
-        // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
-        if (rows.length > 0 && rows[0].delivering_user_id === null) {
-          // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
-
-          // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
-          const [rows2] = await mysqlConnection.promise().query(
-            'update delivery_beneficiary set delivering_user_id = ?, location_id = ? where id = ?', [delivering_user_id, location_id, rows[0].id]
+            [client_id, receiving_user_id]
           );
-          // si las location_id son distintas, actualizar location_id del user beneficiary
-          if (rows[0].location_id !== location_id) {
-            const [rows3] = await mysqlConnection.promise().query(
-              'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
-            );
-            // crear 2 registros en beneficiary_log con operation_id 4 (off boarded) y 3 (on boarded) con el location_id anterior y el nuevo
-            const [rows4] = await mysqlConnection.promise().query(
-              'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
-              [receiving_user_id, 4, rows[0].location_id]
-            );
-            const [rows5] = await mysqlConnection.promise().query(
-              'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
-              [receiving_user_id, 3, location_id]
-            );
-          }
-          if (rows2.affectedRows > 0) {
-            return res.status(200).json({ could_approve: 'Y' });
-          } else {
-            return res.status(500).json('Could not update delivering_user_id');
-          }
-        } else {
-          // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
-          if (rows.length > 0 && rows[0].approved === 'N') {
-            if (approved === 'Y') {
-              // actualizar el campo approved a 'Y'
-              const [rows2] = await mysqlConnection.promise().query(
-                'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
-              );
-              if (rows2.affectedRows > 0) {
-                res.json('Beneficiary approved successfully');
-              } else {
-                res.status(500).json('Could not approve beneficiary');
-              }
-            } else {
-              res.json({ could_approve: 'Y' });
-            }
-          } else {
+          // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
+          if (rows.length > 0 && rows[0].delivering_user_id === null && rows[0].client_id === null) {
             // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
-            // actualizar location_id del user beneficiary
+            // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
             const [rows2] = await mysqlConnection.promise().query(
-              'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
+              'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?', [client_id, delivering_user_id, location_id, rows[0].id]
             );
-
-            // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
-            const [rows3] = await mysqlConnection.promise().query(
-              'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
-              [client_id, delivering_user_id, receiving_user_id, location_id]
-            );
-            if (rows3.affectedRows > 0) {
+            // si las location_id son distintas, actualizar location_id del user beneficiary
+            if (rows[0].location_id !== location_id) {
+              const [rows3] = await mysqlConnection.promise().query(
+                'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
+              );
+              // crear 2 registros en beneficiary_log con operation_id 4 (off boarded) y 3 (on boarded) con el location_id anterior y el nuevo
+              const [rows4] = await mysqlConnection.promise().query(
+                'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
+                [receiving_user_id, 4, rows[0].location_id]
+              );
+              const [rows5] = await mysqlConnection.promise().query(
+                'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
+                [receiving_user_id, 3, location_id]
+              );
+            }
+            if (rows2.affectedRows > 0) {
               return res.status(200).json({ could_approve: 'Y' });
             } else {
-              return res.status(500).json('Could not create delivery_beneficiary');
+              return res.status(500).json('Could not update delivering_user_id');
             }
+          } else {
+            // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
+            if (rows.length > 0 && rows[0].approved === 'N') {
+              if (approved === 'Y') {
+                // actualizar el campo approved a 'Y'
+                const [rows2] = await mysqlConnection.promise().query(
+                  'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
+                );
+                if (rows2.affectedRows > 0) {
+                  res.json('Beneficiary approved successfully');
+                } else {
+                  res.status(500).json('Could not approve beneficiary');
+                }
+              } else {
+                res.json({ could_approve: 'Y' });
+              }
+            } else {
+              // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
+              // actualizar location_id del user beneficiary
+              const [rows2] = await mysqlConnection.promise().query(
+                'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
+              );
+
+              // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
+              const [rows3] = await mysqlConnection.promise().query(
+                'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
+                [client_id, delivering_user_id, receiving_user_id, location_id]
+              );
+              if (rows3.affectedRows > 0) {
+                return res.status(200).json({ could_approve: 'Y' });
+              } else {
+                return res.status(500).json('Could not create delivery_beneficiary');
+              }
+
+            }
           }
+        } else {
+          res.status(200).json({ error: 'receiving_location' });
         }
       } catch (error) {
         console.log(error);
@@ -1433,13 +1435,20 @@ router.get('/product_types', verifyToken, async (req, res) => {
 
 router.get('/clients', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'delivery') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select id,name,short_name \
-        from client \
+        'select c.id,c.name,c.short_name, \
+        GROUP_CONCAT(cl.location_id) as location_ids \
+        from client as c \
+        left join client_location as cl on c.id = cl.client_id \
+        group by c.id \
         order by name',
       );
+      // Convert location_ids from string to array of integers
+      rows.forEach(row => {
+        row.location_ids = row.location_ids ? row.location_ids.split(',').map(Number) : [];
+      });
       res.json(rows);
     } catch (err) {
       console.log(err);
@@ -1479,14 +1488,15 @@ router.post('/onBoard', verifyToken, async (req, res) => {
       const { value } = req.body;
       const user_status_id = value ? 3 : 4;
       const location_id = value ? req.body.location_id : null;
+      const client_id = value ? req.body.client_id : null;
       const [rows] = await mysqlConnection.promise().query(
-        'update user set user_status_id = ?, location_id = ? where id = ?',
-        [user_status_id, location_id, user_id]
+        'update user set user_status_id = ?, location_id = ?, client_id = ? where id = ?',
+        [user_status_id, location_id, client_id, user_id]
       );
       // insertar en tabla delivery_log la operation
       const [rows2] = await mysqlConnection.promise().query(
-        'insert into delivery_log(user_id, operation_id, location_id) values(?,?,?)',
-        [user_id, user_status_id, location_id]
+        'insert into delivery_log(user_id, operation_id, location_id, client_id) values(?,?,?,?)',
+        [user_id, user_status_id, location_id, client_id]
       );
 
       if (rows.affectedRows > 0) {
@@ -1505,9 +1515,6 @@ router.post('/onBoard', verifyToken, async (req, res) => {
         const { value } = req.body;
         const user_status_id = value ? 3 : 4;
         const location_id = req.body.location_id ? req.body.location_id : null;
-        console.log("value: ", value);
-        console.log("user_status_id: ", user_status_id);
-        console.log("location_id: ", location_id);
         const [rows] = await mysqlConnection.promise().query(
           'update user set user_status_id = ?, location_id = ? where id = ?',
           [user_status_id, location_id, user_id]
@@ -1517,11 +1524,11 @@ router.post('/onBoard', verifyToken, async (req, res) => {
           'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
           [user_id, user_status_id, location_id]
         );
-        // si operation es 3 crear registro en tabla delivery_beneficiary con client_id, receiving_user_id y location_id
+        // si operation es 3 crear registro en tabla delivery_beneficiary con receiving_user_id y location_id
         if (user_status_id === 3) {
           const [rows3] = await mysqlConnection.promise().query(
-            'insert into delivery_beneficiary(client_id, receiving_user_id, location_id) values(?,?,?)',
-            [cabecera.client_id, user_id, location_id]
+            'insert into delivery_beneficiary(receiving_user_id, location_id) values(?,?)',
+            [user_id, location_id]
           );
         }
 
@@ -1546,7 +1553,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
   if (cabecera.role === 'delivery') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select user_status.id, user_status.name, user.location_id \
+        'select user_status.id, user_status.name, user.location_id, user.client_id \
         from user \
         inner join user_status on user.user_status_id = user_status.id \
         where user.id = ?',
@@ -1573,7 +1580,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
                 'update user set user_status_id = 4, location_id = null where id = ?',
                 [cabecera.id]
               );
-              return res.json({ id: 4, name: 'Off boarded' });
+              return res.json({ id: 4, name: 'Off boarded', location_id: null, client_id: rows[0].client_id });
             } else {
               return res.json(rows[0]);
             }
@@ -1584,7 +1591,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
           return res.json(rows[0]);
         }
       } else {
-        return res.json({ id: null, name: null });
+        return res.json({ id: null, name: null, location_id: null, client_id: null });
       }
 
     } catch (err) {
@@ -1595,7 +1602,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
     if (cabecera.role === 'beneficiary') {
       try {
         const [rows] = await mysqlConnection.promise().query(
-          'select user_status.id, user_status.name, user.location_id \
+          'select user_status.id, user_status.name, user.location_id, user.client_id \
           from user \
           inner join user_status on user.user_status_id = user_status.id \
           where user.id = ?',
@@ -1622,7 +1629,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
                   'update user set user_status_id = 4 where id = ?',
                   [cabecera.id]
                 );
-                return res.json({ id: 4, name: 'Off boarded' });
+                return res.json({ id: 4, name: 'Off boarded', location_id: rows[0].location_id, client_id: rows[0].client_id });
               } else {
                 return res.json(rows[0]);
               }
@@ -1633,7 +1640,7 @@ router.get('/user/status', verifyToken, async (req, res) => {
             return res.json(rows[0]);
           }
         } else {
-          return res.json({ id: null, name: null });
+          return res.json({ id: null, name: null, location_id: null, client_id: null });
         }
       } catch (err) {
         console.log(err);
@@ -1651,7 +1658,7 @@ router.get('/user/location', verifyToken, async (req, res) => {
   if (cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select location.id, location.organization, location.address \
+        'select location.id, location.organization, location.community_city, location.address \
         from user \
         inner join location on user.location_id = location.id \
         where user.id = ?',
@@ -1660,7 +1667,7 @@ router.get('/user/location', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         res.json(rows[0]);
       } else {
-        res.json({ id: null, organization: null });
+        res.json({ id: null, organization: null, community_city: null, address: null });
       }
     } catch (err) {
       console.log(err);
@@ -1894,7 +1901,7 @@ router.get('/client/exists/search', verifyToken, async (req, res) => {
           shortNameExists = true;
         }
       }
-      res.json({name: nameExists, short_name: shortNameExists});
+      res.json({ name: nameExists, short_name: shortNameExists });
     } else {
       res.status(401).json('Unauthorized');
     }
