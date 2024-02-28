@@ -1226,10 +1226,11 @@ router.put('/new/user/:id', verifyToken, async (req, res) => {
       const date_of_birth = formulario.date_of_birth || null;
       const gender_id = formulario.gender_id || null;
       const phone = formulario.phone || null;
+      const client_id = formulario.client_id || null;
 
       const [rows] = await mysqlConnection.promise().query(
-        'update user set username = ?, email = ?, firstname = ?, lastname = ?, date_of_birth = ?, gender_id = ?, phone = ? where id = ?',
-        [username, email, firstname, lastname, date_of_birth, gender_id, phone, id]
+        'update user set username = ?, email = ?, firstname = ?, lastname = ?, date_of_birth = ?, gender_id = ?, phone = ?, client_id = ? where id = ?',
+        [username, email, firstname, lastname, date_of_birth, gender_id, phone, client_id, id]
       );
 
       if (rows.affectedRows > 0) {
@@ -2193,8 +2194,7 @@ router.get('/pounds-delivered', verifyToken, async (req, res) => {
         const [rows] = await mysqlConnection.promise().query(
           `select sum(dt.total_weight) as pounds_delivered 
           from donation_ticket as dt
-          inner join location as l on dt.location_id = l.id
-          inner join client_location as cl on l.id = cl.location_id
+          inner join client_location as cl on dt.location_id = cl.location_id
           where cl.client_id = ?`,
           [cabecera.client_id]
         );
@@ -2546,8 +2546,7 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
           `SELECT
             COUNT(DISTINCT dt.id) AS total_tickets_uploaded
             FROM donation_ticket as dt
-            INNER JOIN location as l ON dt.location_id = l.id
-            INNER JOIN client_location as cl ON l.id = cl.location_id
+            INNER JOIN client_location as cl ON dt.location_id = cl.location_id
             WHERE cl.client_id = ?`,
           [cabecera.client_id]
         );
@@ -2622,8 +2621,7 @@ router.get('/total-products-uploaded', verifyToken, async (req, res) => {
             FROM product as p
             INNER JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
             INNER JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
-            INNER JOIN location as l ON dt.location_id = l.id
-            INNER JOIN client_location as cl ON l.id = cl.location_id
+            INNER JOIN client_location as cl ON dt.location_id = cl.location_id
             WHERE cl.client_id = ?`,
           [cabecera.client_id]
         );
@@ -2825,8 +2823,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
                   SUM(dt.total_weight) AS value,
                   DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
                 FROM donation_ticket as dt
-                INNER JOIN location as l ON dt.location_id = l.id
-                INNER JOIN client_location as cl ON l.id = cl.location_id
+                INNER JOIN client_location as cl ON dt.location_id = cl.location_id
                 WHERE cl.client_id = ?
                 GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
                 ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`,
@@ -3222,7 +3219,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
 
 router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const from_date = req.query.from_date || '1970-01-01';
       const to_date = req.query.to_date || '2100-01-01';
@@ -3246,8 +3243,9 @@ router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
         INNER JOIN user as u2 ON db.receiving_user_id = u2.id
         LEFT JOIN user as u1 ON db.delivering_user_id = u1.id
         WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
         ORDER BY db.id`,
-        [from_date, to_date]
+        [from_date, to_date, cabecera.client_id]
       );
 
       var headers_array = [
@@ -3302,7 +3300,7 @@ campos: id, creation_date
 */
 router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const from_date = req.query.from_date || '1970-01-01';
       const to_date = req.query.to_date || '2100-01-01';
@@ -3324,6 +3322,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
                       INNER JOIN user as u ON db.receiving_user_id = u.id
                   WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
                       AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                    ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
                   GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
                   ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
@@ -3350,6 +3349,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
                       INNER JOIN user as u ON db.receiving_user_id = u.id
                 WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
                       AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                      ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
                 GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
                 ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
@@ -3369,6 +3369,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
                   INNER JOIN location as loc ON db.location_id = loc.id
               WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
                   AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                  ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
               GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
               ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
@@ -3394,6 +3395,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
                     INNER JOIN location as loc ON db.location_id = loc.id
                 WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
                     AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                    ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
                 GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
                 ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
@@ -3413,6 +3415,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
                     INNER JOIN user as u ON db.receiving_user_id = u.id
                 WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
                     AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                    ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
                 GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
                 ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
@@ -3425,16 +3428,17 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
           INNER JOIN location as loc ON db.location_id = loc.id
           WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
             AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+            ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
           GROUP BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')
           ORDER BY loc.id, DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y')`;
 
       const funcionesParalelas = [
-        mysqlConnection.promise().query(query1, [from_date, to_date]),
-        mysqlConnection.promise().query(query2, [from_date, to_date]),
-        mysqlConnection.promise().query(query3, [from_date, to_date]),
-        mysqlConnection.promise().query(query4, [from_date, to_date]),
-        mysqlConnection.promise().query(query5, [from_date, to_date]),
-        mysqlConnection.promise().query(query6, [from_date, to_date])
+        mysqlConnection.promise().query(query1, [from_date, to_date, cabecera.client_id]),
+        mysqlConnection.promise().query(query2, [from_date, to_date, cabecera.client_id]),
+        mysqlConnection.promise().query(query3, [from_date, to_date, cabecera.client_id]),
+        mysqlConnection.promise().query(query4, [from_date, to_date, cabecera.client_id]),
+        mysqlConnection.promise().query(query5, [from_date, to_date, cabecera.client_id]),
+        mysqlConnection.promise().query(query6, [from_date, to_date, cabecera.client_id])
       ];
 
       const [
@@ -3502,7 +3506,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
 
 router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const from_date = req.query.from_date || '1970-01-01';
       const to_date = req.query.to_date || '2100-01-01';
@@ -3528,14 +3532,16 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         FROM donation_ticket as dt
         LEFT JOIN provider as p ON dt.provider_id = p.id
         LEFT JOIN location as loc ON dt.location_id = loc.id
+        ${cabecera.role === 'client' ? 'LEFT JOIN client_location cl ON dt.location_id = cl.location_id' : ''}
         LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
         LEFT JOIN product_type as pt ON product.product_type_id = pt.id
         WHERE dt.date >= ? AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)
+        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         ORDER BY dt.date, dt.id`,
-        [from_date, to_date]
+        [from_date, to_date, cabecera.client_id]
       );
       // WHERE CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
 
@@ -4483,7 +4489,7 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
           FROM donation_ticket as dt
           INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           INNER JOIN product as p ON pdt.product_id = p.id
-          ${cabecera.role === 'client' ? 'INNER JOIN location as l ON dt.location_id = l.id INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
+          ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
           WHERE 1=1
           ${query_from_date_product}
           ${query_to_date_product}
@@ -4551,7 +4557,7 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
           INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           INNER JOIN product as p ON pdt.product_id = p.id
           INNER JOIN product_type as pt ON p.product_type_id = pt.id
-          ${cabecera.role === 'client' ? 'INNER JOIN location as l ON dt.location_id = l.id INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
+          ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
           WHERE 1=1
           ${query_from_date}
           ${query_to_date}
@@ -4712,7 +4718,7 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
         FROM donation_ticket as dt
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as p ON pdt.product_id = p.id
-        ${cabecera.role === 'client' ? 'INNER JOIN location as l ON dt.location_id = l.id INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
+        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
         WHERE 1=1
         ${query_from_date}
         ${query_to_date}
@@ -5139,7 +5145,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
         FROM product
         INNER JOIN product_type as pt ON product.product_type_id = pt.id
         LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
-        ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id' : ''}
+        ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
         ${cabecera.role === 'client' ? 'WHERE cl.client_id = ' + cabecera.client_id : ''}
         GROUP BY product.id
       ) as subquery
@@ -5166,7 +5172,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
           FROM product
           INNER JOIN product_type as pt ON product.product_type_id = pt.id
           LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
-          LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id
+          LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id
           WHERE cl.client_id = ?
           ${queryBuscarCount}
           GROUP BY product.id
@@ -5426,7 +5432,7 @@ router.get('/table/provider', verifyToken, async (req, res) => {
         DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
       FROM provider as p
-      ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id' : ''}
+      ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
       WHERE 1=1 ${queryBuscar}
       ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
       ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
@@ -5438,7 +5444,7 @@ router.get('/table/provider', verifyToken, async (req, res) => {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
           FROM provider as p
-          ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id' : ''}
+          ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
           WHERE 1=1 ${queryBuscar}
           ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
           ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
@@ -5615,7 +5621,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
 
 router.get('/view/user/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const { idUser } = req.params;
       const language = req.query.language || 'en';
@@ -5644,12 +5650,14 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
             u.household_size
           FROM user as u
           INNER JOIN role as r ON u.role_id = r.id
+          ${cabecera.role === 'client' ? 'LEFT JOIN client_user as cu ON u.id = cu.user_id' : ''}
           LEFT JOIN client as c ON u.client_id = c.id
           LEFT JOIN location as l ON u.location_id = l.id
           LEFT JOIN ethnicity as e ON u.ethnicity_id = e.id
           LEFT JOIN gender as g ON u.gender_id = g.id
-          WHERE u.id = ?`,
-        [idUser]
+          WHERE u.id = ?
+          ${cabecera.role === 'client' ? ' AND (cu.client_id = ? or u.client_id = ?)' : ''}`,
+        [idUser, cabecera.client_id, cabecera.client_id]
       );
 
       if (rows.length > 0) {
@@ -5848,7 +5856,7 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
 
 router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const { idLocation } = req.params;
 
@@ -5865,8 +5873,9 @@ router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
           LEFT JOIN client_location ON l.id = client_location.location_id
           LEFT JOIN client ON client_location.client_id = client.id
           WHERE l.id = ?
+          ${cabecera.role === 'client' ? ' AND client_location.client_id = ?' : ''}
           GROUP BY l.id`,
-        [idLocation]
+        [idLocation, cabecera.client_id]
       );
 
       if (rows.length > 0) {
@@ -5949,7 +5958,7 @@ router.get('/view/notification/:idNotification', verifyToken, async (req, res) =
 
 router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const { idDelivered } = req.params;
 
@@ -5962,21 +5971,34 @@ router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
           db.location_id, 
           l.community_city, 
           db.approved, 
-          DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
-          (SELECT JSON_ARRAYAGG(JSON_OBJECT('delivered_id', db2.id, 'delivery_username', u1.username, 'receiving_user_id', db2.receiving_user_id, 'community_city', l.community_city, 'approved', db2.approved, 'creation_date', DATE_FORMAT(CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T'))) 
-          FROM delivery_beneficiary as db2
-          LEFT JOIN user as u1 ON db2.delivering_user_id = u1.id
-          WHERE db2.receiving_user_id = db.receiving_user_id
-          ) as deliveries
+          DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
           FROM delivery_beneficiary as db
           INNER JOIN location as l ON db.location_id = l.id
           INNER JOIN user as user_beneficiary ON db.receiving_user_id = user_beneficiary.id
           LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
-          WHERE db.id = ?`,
-        [idDelivered]
+          WHERE db.id = ?
+          ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}`,
+        [idDelivered, cabecera.client_id]
       );
 
+
       if (rows.length > 0) {
+        // buscar historial de entregas del beneficiario
+        const [rows_history] = await mysqlConnection.promise().query(`
+        SELECT db.id as delivered_id, 
+          u.username as delivery_username,
+          db.receiving_user_id as receiving_user_id, 
+          l.community_city, 
+          db.approved, 
+          DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date 
+          FROM delivery_beneficiary as db
+          INNER JOIN location as l ON db.location_id = l.id
+          ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON db.location_id = cl.location_id' : ''}
+          LEFT JOIN user as u ON db.delivering_user_id = u.id
+          WHERE db.receiving_user_id = ?
+          ${cabecera.role === 'client' ? 'AND cl.client_id = ?' : ''}
+        `, [rows[0].receiving_user_id, cabecera.client_id]);
+
         var delivered = {};
 
         delivered["id"] = rows[0].id;
@@ -5988,8 +6010,7 @@ router.get('/view/delivered/:idDelivered', verifyToken, async (req, res) => {
         delivered["community_city"] = rows[0].community_city;
         delivered["approved"] = rows[0].approved;
         delivered["creation_date"] = rows[0].creation_date;
-        delivered["deliveries"] = rows[0].deliveries;
-        delivered["deliveries"].sort((a, b) => new Date(b.creation_date) - new Date(a.creation_date));
+        delivered["deliveries"] = rows_history;
 
         res.json(delivered);
       } else {
@@ -6076,7 +6097,7 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
 
 router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const { idProvider } = req.params;
 
@@ -6092,10 +6113,12 @@ router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
         FROM provider as p
         LEFT JOIN donation_ticket as t ON p.id = t.provider_id
         LEFT JOIN product_donation_ticket as pdt ON t.id = pdt.donation_ticket_id
+        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON t.location_id = cl.location_id' : ''}
         WHERE p.id = ?
+        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         GROUP BY t.id
         ORDER BY t.donation_id DESC`,
-        [idProvider]
+        [idProvider, cabecera.client_id]
       );
 
       if (rows.length > 0) {
@@ -6137,7 +6160,7 @@ router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
 
 router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const { idProduct } = req.params;
 
@@ -6156,9 +6179,11 @@ router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
         INNER JOIN product_type as pt ON p.product_type_id = pt.id
         LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
         LEFT JOIN donation_ticket as t ON pdt.donation_ticket_id = t.id
+        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON t.location_id = cl.location_id' : ''}
         WHERE p.id = ?
+        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         ORDER BY t.donation_id DESC`,
-        [idProduct]
+        [idProduct, cabecera.client_id]
       );
 
       if (rows.length > 0) {
@@ -6375,7 +6400,7 @@ router.get('/view/ethnicity/:idEthnicity', verifyToken, async (req, res) => {
 
 router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const { idTicket } = req.params;
 
@@ -6396,12 +6421,14 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         FROM donation_ticket as dt
         INNER JOIN provider as p ON dt.provider_id = p.id
         INNER JOIN location as loc ON dt.location_id = loc.id
+        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
         LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
-        WHERE dt.id = ?`,
-        [idTicket]
+        WHERE dt.id = ?
+        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}`,
+        [idTicket, cabecera.client_id]
       );
 
       if (rows.length > 0) {
@@ -6444,9 +6471,10 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const { idTicket } = req.params;
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
 
-    const [rows] = await mysqlConnection.promise().query(`select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
+    const [rows] = await mysqlConnection.promise().query(`
+                          select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
                           from donation_ticket_image \
                           where donation_ticket_id = ?`, [idTicket]);
 
