@@ -113,10 +113,24 @@ router.post('/signup', async (req, res) => {
   const otherEthnicity = firstForm.otherEthnicity || null;
 
   try {
+
+    // recuperar el client_id de la location_id, para eso se debe revisar primero en la tabla delivery log en la fecha actual, si no hay registros, se debe buscar en la tabla client_location un client_id asociado a la location_id
+    const [rows_client_id] = await mysqlConnection.promise().query('SELECT client_id FROM delivery_log WHERE date(creation_date) = CURDATE() and location_id = ?', [location_id]);
+    let client_id = null;
+    if (rows_client_id.length > 0) {
+      client_id = rows_client_id[0].client_id;
+    } else {
+      const [rows_client_id2] = await mysqlConnection.promise().query('SELECT client_id FROM client_location WHERE location_id = ?', [location_id]);
+      if (rows_client_id2.length > 0) {
+        client_id = rows_client_id2[0].client_id;
+      }
+    }
+
     const [rows] = await mysqlConnection.promise().query('insert into user(username, \
                                                           password, \
                                                           email, \
                                                           role_id, \
+                                                          client_id, \
                                                           firstname, \
                                                           lastname, \
                                                           date_of_birth, \
@@ -127,13 +141,13 @@ router.post('/signup', async (req, res) => {
                                                           gender_id, \
                                                           ethnicity_id, \
                                                           other_ethnicity) \
-                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [username, passwordHash, email, role_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, householdSize, gender, ethnicity, otherEthnicity]);
+                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, householdSize, gender, ethnicity, otherEthnicity]);
     if (rows.affectedRows > 0) {
       // save inserted user id
       const user_id = rows.insertId;
-      console.log("user_id: ", user_id);
-      console.log("secondForm: ", secondForm);
+      // insertar en tabla client_user el client_id y el user_id
+      const [rows_client_user] = await mysqlConnection.promise().query('insert into client_user(client_id, user_id) values(?,?)', [client_id, user_id]);
       // insert user_question, iterate array of questions and insert each question with its answer
       for (let i = 0; i < secondForm.length; i++) {
         const question_id = secondForm[i].question_id;
@@ -1246,37 +1260,67 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
         const location_id = req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null;
         const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
         if (receiving_location_id === location_id) {
-          // buscar en tabla delivery_beneficiary si existe un registro con client_id, receiving_user_id en el dia de hoy y filtrar el más reciente
+          // actualizar location_id y client_id del user beneficiary
+          const [rows2_update_user] = await mysqlConnection.promise().query(
+            'update user set location_id = ?, client_id = ? where id = ?', [location_id, client_id, receiving_user_id]
+          );
+          // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
+          // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
+          // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
+          const [rows_client_user] = await mysqlConnection.promise().query(
+            'select * from client_user where (user_id = ? and client_id = ?) or (date(creation_date) = curdate() and checked = "N")',
+            [receiving_user_id, client_id]
+          );
+          let insertarClientUser = true;
+          if (rows_client_user.length > 0) {
+            // recorrer el array de rows_client_user y si el client_id es el mismo que el de hoy y tiene checked 'N', actualizarlo, sino eliminarlo y crear uno nuevo
+            for (let i = 0; i < rows_client_user.length; i++) {
+              if (rows_client_user[i].client_id === client_id) {
+                insertarClientUser = false;
+                if (rows_client_user[i].checked === 'N') {
+                  // actualizar el campo checked de client_user por 'Y'
+                  const [rows_checked] = await mysqlConnection.promise().query(
+                    'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receiving_user_id, client_id]
+                  );
+                }
+              } else {
+                // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
+                if (rows_client_user[i].checked === 'N') {
+                  const [rows_delete] = await mysqlConnection.promise().query(
+                    'delete from client_user where user_id = ? and client_id = ?', [receiving_user_id, rows_client_user[i].client_id]
+                  );
+                }
+              }
+            }
+            if (insertarClientUser) {
+              // insertar en client_user
+              const [rows_insert] = await mysqlConnection.promise().query(
+                'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
+              );
+            }
+          } else {
+            // insertar en client_user
+            const [rows_insert] = await mysqlConnection.promise().query(
+              'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
+            );
+          }
+          // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
           const [rows] = await mysqlConnection.promise().query(
             'select id, approved, delivering_user_id, location_id, client_id \
-          from delivery_beneficiary \
-          where (client_id = ? OR client_id IS NULL) and receiving_user_id = ? and date(creation_date) = curdate() \
-          order by creation_date desc limit 1',
-            [client_id, receiving_user_id]
+              from delivery_beneficiary \
+              where location_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
+              order by creation_date desc limit 1',
+            [location_id, receiving_user_id]
           );
           // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
-          if (rows.length > 0 && rows[0].delivering_user_id === null && rows[0].client_id === null) {
+          if (rows.length > 0 && rows[0].delivering_user_id === null) {
             // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
             // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
             const [rows2] = await mysqlConnection.promise().query(
               'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?', [client_id, delivering_user_id, location_id, rows[0].id]
             );
-            // si las location_id son distintas, actualizar location_id del user beneficiary
-            if (rows[0].location_id !== location_id) {
-              const [rows3] = await mysqlConnection.promise().query(
-                'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
-              );
-              // crear 2 registros en beneficiary_log con operation_id 4 (off boarded) y 3 (on boarded) con el location_id anterior y el nuevo
-              const [rows4] = await mysqlConnection.promise().query(
-                'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
-                [receiving_user_id, 4, rows[0].location_id]
-              );
-              const [rows5] = await mysqlConnection.promise().query(
-                'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
-                [receiving_user_id, 3, location_id]
-              );
-            }
+
             if (rows2.affectedRows > 0) {
               return res.status(200).json({ could_approve: 'Y' });
             } else {
@@ -1301,16 +1345,12 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
             } else {
               // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
-              // actualizar location_id del user beneficiary
-              const [rows2] = await mysqlConnection.promise().query(
-                'update user set location_id = ? where id = ?', [location_id, receiving_user_id]
-              );
-
               // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
               const [rows3] = await mysqlConnection.promise().query(
                 'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
                 [client_id, delivering_user_id, receiving_user_id, location_id]
               );
+
               if (rows3.affectedRows > 0) {
                 return res.status(200).json({ could_approve: 'Y' });
               } else {
@@ -1515,37 +1555,141 @@ router.post('/onBoard', verifyToken, async (req, res) => {
         const { value } = req.body;
         const user_status_id = value ? 3 : 4;
         const location_id = req.body.location_id ? req.body.location_id : null;
-        const [rows] = await mysqlConnection.promise().query(
-          'update user set user_status_id = ?, location_id = ? where id = ?',
-          [user_status_id, location_id, user_id]
+
+        // obtener client_id de la nueva locacion, como hay locaciones con mas de un client_id hay que 
+        // revisar el onboarding que hizo el delivery en el dia de hoy
+        // utilizando la tabla delivery_log y ordenando por creation_date desc
+        // si no hubo onboarding de delivery en el dia de hoy, obtener algun client_id de la locacion
+        const [rows5_client_id] = await mysqlConnection.promise().query(
+          `select dl.client_id
+          from delivery_log as dl
+          where date(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
+          and dl.operation_id = 3 and dl.location_id = ?
+          order by dl.creation_date desc
+          limit 1`,
+          [location_id]
         );
-        // insertar en tabla beneficiary_log la operation
-        const [rows2] = await mysqlConnection.promise().query(
-          'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
-          [user_id, user_status_id, location_id]
-        );
-        // si operation es 3 crear registro en tabla delivery_beneficiary con receiving_user_id y location_id
-        if (user_status_id === 3) {
-          // verificar si ya existe un registro en delivery_beneficiary con receiving_user_id y location_id en el dia de hoy 
-          // filtrar el más reciente y si existe actualizar last_onboarding_date por la fecha actual, sino insertar
-          const [rows2] = await mysqlConnection.promise().query(
-            'select * from delivery_beneficiary where receiving_user_id = ? and location_id = ? and date(creation_date) = curdate() order by creation_date desc limit 1',
-            [user_id, location_id]
+        let client_id_temp = null;
+        if (rows5_client_id.length > 0) {
+          client_id_temp = rows5_client_id[0].client_id;
+        } else {
+          const [rows6_client_id] = await mysqlConnection.promise().query(
+            `select cl.client_id
+            from client_location as cl
+            where cl.location_id = ?`,
+            [location_id]
           );
-          if (rows2.length > 0) {
-            const [rows3] = await mysqlConnection.promise().query(
-              'update delivery_beneficiary set last_onboarding_date = now() where id = ?',
-              [rows2[0].id]
-            );
-          } else {
-            const [rows3] = await mysqlConnection.promise().query(
-              'insert into delivery_beneficiary(receiving_user_id, location_id) values(?,?)',
-              [user_id, location_id]
-            );
+          if (rows6_client_id.length > 0) {
+            client_id_temp = rows6_client_id[0].client_id;
           }
         }
 
-        if (rows.affectedRows > 0) {
+        const client_id = client_id_temp ? client_id_temp : null;
+        // si operation es 3 crear registro en tabla delivery_beneficiary con receiving_user_id y location_id
+        if (user_status_id === 3) {
+          // verificar si ya existe un registro en delivery_beneficiary con receiving_user_id en el dia de hoy 
+          // filtrar el más reciente y si la location_id es igual actualizar last_onboarding_date por la fecha actual, sino eliminarla e insertar la nueva
+          const [rows2] = await mysqlConnection.promise().query(
+            `SELECT db.id, db.location_id
+             FROM delivery_beneficiary AS db
+             WHERE db.delivering_user_id IS NULL
+               AND db.receiving_user_id = ?
+               AND DATE(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
+             ORDER BY db.creation_date DESC
+             LIMIT 1`,
+            [user_id]
+          );
+          // ver los client_id del receiving_user_id en la tabla client_user y si no existe el client_id, insertarlo
+          const [rows2_client_id] = await mysqlConnection.promise().query(
+            `SELECT cu.client_id, cu.checked, 
+                    IF(DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(cu.creation_date, '+00:00', 'America/Los_Angeles')), 'Y', 'N') as client_same_date
+           FROM client_user AS cu 
+           WHERE cu.user_id = ?`,
+            [user_id]
+          );
+          if (rows2.length > 0 && rows2_client_id.length > 0) {
+            if (rows2[0].location_id === location_id) {
+              const [rows3] = await mysqlConnection.promise().query(
+                'update delivery_beneficiary set last_onboarding_date = now() where id = ?',
+                [rows2[0].id]
+              );
+            } else {
+              // actualizar la locacion anterior por la nueva
+              const [rows] = await mysqlConnection.promise().query(
+                'UPDATE delivery_beneficiary SET client_id = ?, receiving_user_id = ?, location_id = ?, last_onboarding_date = now() WHERE id = ?',
+                [client_id, user_id, location_id, rows2[0].id]
+              );
+
+              let client_id_exists = false;
+              let update_client_id = false;
+              let client_id_to_update = null;
+              // verificar si el receiving_user_id tiene el client_id insertado en su tabla client_user (no importa la fecha),
+              // si no es asi, insertar el nuevo client_id en la tabla client_user
+              for (let i = 0; i < rows2_client_id.length; i++) {
+                if (rows2_client_id[i].client_id === client_id) {
+                  client_id_exists = true;
+                } else {
+                  if (rows2_client_id[i].checked === 'N') {
+                    if (rows2_client_id[i].client_same_date === 'Y') {
+                      update_client_id = true;
+                      client_id_to_update = rows2_client_id[i].client_id;
+                    }
+                  }
+                }
+              }
+
+              if (!client_id_exists) {
+                if (update_client_id) {
+                  const [rows6] = await mysqlConnection.promise().query(
+                    `update client_user set client_id = ? where user_id = ? and client_id = ?`,
+                    [client_id, user_id, client_id_to_update]
+                  );
+                } else {
+                  const [rows7] = await mysqlConnection.promise().query(
+                    'insert into client_user(user_id, client_id) values(?,?)',
+                    [user_id, client_id]
+                  );
+                }
+              } else {
+                if (update_client_id) {
+                  // eliminar el client_id que no es el actual
+                  const [rows8] = await mysqlConnection.promise().query(
+                    'delete from client_user where user_id = ? and client_id = ?',
+                    [user_id, client_id_to_update]
+                  );
+                }
+              }
+
+            }
+          } else {
+            // insertar en tabla delivery_beneficiary la nueva locacion
+            if (rows2.length === 0) {
+              const [rows3] = await mysqlConnection.promise().query(
+                'insert into delivery_beneficiary(client_id, receiving_user_id, location_id) values(?,?,?)',
+                [client_id, user_id, location_id]
+              );
+            }
+            // insertar el client_id en la tabla client_user
+            if (rows2_client_id.length === 0) {
+              const [rows7] = await mysqlConnection.promise().query(
+                'insert into client_user(user_id, client_id) values(?,?)',
+                [user_id, client_id]
+              );
+            }
+          }
+        }
+        // actualizar user
+        const [rows_update_user] = await mysqlConnection.promise().query(
+          'update user set user_status_id = ?, location_id = ?, client_id = ? where id = ?',
+          [user_status_id, location_id, client_id, user_id]
+        );
+        // insertar en tabla beneficiary_log la operation
+        const [rows_insert_beneficiary_log] = await mysqlConnection.promise().query(
+          'insert into beneficiary_log(user_id, operation_id, location_id) values(?,?,?)',
+          [user_id, user_status_id, location_id]
+        );
+
+        if (rows_update_user.affectedRows > 0) {
           res.json('Status updated successfully');
         } else {
           res.status(500).json('Could not update status');
@@ -2028,13 +2172,12 @@ router.get('/ethnicity', async (req, res) => {
 
 router.get('/pounds-delivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
-      // sum total_weight from donation_ticket, if cabecera.role === 'client' then sum only donations from client_id (cabecera.client_id)
+      // sum total_weight from donation_ticket
       const [rows] = await mysqlConnection.promise().query(
-        `select sum(total_weight) as pounds_delivered from donation_ticket
-        ${cabecera.role === 'client' ? 'where client_id = ?' : ''}`,
-        [cabecera.client_id]
+        `select sum(total_weight) as pounds_delivered 
+        from donation_ticket`
       );
       if (rows[0].pounds_delivered === null) {
         rows[0].pounds_delivered = 0;
@@ -2045,7 +2188,28 @@ router.get('/pounds-delivered', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `select sum(dt.total_weight) as pounds_delivered 
+          from donation_ticket as dt
+          inner join location as l on dt.location_id = l.id
+          inner join client_location as cl on l.id = cl.location_id
+          where cl.client_id = ?`,
+          [cabecera.client_id]
+        );
+        if (rows[0].pounds_delivered === null) {
+          rows[0].pounds_delivered = 0;
+        }
+        res.json(rows[0].pounds_delivered);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -2090,7 +2254,8 @@ router.get('/total-days-operation', verifyToken, async (req, res) => {
     try {
       // count distinct days from field creation_date in table delivery_beneficiary, if cabecera.role === 'client' then sum only days from client_id (cabecera.client_id)
       const [rows] = await mysqlConnection.promise().query(
-        `select count(distinct date(creation_date)) as total_days_operation from delivery_beneficiary
+        `select count(distinct date(creation_date)) as total_days_operation 
+        from delivery_beneficiary
         ${cabecera.role === 'client' ? 'where client_id = ?' : ''}`,
         [cabecera.client_id]
       );
@@ -2106,16 +2271,17 @@ router.get('/total-days-operation', verifyToken, async (req, res) => {
 
 router.get('/total-from-role/:role', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
       const { role } = req.params;
       if (role === 'beneficiary' || role === 'stocker' || role === 'delivery') {
-        // count users with role stocker in table user inner join role, if cabecera.role === 'client' then sum only users from client_id (cabecera.client_id)
+        // count users with role in table user inner join role
         const [rows] = await mysqlConnection.promise().query(
-          `select count(user.id) as total from user
-        inner join role on user.role_id = role.id
-        where role.name = ? ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
-          [role, cabecera.client_id]
+          `select count(user.id) as total 
+          from user
+          inner join role on user.role_id = role.id
+          where role.name = ?`,
+          [role]
         );
         res.json(rows[0].total);
       } else {
@@ -2126,23 +2292,44 @@ router.get('/total-from-role/:role', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const { role } = req.params;
+        if (role === 'beneficiary') {
+          // cuenta los beneficiarios que tienen el client_id en la tabla client_user
+          const [rows] = await mysqlConnection.promise().query(
+            `SELECT COUNT(*) AS total
+             FROM client_user as cu
+             INNER JOIN user as u ON cu.user_id = u.id
+              WHERE u.role_id = 5 AND cu.client_id = ?`,
+            [cabecera.client_id]
+          );
+          res.json(rows[0].total);
+        } else {
+          res.status(400).json('Bad request');
+        }
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
 router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
-      // get percentage of users with role 'beneficiary' that are in table 'delivery_beneficiary' compared to the total of beneficiaries in table user, if cabecera.role === 'client' then sum only users from client_id (cabecera.client_id)
+      // get percentage of users with role 'beneficiary' that are approved in table 'delivery_beneficiary' compared to the total of beneficiaries in table user
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
           COUNT(DISTINCT user.id) AS total_beneficiaries_served,
-          (SELECT COUNT(*) FROM user WHERE role_id = 5 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}) AS total_beneficiaries
+          (SELECT COUNT(*) FROM user WHERE role_id = 5) AS total_beneficiaries
         FROM user
         INNER JOIN delivery_beneficiary ON user.id = delivery_beneficiary.receiving_user_id
-        WHERE user.role_id = 5 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''} AND delivery_beneficiary.approved = 'Y'`,
-        [cabecera.client_id, cabecera.client_id]
+        WHERE user.role_id = 5 AND delivery_beneficiary.approved = 'Y'`
       );
       const totalBeneficiariesServed = rows[0].total_beneficiaries_served;
       const totalBeneficiaries = rows[0].total_beneficiaries;
@@ -2153,7 +2340,30 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      // get percentage of users with role 'beneficiary' that are approved in table 'delivery_beneficiary' using field client_id and compared to the total of beneficiaries in table client_user with client_id
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `SELECT 
+            COUNT(DISTINCT u.id) AS total_beneficiaries_served,
+            (SELECT COUNT(*) FROM client_user WHERE client_id = ?) AS total_beneficiaries
+          FROM user AS u
+          INNER JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
+          WHERE u.role_id = 5 AND db.approved = 'Y' AND db.client_id = ?`,
+          [cabecera.client_id, cabecera.client_id]
+        );
+        const totalBeneficiariesServed = rows[0].total_beneficiaries_served;
+        const totalBeneficiaries = rows[0].total_beneficiaries;
+        const percentage = (totalBeneficiariesServed / totalBeneficiaries * 100).toFixed(2);
+        res.json(percentage);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -2162,8 +2372,11 @@ router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        `select count(user.id) as total from user
-        where user.role_id = 5 and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
+        `select count(user.id) as total 
+        from user
+        where user.role_id = 5 
+        and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
+        ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
         [cabecera.client_id]
       );
       res.json(rows[0].total);
@@ -2182,9 +2395,13 @@ router.get('/total-beneficiaries-recurring-today', verifyToken, async (req, res)
     try {
       // beneficiarios que ya estaban registrados en una fecha distinta a la de hoy y que aparecieron en delivery_beneficiary en la fecha de hoy
       const [rows] = await mysqlConnection.promise().query(
-        `select count(user.id) as total from user
-          inner join delivery_beneficiary on user.id = delivery_beneficiary.receiving_user_id
-          where user.role_id = 5 and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) and date(CONVERT_TZ(delivery_beneficiary.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
+        `select count(distinct user.id) as total
+          from user
+          inner join delivery_beneficiary as db on user.id = db.receiving_user_id
+          where user.role_id = 5 
+          and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
+          and date(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
+          ${cabecera.role === 'client' ? 'and db.client_id = ?' : ''}`,
         [cabecera.client_id]
       );
       res.json(rows[0].total);
@@ -2204,7 +2421,7 @@ para que el beneficiario (user.role = 5) sea considerado como beneficiario calif
 // TO-DO
 router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
       // const [rows] = await mysqlConnection.promise().query(
       //   `SELECT
@@ -2223,9 +2440,7 @@ router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
         `SELECT
           COUNT(DISTINCT user.id) AS total_beneficiaries_qualified
         FROM user
-        WHERE user.role_id = 5
-        ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}`,
-        [cabecera.client_id]
+        WHERE user.role_id = 5`
       );
       res.json(rows[0].total_beneficiaries_qualified);
     } catch (err) {
@@ -2233,7 +2448,23 @@ router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        // TO-DO por ahora cuenta todos
+        const [rows] = await mysqlConnection.promise().query(
+          `SELECT COUNT(*) AS total_beneficiaries_qualified
+          FROM client_user
+          WHERE client_id = ?`,
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total_beneficiaries_qualified);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -2245,8 +2476,7 @@ router.get('/total-clients', verifyToken, async (req, res) => {
         `SELECT
           COUNT(DISTINCT user.id) AS total_clients
         FROM user
-        WHERE user.role_id = 2`,
-        [cabecera.client_id]
+        WHERE user.role_id = 2`
       );
       res.json(rows[0].total_clients);
     } catch (err) {
@@ -2260,15 +2490,14 @@ router.get('/total-clients', verifyToken, async (req, res) => {
 
 router.get('/total-enabled-users', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           COUNT(DISTINCT user.id) AS total_enabled_users
         FROM user
         WHERE user.enabled = 'Y'
-        ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}`,
-        [cabecera.client_id]
+        `
       );
       res.json(rows[0].total_enabled_users);
     } catch (err) {
@@ -2276,20 +2505,34 @@ router.get('/total-enabled-users', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `SELECT
+            COUNT(DISTINCT u.id) AS total_enabled_users
+            FROM user as u
+            WHERE u.enabled = 'Y' AND u.client_id = ? AND u.role_id = 2`,
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total_enabled_users);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
 router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           COUNT(DISTINCT donation_ticket.id) AS total_tickets_uploaded
-        FROM donation_ticket
-        ${cabecera.role === 'client' ? 'WHERE donation_ticket.client_id = ?' : ''}`,
-        [cabecera.client_id]
+        FROM donation_ticket`
       );
       res.json(rows[0].total_tickets_uploaded);
     } catch (err) {
@@ -2297,7 +2540,25 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `SELECT
+            COUNT(DISTINCT dt.id) AS total_tickets_uploaded
+            FROM donation_ticket as dt
+            INNER JOIN location as l ON dt.location_id = l.id
+            INNER JOIN client_location as cl ON l.id = cl.location_id
+            WHERE cl.client_id = ?`,
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total_tickets_uploaded);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -2340,7 +2601,7 @@ router.get('/total-locations-enabled', verifyToken, async (req, res) => {
 
 router.get('/total-products-uploaded', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -2353,7 +2614,27 @@ router.get('/total-products-uploaded', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `SELECT
+            COUNT(DISTINCT p.id) AS total_products_uploaded
+            FROM product as p
+            INNER JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
+            INNER JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
+            INNER JOIN location as l ON dt.location_id = l.id
+            INNER JOIN client_location as cl ON l.id = cl.location_id
+            WHERE cl.client_id = ?`,
+          [cabecera.client_id]
+        );
+        res.json(rows[0].total_products_uploaded);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -2365,7 +2646,8 @@ router.get('/total-delivered', verifyToken, async (req, res) => {
         `SELECT
             COUNT(db.id) AS total_delivered
           FROM delivery_beneficiary as db
-          WHERE db.approved = 'Y' ${cabecera.role === 'client' ? 'and db.client_id = ?' : ''}`,
+          ${cabecera.role === 'client' ? 'WHERE db.client_id = ?' : ''}`,
+        [cabecera.client_id]
       );
       res.json(rows[0].total_delivered);
     } catch (err) {
@@ -2438,7 +2720,7 @@ router.get('/map/locations', verifyToken, async (req, res) => {
 
 router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin') {
     try {
       const language = req.query.language || 'en';
       const { tabSelected } = req.params;
@@ -2457,10 +2739,8 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
                 SUM(total_weight) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM donation_ticket
-              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-            [cabecera.client_id]
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
           );
           isTabSelectedCorrect = true;
           break;
@@ -2474,10 +2754,8 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
                 COUNT(DISTINCT DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), location_id) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM delivery_beneficiary
-              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-            [cabecera.client_id]
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
           );
           isTabSelectedCorrect = true;
           break;
@@ -2491,27 +2769,24 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
                 COUNT(DISTINCT DAY(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM delivery_beneficiary
-              ${cabecera.role === 'client' ? 'WHERE client_id = ?' : ''}
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-            [cabecera.client_id]
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
           );
           isTabSelectedCorrect = true;
           break;
         case 'beneficiaries':
-          name = 'Beneficiaries registered';
+          name = 'Participants registered';
           if (language === 'es') {
-            name = 'Beneficiarios registrados';
+            name = 'Participantes registrados';
           }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
                 COUNT(DISTINCT user.id) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM user
-              WHERE user.role_id = 5 ${cabecera.role === 'client' ? 'AND user.client_id = ?' : ''}
+              WHERE user.role_id = 5
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
-            [cabecera.client_id]
+              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
           );
           isTabSelectedCorrect = true;
           break;
@@ -2531,7 +2806,103 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
       res.status(500).json('Internal server error');
     }
   } else {
-    res.status(401).json('Unauthorized');
+    if (cabecera.role === 'client') {
+      try {
+        const language = req.query.language || 'en';
+        const { tabSelected } = req.params;
+        let name = '';
+        var rows = [];
+        var series = [];
+        var isTabSelectedCorrect = false;
+        switch (tabSelected) {
+          case 'pounds':
+            name = 'Pounds delivered';
+            if (language === 'es') {
+              name = 'Libras entregadas';
+            }
+            [rows] = await mysqlConnection.promise().query(
+              `SELECT
+                  SUM(dt.total_weight) AS value,
+                  DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                FROM donation_ticket as dt
+                INNER JOIN location as l ON dt.location_id = l.id
+                INNER JOIN client_location as cl ON l.id = cl.location_id
+                WHERE cl.client_id = ?
+                GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
+                ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
+            );
+            isTabSelectedCorrect = true;
+            break;
+          case 'locationsWorking':
+            name = 'Locations working';
+            if (language === 'es') {
+              name = 'Ubicaciones trabajando';
+            }
+            [rows] = await mysqlConnection.promise().query(
+              `SELECT
+                  COUNT(DISTINCT DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), location_id) AS value,
+                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                FROM delivery_beneficiary
+                WHERE client_id = ?
+                GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+                ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
+            );
+            isTabSelectedCorrect = true;
+            break;
+          case 'operations':
+            name = 'Days of operation';
+            if (language === 'es') {
+              name = 'Días de operación';
+            }
+            [rows] = await mysqlConnection.promise().query(
+              `SELECT
+                  COUNT(DISTINCT DAY(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))) AS value,
+                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                FROM delivery_beneficiary
+                WHERE client_id = ?
+                GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+                ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
+            );
+            isTabSelectedCorrect = true;
+            break;
+          case 'beneficiaries':
+            name = 'Participants with food';
+            if (language === 'es') {
+              name = 'Participantes con alimento';
+            }
+            [rows] = await mysqlConnection.promise().query(
+              `SELECT
+                  COUNT(DISTINCT delivery_beneficiary.receiving_user_id) AS value,
+                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                FROM delivery_beneficiary
+                WHERE client_id = ?
+                GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
+                ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
+            );
+            isTabSelectedCorrect = true;
+            break;
+          default:
+            res.status(400).json('Bad request');
+            break;
+        }
+        if (isTabSelectedCorrect && rows.length > 0) {
+          series = rows.map(row => ({
+            value: row.value,
+            name: row.name
+          }));
+        }
+        res.json({ name, series });
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
   }
 });
 
@@ -2643,11 +3014,11 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -2698,6 +3069,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
                 uq.answer_text AS answer_text,
                 uq.answer_number AS answer_number
         FROM user u
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN gender AS g ON u.gender_id = g.id
         INNER JOIN ethnicity AS eth ON u.ethnicity_id = eth.id
         LEFT JOIN location AS loc ON u.location_id = loc.id
@@ -2717,7 +3089,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY u.id, q.id, a.id
         ORDER BY u.id, q.id, a.id`,
         [from_date, toDate, from_date, toDate, from_date, toDate, from_date, toDate, from_date, toDate, cabecera.client_id]
@@ -3245,11 +3617,11 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -3266,6 +3638,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
                 uq.answer_text AS answer_text,
                 uq.answer_number AS answer_number
         FROM user u
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         LEFT JOIN location AS loc ON u.location_id = loc.id
         CROSS JOIN question AS q
         LEFT JOIN answer_type as at ON q.answer_type_id = at.id
@@ -3281,7 +3654,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         order by q.id, a.id`,
         [cabecera.client_id]
       );
@@ -3342,9 +3715,8 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
               JOIN answer_type at ON q.answer_type_id = at.id
               JOIN answer a ON q.id = a.question_id
               WHERE q.enabled = 'Y' AND at.id = 3 OR at.id = 4
-              ${cabecera.role === 'client' ? 'AND q.client_id = ?' : ''}
               ORDER BY q.id, a.id
-      `, [cabecera.client_id]);
+      `);
 
       const possibleAnswers = {};
       for (const row of answerRows) {
@@ -3445,11 +3817,11 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -3461,6 +3833,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
         ${language === 'en' ? 'g.name' : 'g.name_es'} AS name,
         COUNT(*) AS total
         FROM user u
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN gender AS g ON u.gender_id = g.id
         LEFT JOIN location AS loc ON u.location_id = loc.id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
@@ -3472,7 +3845,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY g.name`,
         [cabecera.client_id]
       );
@@ -3525,11 +3898,11 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -3541,6 +3914,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
         ${language === 'en' ? 'e.name' : 'e.name_es'} AS name,
         COUNT(*) AS total
         FROM user u
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN ethnicity AS e ON u.ethnicity_id = e.id
         LEFT JOIN location AS loc ON u.location_id = loc.id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
@@ -3552,7 +3926,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY e.name`,
         [cabecera.client_id]
       );
@@ -3605,11 +3979,11 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -3621,6 +3995,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
         u.household_size AS name,
         COUNT(*) AS total
         FROM user u
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         LEFT JOIN location AS loc ON u.location_id = loc.id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
         ${query_from_date}
@@ -3631,7 +4006,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY u.household_size
         ORDER BY u.household_size`,
         [cabecera.client_id]
@@ -3710,11 +4085,11 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -3723,9 +4098,10 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
-        TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) AS name,
+        TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS name,
         COUNT(*) AS total
         FROM user u
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         LEFT JOIN location AS loc ON u.location_id = loc.id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
         ${query_from_date}
@@ -3736,7 +4112,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY name
         ORDER BY name`,
         [cabecera.client_id]
@@ -3815,11 +4191,11 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -3832,7 +4208,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final para que la comparación sea menor que la fecha final
 
       if (cabecera.role === 'client') {
-        clientCondition = 'and u2.client_id = ?';
+        clientCondition = 'and cu.client_id = ?';
         params.push(cabecera.client_id);
       }
 
@@ -3850,9 +4226,25 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
-          (SELECT COUNT(*) FROM user u WHERE u.role_id = 5 AND u.enabled = 'Y' ${clientCondition}) AS total,
-          (SELECT COUNT(*) FROM user u WHERE u.role_id = 5 AND u.enabled = 'Y' AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? ${clientCondition} ${query_locations} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS new,
-          (SELECT COUNT(DISTINCT db.receiving_user_id) FROM delivery_beneficiary db INNER JOIN user u ON db.receiving_user_id = u.id WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? ${clientCondition} ${query_locations} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS recurring
+          (SELECT COUNT(*) 
+              FROM user u 
+              ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+              WHERE u.role_id = 5 
+                AND u.enabled = 'Y' ${clientCondition}) AS total,
+          (SELECT COUNT(*) 
+              FROM user u 
+              ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+              WHERE u.role_id = 5 
+                AND u.enabled = 'Y' 
+                AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') 
+                BETWEEN ? AND ? ${clientCondition} ${query_locations} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS new,
+          (SELECT COUNT(DISTINCT db.receiving_user_id) 
+              FROM delivery_beneficiary db 
+              INNER JOIN user u ON db.receiving_user_id = u.id 
+              ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+              WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') 
+                BETWEEN ? AND ? 
+                AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? ${clientCondition} ${query_locations} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS recurring
         LIMIT 1`,
         params
       );
@@ -3908,11 +4300,11 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -3924,6 +4316,7 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
           IF(u.email IS NULL, ${language === 'en' ? "'No'" : "'No'"}, ${language === 'en' ? "'Yes'" : "'Si'"}) AS name,
           COUNT(*) AS total
           FROM user u
+          ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
           WHERE u.role_id = 5 AND u.enabled = 'Y' 
           ${query_from_date}
           ${query_to_date}
@@ -3933,7 +4326,7 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
           ${query_min_age}
           ${query_max_age}
           ${query_zipcode}
-          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+          ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
           GROUP BY name`,
         [cabecera.client_id]
       );
@@ -3986,11 +4379,11 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ' + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = 'AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ' + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -4002,6 +4395,7 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
           IF(u.phone IS NULL, ${language === 'en' ? "'No'" : "'No'"}, ${language === 'en' ? "'Yes'" : "'Si'"}) AS name,
           COUNT(*) AS total
           FROM user u
+          ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
           WHERE u.role_id = 5 AND u.enabled = 'Y' 
           ${query_from_date}
           ${query_to_date}
@@ -4011,7 +4405,7 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
           ${query_min_age}
           ${query_max_age}
           ${query_zipcode}
-          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}
+          ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
           GROUP BY name`,
         [cabecera.client_id]
       );
@@ -4068,14 +4462,18 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
 
       const [rows_reach] = await mysqlConnection.promise().query(
         `SELECT 
-          SUM(DISTINCT u.household_size) AS reach
-          FROM delivery_beneficiary as db
-          INNER JOIN user as u ON db.receiving_user_id = u.id
-          WHERE u.role_id = 5 AND u.enabled = 'Y' 
-          ${query_from_date}
-          ${query_to_date}
-          ${query_locations}
-          ${cabecera.role === 'client' ? 'and u.client_id = ?' : ''}`,
+          SUM(u.household_size) AS reach
+          FROM (
+            SELECT DISTINCT u.id, u.household_size
+            FROM delivery_beneficiary as db
+            INNER JOIN user as u ON db.receiving_user_id = u.id
+            ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+            WHERE u.role_id = 5 AND u.enabled = 'Y' 
+            ${query_from_date}
+            ${query_to_date}
+            ${query_locations}
+            ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
+          ) as u`,
         [cabecera.client_id]
       );
 
@@ -4085,13 +4483,14 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
           FROM donation_ticket as dt
           INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           INNER JOIN product as p ON pdt.product_id = p.id
+          ${cabecera.role === 'client' ? 'INNER JOIN location as l ON dt.location_id = l.id INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
           WHERE 1=1
           ${query_from_date_product}
           ${query_to_date_product}
           ${query_locations_product}
           ${query_providers}
           ${query_product_types}
-          ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+          ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
           `,
         [cabecera.client_id]
       );
@@ -4152,13 +4551,14 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
           INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           INNER JOIN product as p ON pdt.product_id = p.id
           INNER JOIN product_type as pt ON p.product_type_id = pt.id
+          ${cabecera.role === 'client' ? 'INNER JOIN location as l ON dt.location_id = l.id INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
           WHERE 1=1
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
           ${query_providers}
           ${query_product_types}
-          ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+          ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
           GROUP BY name`,
         [cabecera.client_id]
       );
@@ -4213,13 +4613,14 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         FROM donation_ticket as dt
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN location as l ON dt.location_id = l.id
+        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
         WHERE 1=1
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
         ${query_providers}
         ${query_product_types}
-        ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
         GROUP BY name
         ORDER BY name`,
         [cabecera.client_id]
@@ -4311,13 +4712,14 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
         FROM donation_ticket as dt
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as p ON pdt.product_id = p.id
+        ${cabecera.role === 'client' ? 'INNER JOIN location as l ON dt.location_id = l.id INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
         WHERE 1=1
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
         ${query_providers}
         ${query_product_types}
-        ${cabecera.role === 'client' ? 'and dt.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
         GROUP BY name
         ORDER BY total DESC`,
         [cabecera.client_id]
@@ -4452,7 +4854,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
 
   if (buscar) {
     buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
+    if (cabecera.role === 'admin' || cabecera.role === 'client') {
       queryBuscar = `AND (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
@@ -4466,16 +4868,22 @@ router.get('/table/user', verifyToken, async (req, res) => {
         break;
       case 'beneficiary':
         queryTableRole = 'AND role.id = 5';
+        if (cabecera.role === 'client') {
+          queryTableRole += ' AND client_user.client_id = ' + cabecera.client_id;
+        }
         break;
       case 'client':
         queryTableRole = 'AND role.id = 2';
+        if (cabecera.role === 'client') {
+          queryTableRole += ' AND user.client_id = ' + cabecera.client_id;
+        }
         break;
       default:
         queryTableRole = '';
     }
   }
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const query = `SELECT
       user.id,
@@ -4488,6 +4896,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
       DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM user
       INNER JOIN role ON user.role_id = role.id
+      ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON user.id = client_user.user_id' : ''}
       WHERE 1=1 
       ${queryBuscar}
       ${queryTableRole}
@@ -4502,6 +4911,7 @@ router.get('/table/user', verifyToken, async (req, res) => {
         SELECT COUNT(*) as count
         FROM user
         INNER JOIN role ON user.role_id = role.id
+        ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON user.id = client_user.user_id' : ''}
         WHERE 1=1
         ${queryBuscar}
         ${queryTableRole}
@@ -4544,12 +4954,12 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
 
   if (buscar) {
     buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (db.id like '${buscar}' or db.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or db.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or db.location_id like '${buscar}' or location.community_city like '${buscar}' or db.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    if (cabecera.role === 'admin' || cabecera.role === 'client') {
+      queryBuscar = ` AND (db.id like '${buscar}' or db.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or db.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or db.location_id like '${buscar}' or location.community_city like '${buscar}' or db.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const query = `SELECT
       db.id,
@@ -4565,7 +4975,9 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
       INNER JOIN location ON db.location_id = location.id
       INNER JOIN user as user_beneficiary ON db.receiving_user_id = user_beneficiary.id
       LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
+      WHERE 1=1
       ${queryBuscar}
+      ${cabecera.role === 'client' ? 'AND db.client_id = ' + cabecera.client_id : ''}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
@@ -4579,7 +4991,9 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
         INNER JOIN location ON db.location_id = location.id
         INNER JOIN user as user_beneficiary ON db.receiving_user_id = user_beneficiary.id
         LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
+        WHERE 1=1
         ${queryBuscar}
+        ${cabecera.role === 'client' ? 'AND db.client_id = ' + cabecera.client_id : ''}
       `);
 
         const numOfResults = countRows[0].count;
@@ -4619,12 +5033,12 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
 
   if (buscar) {
     buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `WHERE (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    if (cabecera.role === 'admin' || cabecera.role === 'client') {
+      queryBuscar = ` AND (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const query = `SELECT
       donation_ticket.id,
@@ -4639,7 +5053,10 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
       FROM donation_ticket
       INNER JOIN provider ON donation_ticket.provider_id = provider.id
       INNER JOIN location ON donation_ticket.location_id = location.id
+      ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
       INNER JOIN product_donation_ticket ON donation_ticket.id = product_donation_ticket.donation_ticket_id
+      WHERE 1=1
+      ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
       ${queryBuscar}
       GROUP BY donation_ticket.id
       ORDER BY ${queryOrderBy}
@@ -4654,7 +5071,10 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
         FROM donation_ticket
         INNER JOIN provider ON donation_ticket.provider_id = provider.id
         INNER JOIN location ON donation_ticket.location_id = location.id
+        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
         INNER JOIN product_donation_ticket ON donation_ticket.id = product_donation_ticket.donation_ticket_id
+        WHERE 1=1
+        ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
         ${queryBuscar}
       `);
 
@@ -4699,13 +5119,13 @@ router.get('/table/product', verifyToken, async (req, res) => {
 
   if (buscar) {
     buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or pt.name like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      queryBuscarCount = `AND (product.id like '${buscar}' or product.name like '${buscar}' or product_type.name like '${buscar}' or product_type.name_es like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    if (cabecera.role === 'admin' || cabecera.role === 'client') {
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or product_type like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscarCount = `AND (product.id like '${buscar}' or product.name like '${buscar}' or pt.name like '${buscar}' or pt.name_es like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const query = `
       SELECT * FROM (
@@ -4719,19 +5139,40 @@ router.get('/table/product', verifyToken, async (req, res) => {
         FROM product
         INNER JOIN product_type as pt ON product.product_type_id = pt.id
         LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
+        ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id' : ''}
+        ${cabecera.role === 'client' ? 'WHERE cl.client_id = ' + cabecera.client_id : ''}
         GROUP BY product.id
       ) as subquery
-      WHERE 1=1 ${queryBuscar}
+      WHERE 1=1 
+      ${queryBuscar}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
       const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
       if (rows.length > 0) {
-        const [countRows] = await mysqlConnection.promise().query(`
+        let countRows;
+        if (cabecera.role === 'admin') {
+          [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
           FROM product
+          INNER JOIN product_type as pt ON product.product_type_id = pt.id
+          LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
           WHERE 1=1 ${queryBuscarCount}
         `);
+        } else {
+          // client
+          [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM product
+          INNER JOIN product_type as pt ON product.product_type_id = pt.id
+          LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
+          LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id
+          WHERE cl.client_id = ?
+          ${queryBuscarCount}
+          GROUP BY product.id
+        `, [cabecera.client_id])
+        }
+
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
@@ -4971,21 +5412,24 @@ router.get('/table/provider', verifyToken, async (req, res) => {
 
   if (buscar) {
     buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    if (cabecera.role === 'admin' || cabecera.role === 'client') {
+      queryBuscar = `AND (p.id like '${buscar}' or p.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const query = `
       SELECT
-        id,
-        name,
-        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
-        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
-      FROM provider
+        p.id,
+        p.name,
+        DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM provider as p
+      ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id' : ''}
       WHERE 1=1 ${queryBuscar}
+      ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
+      ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -4993,8 +5437,11 @@ router.get('/table/provider', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
-          FROM provider
+          FROM provider as p
+          ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN location as l ON dt.location_id = l.id LEFT JOIN client_location as cl ON l.id = cl.location_id' : ''}
           WHERE 1=1 ${queryBuscar}
+          ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
+          ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
         `);
 
         const numOfResults = countRows[0].count;
@@ -5104,7 +5551,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
     havingClause = `HAVING (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or creation_date like '${buscar}')`;
   }
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const query = `SELECT
         location.id,
@@ -5117,6 +5564,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
         FROM location
         LEFT JOIN client_location ON location.id = client_location.location_id
         LEFT JOIN client ON client_location.client_id = client.id
+        ${cabecera.role === 'client' ? 'WHERE client_location.client_id = ' + cabecera.client_id : ''}
         GROUP BY location.id
         ${havingClause}
         ORDER BY ${queryOrderBy}
@@ -5141,6 +5589,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
           FROM location
           LEFT JOIN client_location ON location.id = client_location.location_id
           LEFT JOIN client ON client_location.client_id = client.id
+          ${cabecera.role === 'client' ? 'WHERE client_location.client_id = ' + cabecera.client_id : ''}
           GROUP BY location.id
           ${havingClause}
         ) as subquery
