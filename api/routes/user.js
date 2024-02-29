@@ -1260,108 +1260,115 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
         const receiving_location_id = req.body.location_id;
         const location_id = req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null;
         const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
-        if (receiving_location_id === location_id) {
-          // actualizar location_id y client_id del user beneficiary
-          const [rows2_update_user] = await mysqlConnection.promise().query(
-            'update user set location_id = ?, client_id = ? where id = ?', [location_id, client_id, receiving_user_id]
-          );
-          // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
-          // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
-          // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
-          const [rows_client_user] = await mysqlConnection.promise().query(
-            'select * from client_user where (user_id = ? and client_id = ?) or (date(creation_date) = curdate() and checked = "N")',
-            [receiving_user_id, client_id]
-          );
-          let insertarClientUser = true;
-          if (rows_client_user.length > 0) {
-            // recorrer el array de rows_client_user y si el client_id es el mismo que el de hoy y tiene checked 'N', actualizarlo, sino eliminarlo y crear uno nuevo
-            for (let i = 0; i < rows_client_user.length; i++) {
-              if (rows_client_user[i].client_id === client_id) {
-                insertarClientUser = false;
-                if (rows_client_user[i].checked === 'N') {
-                  // actualizar el campo checked de client_user por 'Y'
-                  const [rows_checked] = await mysqlConnection.promise().query(
-                    'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receiving_user_id, client_id]
-                  );
-                }
-              } else {
-                // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
-                if (rows_client_user[i].checked === 'N') {
-                  const [rows_delete] = await mysqlConnection.promise().query(
-                    'delete from client_user where user_id = ? and client_id = ?', [receiving_user_id, rows_client_user[i].client_id]
-                  );
+        console.log("client_id: ", client_id);
+        console.log("req.params.clientId: ", req.params.clientId);
+        console.log("cabecera.client_id: ", cabecera.client_id);
+        if (receiving_user_id) {
+          if (receiving_location_id === location_id) {
+            // actualizar location_id y client_id del user beneficiary
+            const [rows2_update_user] = await mysqlConnection.promise().query(
+              'update user set location_id = ?, client_id = ? where id = ?', [location_id, client_id, receiving_user_id]
+            );
+            // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
+            // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
+            // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
+            const [rows_client_user] = await mysqlConnection.promise().query(
+              'select * from client_user where (user_id = ? and client_id = ?) or (date(creation_date) = curdate() and checked = "N")',
+              [receiving_user_id, client_id]
+            );
+            let insertarClientUser = true;
+            if (rows_client_user.length > 0) {
+              // recorrer el array de rows_client_user y si el client_id es el mismo que el de hoy y tiene checked 'N', actualizarlo, sino eliminarlo y crear uno nuevo
+              for (let i = 0; i < rows_client_user.length; i++) {
+                if (rows_client_user[i].client_id === client_id) {
+                  insertarClientUser = false;
+                  if (rows_client_user[i].checked === 'N') {
+                    // actualizar el campo checked de client_user por 'Y'
+                    const [rows_checked] = await mysqlConnection.promise().query(
+                      'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receiving_user_id, client_id]
+                    );
+                  }
+                } else {
+                  // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
+                  if (rows_client_user[i].checked === 'N') {
+                    const [rows_delete] = await mysqlConnection.promise().query(
+                      'delete from client_user where user_id = ? and client_id = ?', [receiving_user_id, rows_client_user[i].client_id]
+                    );
+                  }
                 }
               }
-            }
-            if (insertarClientUser) {
+              if (insertarClientUser) {
+                // insertar en client_user
+                const [rows_insert] = await mysqlConnection.promise().query(
+                  'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
+                );
+              }
+            } else {
               // insertar en client_user
               const [rows_insert] = await mysqlConnection.promise().query(
                 'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
               );
             }
-          } else {
-            // insertar en client_user
-            const [rows_insert] = await mysqlConnection.promise().query(
-              'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
-            );
-          }
-          // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
-          const [rows] = await mysqlConnection.promise().query(
-            'select id, approved, delivering_user_id, location_id, client_id \
+            // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
+            const [rows] = await mysqlConnection.promise().query(
+              'select id, approved, delivering_user_id, location_id, client_id \
               from delivery_beneficiary \
               where location_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
               order by creation_date desc limit 1',
-            [location_id, receiving_user_id]
-          );
-          // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
-          if (rows.length > 0 && rows[0].delivering_user_id === null) {
-            // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
-
-            // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
-            const [rows2] = await mysqlConnection.promise().query(
-              'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?', [client_id, delivering_user_id, location_id, rows[0].id]
+              [location_id, receiving_user_id]
             );
-
-            if (rows2.affectedRows > 0) {
-              return res.status(200).json({ could_approve: 'Y' });
-            } else {
-              return res.status(500).json('Could not update delivering_user_id');
-            }
-          } else {
-            // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
-            if (rows.length > 0 && rows[0].approved === 'N') {
-              if (approved === 'Y') {
-                // actualizar el campo approved a 'Y'
-                const [rows2] = await mysqlConnection.promise().query(
-                  'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
-                );
-                if (rows2.affectedRows > 0) {
-                  res.json('Beneficiary approved successfully');
-                } else {
-                  res.status(500).json('Could not approve beneficiary');
-                }
-              } else {
-                res.json({ could_approve: 'Y' });
-              }
-            } else {
+            // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
+            if (rows.length > 0 && rows[0].delivering_user_id === null) {
               // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
-              // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
-              const [rows3] = await mysqlConnection.promise().query(
-                'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
-                [client_id, delivering_user_id, receiving_user_id, location_id]
+              // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
+              const [rows2] = await mysqlConnection.promise().query(
+                'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?', [client_id, delivering_user_id, location_id, rows[0].id]
               );
 
-              if (rows3.affectedRows > 0) {
+              if (rows2.affectedRows > 0) {
                 return res.status(200).json({ could_approve: 'Y' });
               } else {
-                return res.status(500).json('Could not create delivery_beneficiary');
+                return res.status(500).json('Could not update delivering_user_id');
               }
+            } else {
+              // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
+              if (rows.length > 0 && rows[0].approved === 'N') {
+                if (approved === 'Y') {
+                  // actualizar el campo approved a 'Y'
+                  const [rows2] = await mysqlConnection.promise().query(
+                    'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
+                  );
+                  if (rows2.affectedRows > 0) {
+                    res.json('Beneficiary approved successfully');
+                  } else {
+                    res.status(500).json('Could not approve beneficiary');
+                  }
+                } else {
+                  res.json({ could_approve: 'Y' });
+                }
+              } else {
+                // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
 
+                // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
+                const [rows3] = await mysqlConnection.promise().query(
+                  'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
+                  [client_id, delivering_user_id, receiving_user_id, location_id]
+                );
+
+                if (rows3.affectedRows > 0) {
+                  return res.status(200).json({ could_approve: 'Y' });
+                } else {
+                  return res.status(500).json('Could not create delivery_beneficiary');
+                }
+
+              }
             }
+          } else {
+            res.status(200).json({ error: 'receiving_location' });
           }
         } else {
-          res.status(200).json({ error: 'receiving_location' });
+          res.status(200).json({ error: 'receiving_user' });
         }
       } catch (error) {
         console.log(error);
@@ -1541,7 +1548,26 @@ router.post('/onBoard', verifyToken, async (req, res) => {
       );
 
       if (rows.affectedRows > 0) {
-        res.json('Status updated successfully');
+        // update token
+        let object_token = {
+          id: user_id,
+          firstname: cabecera.firstname,
+          username: cabecera.username,
+          email: cabecera.email,
+          client_id: client_id,
+          role: 'delivery',
+          enabled: 'Y'
+        };
+        let data = JSON.stringify(object_token);
+        jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '8h' }, (err, token) => {
+          if (err) {
+            console.error('Error signing token: ', err);
+            res.status(500).json({ error: 'Error signing token' });
+          } else {
+            res.status(200).json({ token });
+          }
+        });
+
       } else {
         res.status(500).json('Could not update status');
       }
@@ -1691,7 +1717,25 @@ router.post('/onBoard', verifyToken, async (req, res) => {
         );
 
         if (rows_update_user.affectedRows > 0) {
-          res.json('Status updated successfully');
+        // update token
+        let object_token = {
+          id: user_id,
+          firstname: cabecera.firstname,
+          username: cabecera.username,
+          email: cabecera.email,
+          client_id: client_id,
+          role: 'beneficiary',
+          enabled: 'Y'
+        };
+        let data = JSON.stringify(object_token);
+        jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '8h' }, (err, token) => {
+          if (err) {
+            console.error('Error signing token: ', err);
+            res.status(500).json({ error: 'Error signing token' });
+          } else {
+            res.status(200).json({ token });
+          }
+        });
         } else {
           res.status(500).json('Could not update status');
         }
