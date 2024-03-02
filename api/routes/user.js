@@ -1260,10 +1260,7 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
         const receiving_location_id = req.body.location_id;
         const location_id = req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null;
         const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
-        console.log("client_id: ", client_id);
-        console.log("req.params.clientId: ", req.params.clientId);
-        console.log("cabecera.client_id: ", cabecera.client_id);
-        if (receiving_user_id) {
+        if (receiving_user_id && receiving_location_id) {
           if (receiving_location_id === location_id) {
             // actualizar location_id y client_id del user beneficiary
             const [rows2_update_user] = await mysqlConnection.promise().query(
@@ -1368,7 +1365,11 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
             res.status(200).json({ error: 'receiving_location' });
           }
         } else {
-          res.status(200).json({ error: 'receiving_user' });
+          if (!receiving_user_id) {
+          res.status(200).json({ error: 'receiving_user_null' });
+          } else {
+            res.status(200).json({ error: 'receiving_location_null' });
+          }
         }
       } catch (error) {
         console.log(error);
