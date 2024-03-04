@@ -146,8 +146,10 @@ router.post('/signup', async (req, res) => {
     if (rows.affectedRows > 0) {
       // save inserted user id
       const user_id = rows.insertId;
-      // insertar en tabla client_user el client_id y el user_id
-      const [rows_client_user] = await mysqlConnection.promise().query('insert into client_user(client_id, user_id) values(?,?)', [client_id, user_id]);
+      // insertar en tabla client_user el client_id y el user_id si client_id no es null
+      if (client_id) {
+        const [rows_client_user] = await mysqlConnection.promise().query('insert into client_user(client_id, user_id) values(?,?)', [client_id, user_id]);
+      }
       // insert user_question, iterate array of questions and insert each question with its answer
       for (let i = 0; i < secondForm.length; i++) {
         const question_id = secondForm[i].question_id;
@@ -1285,7 +1287,7 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
                     'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receiving_user_id, client_id]
                   );
                 }
-              } 
+              }
               // else {
               //   // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
               //   if (rows_client_user[i].checked === 'N') {
