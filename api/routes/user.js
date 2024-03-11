@@ -4792,6 +4792,7 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         SUM(pdt.quantity) AS total
         FROM donation_ticket as dt
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        INNER JOIN product as p ON pdt.product_id = p.id
         INNER JOIN location as l ON dt.location_id = l.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
         WHERE 1=1
