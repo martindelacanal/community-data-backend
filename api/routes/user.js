@@ -3260,7 +3260,254 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
 }
 );
 
-router.post('/metrics/participant/download-csv', verifyToken, async (req, res) => {
+router.post('/table/user/system-user/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT u.id,
+                u.username,
+                u.firstname,
+                u.lastname,
+                u.document,
+                DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
+                u.email,
+                u.phone,
+                u.zipcode,
+                u.address,
+                g.name as gender,
+                u.reset_password,
+                r.name as role,
+        DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM user as u
+        INNER JOIN role as r ON u.role_id = r.id
+        LEFT JOIN gender as g ON u.gender_id = g.id
+        WHERE u.enabled = 'Y' AND u.role_id <> 2 AND u.role_id <> 5 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        ORDER BY u.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'username', title: 'Username' },
+        { id: 'firstname', title: 'Firstname' },
+        { id: 'lastname', title: 'Lastname' },
+        { id: 'document', title: 'Document' },
+        { id: 'date_of_birth', title: 'Date of birth' },
+        { id: 'email', title: 'Email' },
+        { id: 'phone', title: 'Phone' },
+        { id: 'zipcode', title: 'Zipcode' },
+        { id: 'address', title: 'Address' },
+        { id: 'gender', title: 'Gender' },
+        { id: 'reset_password', title: 'Reset password' },
+        { id: 'role', title: 'Role' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/user/client/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT u.id,
+                u.username,
+                u.firstname,
+                u.lastname,
+                u.document,
+                DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
+                u.email,
+                u.phone,
+                u.zipcode,
+                u.address,
+                g.name as gender,
+                u.reset_password,
+                c.name as client_name,
+                c.short_name as client_short_name,
+        DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM user as u
+        LEFT JOIN gender as g ON u.gender_id = g.id
+        INNER JOIN client as c ON u.client_id = c.id
+        WHERE u.enabled = 'Y' AND u.role_id = 2 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        ${cabecera.role === 'client' ? ' AND u.client_id = ?' : ''}
+        ORDER BY u.id`,
+        [from_date, to_date, cabecera.client_id]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'username', title: 'Username' },
+        { id: 'firstname', title: 'Firstname' },
+        { id: 'lastname', title: 'Lastname' },
+        { id: 'document', title: 'Document' },
+        { id: 'date_of_birth', title: 'Date of birth' },
+        { id: 'email', title: 'Email' },
+        { id: 'phone', title: 'Phone' },
+        { id: 'zipcode', title: 'Zipcode' },
+        { id: 'address', title: 'Address' },
+        { id: 'gender', title: 'Gender' },
+        { id: 'reset_password', title: 'Reset password' },
+        { id: 'client_name', title: 'Client name' },
+        { id: 'client_short_name', title: 'Client short name' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
