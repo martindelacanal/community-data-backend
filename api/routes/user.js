@@ -456,7 +456,7 @@ router.get('/new/location/:id', verifyToken, async (req, res) => {
         l.organization,
         l.community_city,
         l.address,
-        GROUP_CONCAT(cl.client_id) as client_ids,
+        GROUP_CONCAT(DISTINCT cl.client_id) as client_ids,
         CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates
         from location as l
         left join client_location as cl on l.id = cl.location_id
@@ -1019,7 +1019,7 @@ router.get('/new/client/:id', verifyToken, async (req, res) => {
         c.phone,
         c.address,
         c.webpage,
-        GROUP_CONCAT(cl.location_id) as location_ids
+        GROUP_CONCAT(DISTINCT cl.location_id) as location_ids
         from client as c
         left join client_location as cl on c.id = cl.client_id
         where c.id = ?
@@ -1490,7 +1490,7 @@ router.get('/clients', verifyToken, async (req, res) => {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select c.id,c.name,c.short_name, \
-        GROUP_CONCAT(cl.location_id) as location_ids \
+        GROUP_CONCAT(DISTINCT cl.location_id) as location_ids \
         from client as c \
         left join client_location as cl on c.id = cl.client_id \
         group by c.id \
@@ -3248,7 +3248,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows_filtered);
 
-      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=health-metrics.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -3307,9 +3307,6 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
-
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id,
                 u.username,
@@ -3322,8 +3319,9 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
                 u.zipcode,
                 u.address,
                 g.name as gender,
-                u.reset_password,
                 r.name as role,
+                u.reset_password,
+                u.enabled,
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
                         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
         DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
@@ -3354,8 +3352,9 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
         { id: 'zipcode', title: 'Zipcode' },
         { id: 'address', title: 'Address' },
         { id: 'gender', title: 'Gender' },
-        { id: 'reset_password', title: 'Reset password' },
         { id: 'role', title: 'Role' },
+        { id: 'reset_password', title: 'Reset password' },
+        { id: 'enabled', title: 'Enabled' },
         { id: 'creation_date', title: 'Creation date' },
         { id: 'creation_time', title: 'Creation time' },
         { id: 'modification_date', title: 'Modification date' },
@@ -3370,7 +3369,7 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=system-users-table.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -3429,9 +3428,6 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
-
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id,
                 u.username,
@@ -3447,6 +3443,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
                 u.reset_password,
                 c.name as client_name,
                 c.short_name as client_short_name,
+                u.enabled,
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
                         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
         DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
@@ -3454,7 +3451,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
         FROM user as u
         LEFT JOIN gender as g ON u.gender_id = g.id
         INNER JOIN client as c ON u.client_id = c.id
-        WHERE u.enabled = 'Y' AND u.role_id = 2 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE u.role_id = 2 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -3481,6 +3478,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
         { id: 'reset_password', title: 'Reset password' },
         { id: 'client_name', title: 'Client name' },
         { id: 'client_short_name', title: 'Client short name' },
+        { id: 'enabled', title: 'Enabled' },
         { id: 'creation_date', title: 'Creation date' },
         { id: 'creation_time', title: 'Creation time' },
         { id: 'modification_date', title: 'Modification date' },
@@ -3495,7 +3493,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=client-users-table.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -3554,9 +3552,6 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
-
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id,
                 u.username,
@@ -3575,6 +3570,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
                 c.short_name as last_client_name,
                 l.community_city as last_location_visited,
                 u.reset_password,
+                u.enabled,
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
                         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
         DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
@@ -3585,7 +3581,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         LEFT JOIN client as c ON u.client_id = c.id
         LEFT JOIN client_user as cu ON u.id = cu.user_id
         LEFT JOIN location as l ON u.location_id = l.id
-        WHERE u.enabled = 'Y' AND u.role_id = 5 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE u.role_id = 5 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -3615,6 +3611,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         { id: 'last_client_name', title: 'Last client name' },
         { id: 'last_location_visited', title: 'Last location visited' },
         { id: 'reset_password', title: 'Reset password' },
+        { id: 'enabled', title: 'Enabled' },
         { id: 'creation_date', title: 'Creation date' },
         { id: 'creation_time', title: 'Creation time' },
         { id: 'modification_date', title: 'Modification date' },
@@ -3629,7 +3626,99 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=participants-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/client/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(c.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(c.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND cl.location_id IN (' + locations.join() + ')';
+      }
+
+      let clientIds = [];
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT DISTINCT c.id
+          FROM client as c
+          LEFT JOIN client_location as cl ON c.id = cl.client_id
+          WHERE 1=1 ${query_locations}`
+      );
+
+      clientIds = rows.map(row => row.id);
+
+      const [rows2] = await mysqlConnection.promise().query(
+        `SELECT c.id,
+                c.name,
+                c.short_name,
+                GROUP_CONCAT(DISTINCT l.community_city SEPARATOR ', ') as locations,
+                c.email,
+                c.phone,
+                c.address,
+                c.webpage,
+                c.enabled,
+        DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM client as c
+        LEFT JOIN client_location as cl ON c.id = cl.client_id
+        LEFT JOIN location as l ON cl.location_id = l.id
+        WHERE c.id IN (${clientIds.join()}) AND CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        GROUP BY c.id
+        ORDER BY c.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'short_name', title: 'Short name' },
+        { id: 'locations', title: 'Locations' },
+        { id: 'email', title: 'Email' },
+        { id: 'phone', title: 'Phone' },
+        { id: 'address', title: 'Address' },
+        { id: 'webpage', title: 'Webpage' },
+        { id: 'enabled', title: 'Enabled' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows2);
+
+      res.setHeader('Content-disposition', 'attachment; filename=clients-table.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -3694,7 +3783,7 @@ router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=delivery-summary.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -3705,6 +3794,442 @@ router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
   }
 }
 );
+
+router.post('/table/ethnicity/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(e.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(e.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT e.id,
+                e.name,
+                e.name_es,
+                e.enabled,
+        DATE_FORMAT(CONVERT_TZ(e.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(e.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(e.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(e.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM ethnicity as e
+        WHERE CONVERT_TZ(e.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(e.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ORDER BY e.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'name_es', title: 'Spanish name' },
+        { id: 'enabled', title: 'Enabled' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=ethnicities-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/gender/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(g.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(g.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT g.id,
+                g.name,
+                g.name_es,
+                g.enabled,
+        DATE_FORMAT(CONVERT_TZ(g.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(g.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(g.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(g.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM gender as g
+        WHERE CONVERT_TZ(g.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(g.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ORDER BY g.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'name_es', title: 'Spanish name' },
+        { id: 'enabled', title: 'Enabled' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=genders-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/location/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(l.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(l.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT l.id,
+                l.organization,
+                l.community_city,
+                GROUP_CONCAT(DISTINCT client.short_name SEPARATOR ', ') as partner,
+                l.address,
+                CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates, 
+                l.enabled,
+        DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(l.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(l.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM location as l
+        LEFT JOIN client_location ON l.id = client_location.location_id
+        LEFT JOIN client ON client_location.client_id = client.id
+        WHERE CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ${cabecera.role === 'client' ? ' AND client_location.client_id = ?' : ''}
+        GROUP BY l.id`,
+        [from_date, to_date, cabecera.client_id]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'organization', title: 'Organization' },
+        { id: 'community_city', title: 'Community city' },
+        { id: 'partner', title: 'Partner' },
+        { id: 'address', title: 'Address' },
+        { id: 'coordinates', title: 'Coordinates' },
+        { id: 'enabled', title: 'Enabled' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=locations-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/product/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
+      const product_types = filters.product_types || [];
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+      var query_providers = '';
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      }
+      var query_product_types = '';
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT p.id,
+                p.name,
+                pt.name as product_type_name,
+                pt.name_es as product_type_name_es,
+                IFNULL(SUM(product_donation_ticket.quantity), 0) as total_quantity,
+        DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM product as p
+        INNER JOIN product_type as pt ON pt.id = p.product_type_id
+        LEFT JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id
+        LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id
+        LEFT JOIN client_location ON dt.location_id = client_location.location_id
+        WHERE 1=1
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_providers}
+        ${query_product_types}
+        ${cabecera.role === 'client' ? ' AND client_location.client_id = ?' : ''}
+        GROUP BY p.id`,
+        [cabecera.client_id]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'product_type_name', title: 'Food type' },
+        { id: 'product_type_name_es', title: 'Spanish food type' },
+        { id: 'total_quantity', title: 'Total quantity' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=foods-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/product-type/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(pt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(pt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT pt.id,
+                pt.name,
+                pt.name_es,
+        DATE_FORMAT(CONVERT_TZ(pt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(pt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(pt.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(pt.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM product_type as pt
+        WHERE 1=1
+        ${query_from_date}
+        ${query_to_date}`
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'name_es', title: 'Spanish name' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=food-types-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/provider/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      const from_date = filters.from_date || '1970-01-01';
+      const to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+
+      let providerIds = [];
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT DISTINCT p.id
+          FROM provider as p
+          LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id
+          LEFT JOIN location as l ON dt.location_id = l.id
+          WHERE 1=1 ${query_locations}`
+      );
+
+      providerIds = rows.map(row => row.id);
+
+      const [rows2] = await mysqlConnection.promise().query(
+        `SELECT p.id,
+                p.name,
+                GROUP_CONCAT(DISTINCT l.community_city SEPARATOR ', ') as locations,
+        DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM provider as p
+        LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id
+        LEFT JOIN location as l ON dt.location_id = l.id
+        LEFT JOIN client_location ON dt.location_id = client_location.location_id
+        WHERE p.id IN (${providerIds.join()})
+        ${query_from_date}
+        ${query_to_date}
+        ${cabecera.role === 'client' ? ' AND client_location.client_id = ?' : ''}
+        GROUP BY p.id
+        ORDER BY p.id
+        `,
+        [cabecera.client_id]
+        );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'locations', title: 'Locations' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows2);
+
+      res.setHeader('Content-disposition', 'attachment; filename=providers-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 
 /*
 Generar CSV con las siguientes columnas: locacion_id, community_city, fecha de reparticion,
@@ -3914,7 +4439,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=beneficiary-summary.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -3993,7 +4518,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=results-beneficiary-form.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=tickets-table.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -5985,7 +6510,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
         location.id,
         location.organization,
         location.community_city,
-        GROUP_CONCAT(client.short_name SEPARATOR ', ') as partner,
+        GROUP_CONCAT(DISTINCT client.short_name SEPARATOR ', ') as partner,
         location.address,
         location.enabled,
         DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
@@ -6010,7 +6535,7 @@ router.get('/table/location', verifyToken, async (req, res) => {
           location.id,
           location.organization,
           location.community_city,
-          GROUP_CONCAT(client.short_name SEPARATOR ', ') as partner,
+          GROUP_CONCAT(DISTINCT client.short_name SEPARATOR ', ') as partner,
           location.address,
           location.enabled,
           DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
@@ -6286,7 +6811,7 @@ router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
         `SELECT l.id,
             l.organization,
             l.community_city,
-            GROUP_CONCAT(client.short_name SEPARATOR ', ') as partner,
+            GROUP_CONCAT(DISTINCT client.short_name SEPARATOR ', ') as partner,
             l.address,
             l.enabled,
             CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates, 
