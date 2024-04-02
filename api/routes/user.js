@@ -2191,7 +2191,10 @@ router.get('/gender', async (req, res) => {
   const language = req.query.language || 'en';
   try {
     const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
-                  FROM gender ${id ? ' WHERE id = ?' : ''} ORDER BY name`;
+                  FROM gender 
+                  WHERE enabled = 'Y'
+                  ${id ? ' AND id = ?' : ''} 
+                  ORDER BY name`;
     const params = id ? [id] : [];
     const [rows] = await mysqlConnection.promise().query(query, params);
     res.json(rows);
@@ -2206,7 +2209,10 @@ router.get('/ethnicity', async (req, res) => {
   const language = req.query.language || 'en';
   try {
     const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
-                  FROM ethnicity ${id ? ' WHERE id = ?' : ''} ORDER BY name`;
+                  FROM ethnicity 
+                  WHERE enabled = 'Y'
+                  ${id ? ' AND id = ?' : ''} 
+                  ORDER BY name`;
     const params = id ? [id] : [];
     const [rows] = await mysqlConnection.promise().query(query, params);
     res.json(rows);
@@ -6234,7 +6240,7 @@ router.get('/table/gender', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -6244,6 +6250,7 @@ router.get('/table/gender', verifyToken, async (req, res) => {
       SELECT
         id,
         ${language === 'en' ? 'name' : 'name_es'} AS name,
+        enabled,
         DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
       FROM gender
@@ -6300,7 +6307,7 @@ router.get('/table/ethnicity', verifyToken, async (req, res) => {
   if (buscar) {
     buscar = '%' + buscar + '%';
     if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
   }
 
@@ -6310,6 +6317,7 @@ router.get('/table/ethnicity', verifyToken, async (req, res) => {
       SELECT
         id,
         ${language === 'en' ? 'name' : 'name_es'} AS name,
+        enabled,
         DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
       FROM ethnicity
