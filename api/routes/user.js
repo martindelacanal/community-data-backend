@@ -239,7 +239,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
     try {
-      if (req.files.length > 0) {
+      if (req.files && req.files.length > 0) {
         formulario = JSON.parse(req.body.form);
 
         const donation_id = formulario.donation_id || null;
@@ -256,7 +256,6 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         }
         console.log("date: " + date);
         console.log(formulario);
-        console.log(req.files);
         if (!Number.isInteger(provider)) {
           const [rows] = await mysqlConnection.promise().query(
             'insert into provider(name) values(?)',
@@ -346,6 +345,232 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
     } catch (error) {
       console.log(error);
       logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = JSON.parse(req.body.form);
+
+      if (req.files.length > 0) {
+        var [rows_files] = await mysqlConnection
+          .promise()
+          .execute(
+            "SELECT file FROM donation_ticket_image WHERE donation_ticket_id = ?",
+            [id]
+          );
+
+        if (rows_files.length > 0) {
+          var filesParaEliminar = [];
+          params = {
+            Bucket: bucketName,
+            Delete: {
+              Objects: [],
+              Quiet: false,
+            },
+          };
+
+          // Agregar todos los archivos a filesParaEliminar
+          for (let row of rows_files) {
+            if (row.file !== null && row.file !== "" && row.file !== undefined) {
+              filesParaEliminar.push(row.file);
+            }
+          }
+
+          console.log("files PARA ELIMINAR: ", filesParaEliminar);
+
+          // Agregar todos los archivos a params.Delete.Objects
+          for (let file of filesParaEliminar) {
+            params.Delete.Objects.push({
+              Key: file,
+            });
+          }
+          try {
+
+            if (params.Delete.Objects.length > 0) {
+              command = new DeleteObjectsCommand(params);
+              await s3.send(command);
+            }
+
+            // Eliminar todos los archivos de la base de datos
+            await mysqlConnection.promise().execute(
+              "DELETE FROM donation_ticket_image WHERE donation_ticket_id = ?",
+              [id]
+            );
+
+            for (let i = 0; i < req.files.length; i++) {
+              // renombrar cada archivo con un nombre aleatorio
+              req.files[i].filename = randomImageName();
+              const paramsLogo = {
+                Bucket: bucketName,
+                Key: req.files[i].filename,
+                Body: req.files[i].buffer,
+                ContentType: req.files[i].mimetype,
+              };
+              const commandLogo = new PutObjectCommand(paramsLogo);
+              const uploadLogo = await s3.send(commandLogo);
+              await mysqlConnection.promise().query(
+                'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
+                [id, req.files[i].filename]
+              );
+            }
+          } catch (error) {
+            console.log(error);
+            logger.error(error);
+            return res.status(500).json('Could not upload image');
+          }
+        } else {
+          res.status(500).send("Error interno");
+        }
+      }
+
+      const donation_id = formulario.donation_id || null;
+      const total_weight = formulario.total_weight || null;
+      var provider = formulario.provider || null;
+      const destination = formulario.destination || null;
+      const delivered_by = formulario.delivered_by || null;
+      var products = formulario.products || [];
+      var date = null;
+      if (formulario.date) {
+        fecha = new Date(formulario.date);
+        // Formatear la fecha en el formato deseado (YYYY-MM-DD)
+        date = fecha.toISOString().slice(0, 10);
+      }
+      console.log("date: " + date);
+      console.log(formulario);
+      if (!Number.isInteger(provider)) {
+        const [rows_insert_provider] = await mysqlConnection.promise().query(
+          'insert into provider(name) values(?)',
+          [provider]
+        );
+        provider = rows_insert_provider.insertId;
+        // insertar en stocker_log la operation 5 (create), el provider insertado y el id del usuario logueado
+        const [rows2] = await mysqlConnection.promise().query(
+          'insert into stocker_log(user_id, operation_id, provider_id) values(?,?,?)',
+          [cabecera.id, 5, provider]
+        );
+      }
+      // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
+      for (let i = 0; i < products.length; i++) {
+        if (!Number.isInteger(products[i].product)) {
+          const [rows] = await mysqlConnection.promise().query(
+            'insert into product(name,product_type_id) values(?,?)',
+            [products[i].product, products[i].product_type]
+          );
+          products[i].product = rows.insertId;
+          // insertar en stocker_log la operation 5 (create), el product insertado y el id del usuario logueado
+          const [rows2] = await mysqlConnection.promise().query(
+            'insert into stocker_log(user_id, operation_id, product_id) values(?,?,?)',
+            [cabecera.id, 5, products[i].product]
+          );
+        }
+      }
+      const [rows_update_ticket] = await mysqlConnection.promise().query(
+        'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, date = ?, delivered_by = ? WHERE id = ?',
+        [donation_id, total_weight, provider, destination, date, delivered_by, id]
+      );
+
+      try {
+        // delete all product_donation_ticket records for the ticket
+        await mysqlConnection.promise().query(
+          'delete from product_donation_ticket where donation_ticket_id = ?',
+          [id]
+        );
+
+        for (let i = 0; i < products.length; i++) {
+          await mysqlConnection.promise().query(
+            'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
+            [products[i].product, id, products[i].quantity]
+          );
+        }
+      } catch (error) {
+        console.log(error);
+        logger.error(error);
+        res.status(500).json('Could not create product_donation_ticket');
+      }
+
+      try {
+        // insertar en stocker_log la operation 6 (edit), el ticket insertado y el id del usuario logueado
+        const [rows2] = await mysqlConnection.promise().query(
+          'insert into stocker_log(user_id, operation_id, donation_ticket_id) values(?,?,?)',
+          [cabecera.id, 6, id]
+        );
+      } catch (error) {
+        console.log(error);
+        logger.error(error);
+        res.status(500).json('Could not create stocker_log');
+      }
+
+      res.status(200).json('Data edited successfully');
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT t.donation_id,
+                t.total_weight,
+                prov.name as provider,
+                t.location_id as destination,
+                t.date,
+                t.delivered_by,
+                p.name as product,
+                p.product_type_id as product_type,
+                pdt.quantity as quantity,
+                COUNT(dti.id) as image_count
+                FROM donation_ticket as t
+                INNER JOIN donation_ticket_image as dti ON t.id = dti.donation_ticket_id
+                INNER JOIN provider as prov ON t.provider_id = prov.id
+                INNER join product_donation_ticket as pdt on t.id = pdt.donation_ticket_id
+                INNER join product as p on pdt.product_id = p.id
+                INNER join product_type as pt on p.product_type_id = pt.id
+                WHERE t.id = ?
+                GROUP BY t.id, pdt.product_id`,
+        [id]
+      );
+      if (rows.length > 0) {
+        let newTicket = {
+          donation_id: rows[0].donation_id,
+          total_weight: rows[0].total_weight,
+          provider: rows[0].provider,
+          destination: rows[0].destination,
+          date: rows[0].date,
+          delivered_by: rows[0].delivered_by,
+          image_count: rows[0].image_count,
+          products: []
+        };
+        for (let row of rows) {
+          newTicket.products.push({
+            product: row.product,
+            product_type: row.product_type,
+            quantity: row.quantity
+          });
+        }
+
+        res.json(newTicket);
+      } else {
+        res.status(404).json('Ticket not found');
+      }
+    } catch (err) {
+      console.log(err);
       res.status(500).json('Internal server error');
     }
   } else {
@@ -4204,7 +4429,7 @@ router.post('/table/provider/download-csv', verifyToken, async (req, res) => {
         ORDER BY p.id
         `,
         [cabecera.client_id]
-        );
+      );
 
       var headers_array = [
         { id: 'id', title: 'ID' },
@@ -4485,7 +4710,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN provider as p ON dt.provider_id = p.id
         LEFT JOIN location as loc ON dt.location_id = loc.id
         ${cabecera.role === 'client' ? 'LEFT JOIN client_location cl ON dt.location_id = cl.location_id' : ''}
-        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
@@ -6773,7 +6998,7 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
               FROM donation_ticket as dt
               INNER JOIN provider ON dt.provider_id = provider.id
               INNER JOIN location ON dt.location_id = location.id
-              INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+              INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
               WHERE sl.user_id = ?`,
               [idUser]
             );
@@ -7377,7 +7602,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         INNER JOIN provider as p ON dt.provider_id = p.id
         INNER JOIN location as loc ON dt.location_id = loc.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
