@@ -5861,18 +5861,19 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as p ON pdt.product_id = p.id
         INNER JOIN location as l ON dt.location_id = l.id
-        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON l.id = cl.location_id' : ''}
         WHERE 1=1
+        ${cabecera.role === 'client' ? 'and dt.location_id IN (SELECT location_id FROM client_location WHERE client_id = ?)' : ''}
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
         ${query_providers}
         ${query_product_types}
-        ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
-        GROUP BY name
+        GROUP BY l.id
         ORDER BY name`,
         [cabecera.client_id]
       );
+
+      console.log("rows", rows)
 
       // Si no hay datos, devolver un objeto vacío
       if (rows.length === 0) {
