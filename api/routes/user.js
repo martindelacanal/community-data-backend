@@ -3273,7 +3273,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -3313,24 +3313,31 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
                 g.name AS gender,
                 eth.name AS ethnicity,
                 u.other_ethnicity,
-                loc.community_city AS location,
+                loc.community_city AS last_location_visited,
+                (SELECT GROUP_CONCAT(DISTINCT loc_visited.community_city) 
+                        FROM delivery_beneficiary AS db_visited 
+                        LEFT JOIN location AS loc_visited ON db_visited.location_id = loc_visited.id
+                        WHERE db_visited.receiving_user_id = u.id) AS locations_visited,
                 COUNT(db.receiving_user_id) AS delivery_count,
                 SUM(IF(db.receiving_user_id IS NOT NULL AND db.delivering_user_id IS NULL, 1, 0)) AS delivery_count_not_scanned,
                 SUM(IF(db.receiving_user_id IS NOT NULL AND db.delivering_user_id IS NOT NULL, 1, 0)) AS delivery_count_scanned,
-                (SELECT COUNT(*) FROM delivery_beneficiary db2 
-                 WHERE db2.receiving_user_id = u.id 
-                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
-                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < ?) AS delivery_count_between_dates,
-                (SELECT COUNT(*) FROM delivery_beneficiary db2 
-                 WHERE db2.receiving_user_id = u.id 
-                 AND db2.delivering_user_id IS NULL
-                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
-                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < ?) AS delivery_count_between_dates_not_scanned,
-                (SELECT COUNT(*) FROM delivery_beneficiary db2 
-                 WHERE db2.receiving_user_id = u.id 
-                 AND db2.delivering_user_id IS NOT NULL
-                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
-                 AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < ?) AS delivery_count_between_dates_scanned,
+                (SELECT COUNT(*) 
+                        FROM delivery_beneficiary db2 
+                        WHERE db2.receiving_user_id = u.id 
+                        AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                        AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < ?) AS delivery_count_between_dates,
+                (SELECT COUNT(*) 
+                        FROM delivery_beneficiary db2 
+                        WHERE db2.receiving_user_id = u.id 
+                        AND db2.delivering_user_id IS NULL
+                        AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                        AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < ?) AS delivery_count_between_dates_not_scanned,
+                (SELECT COUNT(*) 
+                        FROM delivery_beneficiary db2 
+                        WHERE db2.receiving_user_id = u.id 
+                        AND db2.delivering_user_id IS NOT NULL
+                        AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                        AND CONVERT_TZ(db2.creation_date, '+00:00', 'America/Los_Angeles') < ?) AS delivery_count_between_dates_scanned,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
                 q.id AS question_id,
@@ -3398,7 +3405,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
           row_filtered["gender"] = rows[i].gender;
           row_filtered["ethnicity"] = rows[i].ethnicity;
           row_filtered["other_ethnicity"] = rows[i].other_ethnicity;
-          row_filtered["location"] = rows[i].location;
+          row_filtered["last_location_visited"] = rows[i].last_location_visited;
+          row_filtered["locations_visited"] = rows[i].locations_visited;
           row_filtered["delivery_count"] = rows[i].delivery_count;
           row_filtered["delivery_count_scanned"] = rows[i].delivery_count_scanned;
           row_filtered["delivery_count_not_scanned"] = rows[i].delivery_count_not_scanned;
@@ -3454,7 +3462,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         { id: 'gender', title: 'Gender' },
         { id: 'ethnicity', title: 'Ethnicity' },
         { id: 'other_ethnicity', title: 'Other ethnicity' },
-        { id: 'location', title: 'Location' },
+        { id: 'last_location_visited', title: 'Last location visited' },
+        { id: 'locations_visited', title: 'Locations visited' },
         { id: 'delivery_count', title: 'Delivery Count' },
         { id: 'delivery_count_scanned', title: 'D.C. scanned' },
         { id: 'delivery_count_not_scanned', title: 'D.C. not scanned' },
@@ -3551,6 +3560,7 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
                 u.address,
                 g.name as gender,
                 r.name as role,
+                loc.community_city AS last_location,
                 u.reset_password,
                 u.enabled,
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
@@ -3560,6 +3570,7 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
         FROM user as u
         INNER JOIN role as r ON u.role_id = r.id
         LEFT JOIN gender as g ON u.gender_id = g.id
+        LEFT JOIN location AS loc ON u.location_id = loc.id
         WHERE u.enabled = 'Y' AND u.role_id <> 2 AND u.role_id <> 5 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ${query_locations}
         ${query_genders}
@@ -3584,6 +3595,7 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
         { id: 'address', title: 'Address' },
         { id: 'gender', title: 'Gender' },
         { id: 'role', title: 'Role' },
+        { id: 'last_location', title: 'Last location' },
         { id: 'reset_password', title: 'Reset password' },
         { id: 'enabled', title: 'Enabled' },
         { id: 'creation_date', title: 'Creation date' },
@@ -3636,7 +3648,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND cl.location_id IN (' + locations.join() + ')';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -3682,6 +3694,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
         FROM user as u
         LEFT JOIN gender as g ON u.gender_id = g.id
         INNER JOIN client as c ON u.client_id = c.id
+        LEFT JOIN client_location as cl ON c.id = cl.client_id
         WHERE u.role_id = 2 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
         ${query_locations}
         ${query_genders}
@@ -3690,6 +3703,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
         ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? ' AND u.client_id = ?' : ''}
+        GROUP BY u.id
         ORDER BY u.id`,
         [from_date, to_date, cabecera.client_id]
       );
@@ -3760,7 +3774,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND u.location_id IN (' + locations.join() + ') ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -3820,6 +3834,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? ' AND cu.client_id = ?' : ''}
+        GROUP BY u.id
         ORDER BY u.id`,
         [from_date, to_date, cabecera.client_id]
       );
@@ -4760,7 +4775,7 @@ router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
   }
 }
 );
-
+// TO-DO que hacer con las preguntas que no son multiple choice
 router.post('/metrics/health/questions', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
@@ -4788,7 +4803,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -4811,6 +4826,9 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id AS user_id,
                 q.id AS question_id,
@@ -4822,15 +4840,16 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
                 uq.answer_number AS answer_number
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        LEFT JOIN location AS loc ON u.location_id = loc.id
         CROSS JOIN question AS q
         LEFT JOIN answer_type as at ON q.answer_type_id = at.id
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-        left join answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND q.enabled = 'Y' AND (q.answer_type_id = 3 or q.answer_type_id = 4) 
-        ${query_from_date}
-        ${query_to_date}
+        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
+                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -4838,9 +4857,11 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         ${query_max_age}
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-        order by q.id, a.id`,
-        [cabecera.client_id]
+        group by u.id, q.id, a.id
+        order by q.id, a.id, u.id`,
+        [from_date, toDate, from_date, toDate, cabecera.client_id]
       );
+
       // crear array de objetos pregunta, cada pregunta tiene un array de objetos respuesta, donde cada respuesta tiene un nombre y la suma de usuarios que la eligieron
       // iterar el array rows y agregar el campo question, ir sumando sus respuestas sobre esa question hasta que cambie de question_id, luego se pushea el objeto question al array questions
       // estructura:
@@ -4988,7 +5009,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5011,6 +5032,9 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         ${language === 'en' ? 'g.name' : 'g.name_es'} AS name,
@@ -5018,10 +5042,11 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN gender AS g ON u.gender_id = g.id
-        LEFT JOIN location AS loc ON u.location_id = loc.id
+        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        ${query_from_date}
-        ${query_to_date}
+        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
+                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -5030,7 +5055,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY g.name`,
-        [cabecera.client_id]
+        [from_date, toDate, from_date, toDate, cabecera.client_id]
       );
 
       res.json(rows);
@@ -5069,7 +5094,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5092,6 +5117,9 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         ${language === 'en' ? 'e.name' : 'e.name_es'} AS name,
@@ -5099,10 +5127,11 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN ethnicity AS e ON u.ethnicity_id = e.id
-        LEFT JOIN location AS loc ON u.location_id = loc.id
+        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        ${query_from_date}
-        ${query_to_date}
+        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
+                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -5111,7 +5140,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
         ${query_zipcode}
         ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY e.name`,
-        [cabecera.client_id]
+        [from_date, toDate, from_date, toDate, cabecera.client_id]
       );
 
       res.json(rows);
@@ -5150,7 +5179,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5173,16 +5202,20 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         u.household_size AS name,
         COUNT(*) AS total
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        LEFT JOIN location AS loc ON u.location_id = loc.id
+        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        ${query_from_date}
-        ${query_to_date}
+       AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
+                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -5192,7 +5225,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
         ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY u.household_size
         ORDER BY u.household_size`,
-        [cabecera.client_id]
+        [from_date, toDate, from_date, toDate, cabecera.client_id]
       );
 
       // Calcular el promedio
@@ -5256,7 +5289,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5279,16 +5312,20 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS name,
         COUNT(*) AS total
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        LEFT JOIN location AS loc ON u.location_id = loc.id
+        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
         WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        ${query_from_date}
-        ${query_to_date}
+        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
+                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -5298,7 +5335,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
         ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
         GROUP BY name
         ORDER BY name`,
-        [cabecera.client_id]
+        [from_date, toDate, from_date, toDate, cabecera.client_id]
       );
 
       // Calcular el promedio
@@ -5362,7 +5399,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5409,14 +5446,15 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
-          (SELECT COUNT(*) 
+          (SELECT COUNT(DISTINCT u.id) 
               FROM user u 
               ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
               WHERE u.role_id = 5 
                 AND u.enabled = 'Y' ${clientCondition}) AS total,
-          (SELECT COUNT(*) 
+          (SELECT COUNT(DISTINCT u.id) 
               FROM user u 
               ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+              LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
               WHERE u.role_id = 5 
                 AND u.enabled = 'Y' 
                 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') 
@@ -5471,7 +5509,7 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5500,15 +5538,20 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
           COUNT(*) AS total
           FROM user u
           ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-          WHERE u.role_id = 5 AND u.enabled = 'Y' 
-          ${query_from_date}
-          ${query_to_date}
-          ${query_locations}
-          ${query_genders}
-          ${query_ethnicities}
-          ${query_min_age}
-          ${query_max_age}
-          ${query_zipcode}
+          
+          WHERE u.id IN (SELECT DISTINCT u2.id 
+                          FROM user u2
+                          LEFT JOIN delivery_beneficiary AS db ON u2.id = db.receiving_user_id
+                          WHERE u2.role_id = 5 AND u2.enabled = 'Y' 
+                          ${query_from_date}
+                          ${query_to_date}
+                          ${query_locations}
+                          ${query_genders}
+                          ${query_ethnicities}
+                          ${query_min_age}
+                          ${query_max_age}
+                          ${query_zipcode}
+                        )
           ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
           GROUP BY name`,
         [cabecera.client_id]
@@ -5550,7 +5593,7 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5579,15 +5622,20 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
           COUNT(*) AS total
           FROM user u
           ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-          WHERE u.role_id = 5 AND u.enabled = 'Y' 
-          ${query_from_date}
-          ${query_to_date}
-          ${query_locations}
-          ${query_genders}
-          ${query_ethnicities}
-          ${query_min_age}
-          ${query_max_age}
-          ${query_zipcode}
+          
+          WHERE u.id IN (SELECT DISTINCT u2.id 
+                          FROM user u2
+                          LEFT JOIN delivery_beneficiary AS db ON u2.id = db.receiving_user_id
+                          WHERE u2.role_id = 5 AND u2.enabled = 'Y' 
+                          ${query_from_date}
+                          ${query_to_date}
+                          ${query_locations}
+                          ${query_genders}
+                          ${query_ethnicities}
+                          ${query_min_age}
+                          ${query_max_age}
+                          ${query_zipcode}
+                        )
           ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
           GROUP BY name`,
         [cabecera.client_id]
