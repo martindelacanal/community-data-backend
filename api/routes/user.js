@@ -1636,7 +1636,23 @@ router.get('/locations', verifyToken, async (req, res) => {
         res.status(500).json('Internal server error');
       }
     } else {
-      res.status(401).json('Unauthorized');
+      if (cabecera.role === 'client') {
+        try {
+          const [rows] = await mysqlConnection.promise().query(
+            `select l.id, l.organization, l.community_city, l.address 
+                  from location as l
+                  inner join client_location as cl on l.id = cl.location_id
+                  where cl.client_id = ? and l.enabled = "Y" order by l.community_city`,
+            [cabecera.client_id]
+          );
+          res.json(rows);
+        } catch (err) {
+          console.log(err);
+          res.status(500).json('Internal server error');
+        }
+      } else {
+        res.status(401).json('Unauthorized');
+      }
     }
   }
 });
