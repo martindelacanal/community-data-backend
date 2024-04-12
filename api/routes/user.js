@@ -5873,8 +5873,6 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         [cabecera.client_id]
       );
 
-      console.log("rows", rows)
-
       // Si no hay datos, devolver un objeto vacío
       if (rows.length === 0) {
         res.json({ average: 0, median: 0, data: [] });
