@@ -6400,7 +6400,7 @@ router.get('/table/product', verifyToken, async (req, res) => {
         let countRows;
         if (cabecera.role === 'admin') {
           [countRows] = await mysqlConnection.promise().query(`
-          SELECT COUNT(*) as count
+          SELECT COUNT(DISTINCT product.id) as count
           FROM product
           INNER JOIN product_type as pt ON product.product_type_id = pt.id
           LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
@@ -6409,17 +6409,16 @@ router.get('/table/product', verifyToken, async (req, res) => {
         } else {
           // client
           [countRows] = await mysqlConnection.promise().query(`
-          SELECT COUNT(*) as count
+          SELECT COUNT(DISTINCT product.id) as count
           FROM product
           INNER JOIN product_type as pt ON product.product_type_id = pt.id
           LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
-          LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id
+          LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id 
+          LEFT JOIN client_location as cl ON dt.location_id = cl.location_id
           WHERE cl.client_id = ?
           ${queryBuscarCount}
-          GROUP BY product.id
         `, [cabecera.client_id])
         }
-
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
