@@ -3270,14 +3270,22 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
       const min_age = filters.min_age || 0;
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -3521,14 +3529,22 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
   if (cabecera.role === 'admin') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
       const min_age = filters.min_age || 0;
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -3645,14 +3661,22 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
       const min_age = filters.min_age || 0;
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -3771,14 +3795,22 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
       const min_age = filters.min_age || 0;
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -3905,9 +3937,17 @@ router.post('/table/client/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -3992,12 +4032,35 @@ router.post('/table/client/download-csv', verifyToken, async (req, res) => {
 }
 );
 
-router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
+router.post('/table/delivered/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
-      const from_date = req.query.from_date || '1970-01-01';
-      const to_date = req.query.to_date || '2100-01-01';
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND db.location_id IN (' + locations.join() + ')';
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT db.id, 
@@ -4016,7 +4079,10 @@ router.get('/table/delivered/download-csv', verifyToken, async (req, res) => {
         INNER JOIN location as l ON db.location_id = l.id
         INNER JOIN user as u2 ON db.receiving_user_id = u2.id
         LEFT JOIN user as u1 ON db.delivering_user_id = u1.id
-        WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE 1=1
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
         ${cabecera.role === 'client' ? ' AND db.client_id = ?' : ''}
         ORDER BY db.id`,
         [from_date, to_date, cabecera.client_id]
@@ -4062,8 +4128,16 @@ router.post('/table/ethnicity/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -4125,8 +4199,16 @@ router.post('/table/gender/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -4188,8 +4270,16 @@ router.post('/table/location/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -4260,11 +4350,19 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -4350,8 +4448,16 @@ router.post('/table/product-type/download-csv', verifyToken, async (req, res) =>
   if (cabecera.role === 'admin') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -4411,9 +4517,17 @@ router.post('/table/provider/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -4512,8 +4626,17 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
-      const from_date = req.query.from_date || '1970-01-01';
-      const to_date = req.query.to_date || '2100-01-01';
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       // count_beneficiaries_creation_date
       query1 = `SELECT loc.id as location_id,
@@ -4713,12 +4836,21 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
 }
 );
 
-router.get('/table/ticket/download-csv', verifyToken, async (req, res) => {
+router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
-      const from_date = req.query.from_date || '1970-01-01';
-      const to_date = req.query.to_date || '2100-01-01';
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT dt.id,
@@ -4797,8 +4929,8 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -4806,6 +4938,13 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5003,8 +5142,8 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -5012,6 +5151,13 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5088,8 +5234,8 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -5097,6 +5243,13 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5173,8 +5326,8 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -5182,6 +5335,13 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5283,8 +5443,8 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -5292,6 +5452,13 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5393,8 +5560,8 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -5402,6 +5569,13 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5503,8 +5677,8 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -5512,6 +5686,13 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5587,8 +5768,8 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -5596,6 +5777,13 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5671,12 +5859,19 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
 
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5760,11 +5955,19 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5824,11 +6027,19 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -5923,11 +6134,19 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
       var start = (page - 1) * resultsPerPage;
 
       const filters = req.body;
-      const from_date = filters.from_date || '1970-01-01';
-      const to_date = filters.to_date || '2100-01-01';
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
 
       const language = req.query.language || 'en';
 
@@ -6080,73 +6299,141 @@ router.get('/table/notification', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/user', verifyToken, async (req, res) => {
+router.post('/table/user', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  let buscar = req.query.search;
-  let queryBuscar = '';
-  var queryTableRole = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin' || cabecera.role === 'client') {
-      queryBuscar = `AND (user.id like '${buscar}' or user.username like '${buscar}' or user.email like '${buscar}' or user.firstname like '${buscar}' or user.lastname like '${buscar}' or role.name like '${buscar}' or user.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
-
-  var tableRole = req.query.tableRole;
-
-  if (tableRole) {
-    switch (tableRole) {
-      case 'all':
-        queryTableRole = 'AND (role.id != 2 AND role.id != 5)';
-        break;
-      case 'beneficiary':
-        queryTableRole = 'AND role.id = 5';
-        if (cabecera.role === 'client') {
-          queryTableRole += ' AND client_user.client_id = ' + cabecera.client_id;
-        }
-        break;
-      case 'client':
-        queryTableRole = 'AND role.id = 2';
-        if (cabecera.role === 'client') {
-          queryTableRole += ' AND user.client_id = ' + cabecera.client_id;
-        }
-        break;
-      default:
-        queryTableRole = '';
-    }
-  }
-
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+    const genders = filters.genders || [];
+    const ethnicities = filters.ethnicities || [];
+    const min_age = filters.min_age || 0;
+    const max_age = filters.max_age || 150;
+    const zipcode = filters.zipcode || null;
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+
+    var query_genders = '';
+    if (genders.length > 0) {
+      query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+    }
+    var query_ethnicities = '';
+    if (ethnicities.length > 0) {
+      query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+    }
+    var query_min_age = '';
+    if (filters.min_age) {
+      query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+    }
+    var query_max_age = '';
+    if (filters.max_age) {
+      query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+    }
+    var query_zipcode = '';
+    if (filters.zipcode) {
+      query_zipcode = 'AND u.zipcode = ' + zipcode;
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+    var queryTableRole = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin' || cabecera.role === 'client') {
+        queryBuscar = `AND (u.id like '${buscar}' or u.username like '${buscar}' or u.email like '${buscar}' or u.firstname like '${buscar}' or u.lastname like '${buscar}' or role.name like '${buscar}' or u.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      }
+    }
+
+    var tableRole = req.query.tableRole;
+
+    if (tableRole) {
+      switch (tableRole) {
+        case 'all':
+          queryTableRole = 'AND (role.id != 2 AND role.id != 5)';
+          if (locations.length > 0) {
+            query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+          }
+          break;
+        case 'beneficiary':
+          queryTableRole = 'AND role.id = 5';
+          if (locations.length > 0) {
+            query_locations = 'AND u.location_id IN (' + locations.join() + ') ';
+          }
+          if (cabecera.role === 'client') {
+            queryTableRole += ' AND client_user.client_id = ' + cabecera.client_id;
+          }
+          break;
+        case 'client':
+          queryTableRole = 'AND role.id = 2';
+          if (locations.length > 0) {
+            query_locations = 'AND cl.location_id IN (' + locations.join() + ')';
+          }
+          if (cabecera.role === 'client') {
+            queryTableRole += ' AND u.client_id = ' + cabecera.client_id;
+          }
+          break;
+        default:
+          queryTableRole = '';
+      }
+    }
+
     try {
       const query = `SELECT
-      user.id,
-      user.username,
-      user.email,
-      user.firstname,
-      user.lastname,
+      u.id,
+      u.username,
+      u.email,
+      u.firstname,
+      u.lastname,
       role.name as role,
-      user.enabled,
-      DATE_FORMAT(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
-      FROM user
-      INNER JOIN role ON user.role_id = role.id
-      ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON user.id = client_user.user_id' : ''}
+      u.enabled,
+      DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+      FROM user as u
+      INNER JOIN role ON u.role_id = role.id
+      ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON u.id = client_user.user_id' : ''}
+      ${tableRole === 'client' ? 'INNER JOIN client as c ON u.client_id = c.id LEFT JOIN client_location as cl ON c.id = cl.client_id' : ''}
       WHERE 1=1 
       ${queryBuscar}
       ${queryTableRole}
+      ${query_from_date}
+      ${query_to_date}
+      ${query_locations}
+      ${query_genders}
+      ${query_ethnicities}
+      ${query_min_age}
+      ${query_max_age}
+      ${query_zipcode}
+      GROUP BY u.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
@@ -6155,14 +6442,24 @@ router.get('/table/user', verifyToken, async (req, res) => {
         , [start, resultsPerPage]);
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
-        SELECT COUNT(*) as count
-        FROM user
-        INNER JOIN role ON user.role_id = role.id
-        ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON user.id = client_user.user_id' : ''}
-        WHERE 1=1
-        ${queryBuscar}
-        ${queryTableRole}
-      `);
+          SELECT COUNT(*) as count
+          FROM user as u
+          INNER JOIN role ON u.role_id = role.id
+          ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON u.id = client_user.user_id' : ''}
+          ${tableRole === 'client' ? 'INNER JOIN client as c ON u.client_id = c.id LEFT JOIN client_location as cl ON c.id = cl.client_id' : ''}
+          WHERE 1=1
+          ${queryBuscar}
+          ${queryTableRole}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_genders}
+          ${query_ethnicities}
+          ${query_min_age}
+          ${query_max_age}
+          ${query_zipcode}
+          GROUP BY u.id
+        `);
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
@@ -6182,31 +6479,58 @@ router.get('/table/user', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/delivered', verifyToken, async (req, res) => {
+router.post('/table/delivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  let buscar = req.query.search;
-  let queryBuscar = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin' || cabecera.role === 'client') {
-      queryBuscar = ` AND (db.id like '${buscar}' or db.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or db.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or db.location_id like '${buscar}' or location.community_city like '${buscar}' or db.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
-
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND db.location_id IN (' + locations.join() + ')';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin' || cabecera.role === 'client') {
+        queryBuscar = ` AND (db.id like '${buscar}' or db.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or db.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or db.location_id like '${buscar}' or location.community_city like '${buscar}' or db.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      }
+    }
+
     try {
       const query = `SELECT
       db.id,
@@ -6224,6 +6548,9 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
       LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
       WHERE 1=1
       ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ${query_locations}
       ${cabecera.role === 'client' ? 'AND db.client_id = ' + cabecera.client_id : ''}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
@@ -6240,6 +6567,9 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
         LEFT JOIN user as user_delivery ON db.delivering_user_id = user_delivery.id
         WHERE 1=1
         ${queryBuscar}
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
         ${cabecera.role === 'client' ? 'AND db.client_id = ' + cabecera.client_id : ''}
       `);
 
@@ -6261,51 +6591,72 @@ router.get('/table/delivered', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/ticket', verifyToken, async (req, res) => {
+router.post('/table/ticket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  let buscar = req.query.search;
-  let queryBuscar = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin' || cabecera.role === 'client') {
-      queryBuscar = ` AND (donation_ticket.id like '${buscar}' or donation_ticket.donation_id like '${buscar}' or donation_ticket.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') like '${buscar}' or donation_ticket.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
-
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      queryBuscar = ` AND (dt.id like '${buscar}' or dt.donation_id like '${buscar}' or dt.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(dt.date, '%m/%d/%Y') like '${buscar}' or dt.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+
     try {
       const query = `SELECT
-      donation_ticket.id,
-      donation_ticket.donation_id,
-      donation_ticket.total_weight,
+      dt.id,
+      dt.donation_id,
+      dt.total_weight,
       provider.name as provider,
       location.community_city as location,
-      DATE_FORMAT(donation_ticket.date, '%m/%d/%Y') as date,
-      donation_ticket.delivered_by,
-      COUNT(DISTINCT product_donation_ticket.product_id) AS products,
-      DATE_FORMAT(CONVERT_TZ(donation_ticket.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
-      FROM donation_ticket
-      INNER JOIN provider ON donation_ticket.provider_id = provider.id
-      INNER JOIN location ON donation_ticket.location_id = location.id
+      DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
+      dt.delivered_by,
+      COUNT(DISTINCT pdt.product_id) AS products,
+      DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+      FROM donation_ticket as dt
+      INNER JOIN provider ON dt.provider_id = provider.id
+      INNER JOIN location ON dt.location_id = location.id
       ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
-      INNER JOIN product_donation_ticket ON donation_ticket.id = product_donation_ticket.donation_ticket_id
+      INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
       WHERE 1=1
       ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
       ${queryBuscar}
-      GROUP BY donation_ticket.id
+      ${query_from_date}
+      ${query_to_date}
+      GROUP BY dt.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
@@ -6314,15 +6665,17 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
         , [start, resultsPerPage]);
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
-        SELECT COUNT(DISTINCT donation_ticket.id) as count
-        FROM donation_ticket
-        INNER JOIN provider ON donation_ticket.provider_id = provider.id
-        INNER JOIN location ON donation_ticket.location_id = location.id
+        SELECT COUNT(DISTINCT dt.id) as count
+        FROM donation_ticket as dt
+        INNER JOIN provider ON dt.provider_id = provider.id
+        INNER JOIN location ON dt.location_id = location.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
-        INNER JOIN product_donation_ticket ON donation_ticket.id = product_donation_ticket.donation_ticket_id
+        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         WHERE 1=1
         ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
         ${queryBuscar}
+        ${query_from_date}
+        ${query_to_date}
       `);
 
         const numOfResults = countRows[0].count;
@@ -6343,52 +6696,95 @@ router.get('/table/ticket', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/product', verifyToken, async (req, res) => {
+router.post('/table/product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  const language = req.query.language || 'en';
-
-  let buscar = req.query.search;
-  let queryBuscar = '';
-  let queryBuscarCount = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin' || cabecera.role === 'client') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or product_type like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      queryBuscarCount = `AND (product.id like '${buscar}' or product.name like '${buscar}' or pt.name like '${buscar}' or pt.name_es like '${buscar}' or product.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
-
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    const language = req.query.language || 'en';
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+    const providers = filters.providers || [];
+    const product_types = filters.product_types || [];
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+    }
+    var query_providers = '';
+    if (providers.length > 0) {
+      query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+    }
+    var query_product_types = '';
+    if (product_types.length > 0) {
+      query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+    let queryBuscarCount = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin' || cabecera.role === 'client') {
+        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or product_type like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+        queryBuscarCount = `AND (p.id like '${buscar}' or p.name like '${buscar}' or pt.name like '${buscar}' or pt.name_es like '${buscar}' or p.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      }
+    }
+
     try {
       const query = `
       SELECT * FROM (
         SELECT
-          product.id,
-          product.name,
+          p.id,
+          p.name,
           ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS product_type,
-          product.value_usd,
-          DATE_FORMAT(CONVERT_TZ(product.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
-          IFNULL(SUM(product_donation_ticket.quantity), 0) as total_quantity
-        FROM product
-        INNER JOIN product_type as pt ON product.product_type_id = pt.id
-        LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
-        ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-        ${cabecera.role === 'client' ? 'WHERE cl.client_id = ' + cabecera.client_id : ''}
-        GROUP BY product.id
+          p.value_usd,
+          DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+          IFNULL(SUM(pdt.quantity), 0) as total_quantity
+        FROM product as p
+        INNER JOIN product_type as pt ON p.product_type_id = pt.id
+        LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
+        LEFT JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
+        ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+        WHERE 1=1
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_providers}
+        ${query_product_types}
+        ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
+        GROUP BY p.id
       ) as subquery
       WHERE 1=1 
       ${queryBuscar}
@@ -6400,23 +6796,35 @@ router.get('/table/product', verifyToken, async (req, res) => {
         let countRows;
         if (cabecera.role === 'admin') {
           [countRows] = await mysqlConnection.promise().query(`
-          SELECT COUNT(DISTINCT product.id) as count
-          FROM product
-          INNER JOIN product_type as pt ON product.product_type_id = pt.id
-          LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
-          WHERE 1=1 ${queryBuscarCount}
+          SELECT COUNT(DISTINCT p.id) as count
+          FROM product as p
+          INNER JOIN product_type as pt ON p.product_type_id = pt.id
+          LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
+          LEFT JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
+          WHERE 1=1 
+          ${queryBuscarCount}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
         `);
         } else {
           // client
           [countRows] = await mysqlConnection.promise().query(`
-          SELECT COUNT(DISTINCT product.id) as count
-          FROM product
-          INNER JOIN product_type as pt ON product.product_type_id = pt.id
-          LEFT JOIN product_donation_ticket ON product.id = product_donation_ticket.product_id
-          LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id 
+          SELECT COUNT(DISTINCT p.id) as count
+          FROM product as p
+          INNER JOIN product_type as pt ON p.product_type_id = pt.id
+          LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
+          LEFT JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id 
           LEFT JOIN client_location as cl ON dt.location_id = cl.location_id
           WHERE cl.client_id = ?
           ${queryBuscarCount}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
         `, [cabecera.client_id])
         }
 
@@ -6438,34 +6846,55 @@ router.get('/table/product', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/product-type', verifyToken, async (req, res) => {
+router.post('/table/product-type', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  const language = req.query.language || 'en';
-
-  let buscar = req.query.search;
-  let queryBuscar = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
-
   if (cabecera.role === 'admin') {
+    const language = req.query.language || 'en';
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(pt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(pt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin') {
+        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      }
+    }
+
     try {
       const query = `
       SELECT
@@ -6473,8 +6902,11 @@ router.get('/table/product-type', verifyToken, async (req, res) => {
         ${language === 'en' ? 'name' : 'name_es'} AS name,
         DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
-      FROM product_type
-      WHERE 1=1 ${queryBuscar}
+      FROM product_type as pt
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -6482,8 +6914,11 @@ router.get('/table/product-type', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
-          FROM product_type
-          WHERE 1=1 ${queryBuscar}
+          FROM product_type as pt
+          WHERE 1=1 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
         `);
 
         const numOfResults = countRows[0].count;
@@ -6504,101 +6939,55 @@ router.get('/table/product-type', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/gender', verifyToken, async (req, res) => {
+router.post('/table/gender', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  const language = req.query.language || 'en';
-
-  let buscar = req.query.search;
-  let queryBuscar = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
-
   if (cabecera.role === 'admin') {
-    try {
-      const query = `
-      SELECT
-        id,
-        ${language === 'en' ? 'name' : 'name_es'} AS name,
-        enabled,
-        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
-        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
-      FROM gender
-      WHERE 1=1 ${queryBuscar}
-      ORDER BY ${queryOrderBy}
-      LIMIT ?, ?`;
+    const language = req.query.language || 'en';
 
-      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
-      if (rows.length > 0) {
-        const [countRows] = await mysqlConnection.promise().query(`
-          SELECT COUNT(*) as count
-          FROM gender
-          WHERE 1=1 ${queryBuscar}
-        `);
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
 
-        const numOfResults = countRows[0].count;
-        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
 
-        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
-      } else {
-        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(g.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(g.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin') {
+        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
       }
-
-    } catch (error) {
-      console.log(error);
-      logger.error(error);
-      res.status(500).json('Error interno');
     }
-  } else {
-    res.status(401).json('No autorizado');
-  }
-});
 
-router.get('/table/ethnicity', verifyToken, async (req, res) => {
-  const cabecera = JSON.parse(req.data.data);
-  const language = req.query.language || 'en';
-
-  let buscar = req.query.search;
-  let queryBuscar = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
-
-  if (cabecera.role === 'admin') {
     try {
       const query = `
       SELECT
@@ -6607,8 +6996,11 @@ router.get('/table/ethnicity', verifyToken, async (req, res) => {
         enabled,
         DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
-      FROM ethnicity
-      WHERE 1=1 ${queryBuscar}
+      FROM gender as g
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -6616,8 +7008,11 @@ router.get('/table/ethnicity', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
-          FROM ethnicity
-          WHERE 1=1 ${queryBuscar}
+          FROM gender as g
+          WHERE 1=1 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
         `);
 
         const numOfResults = countRows[0].count;
@@ -6638,34 +7033,161 @@ router.get('/table/ethnicity', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/provider', verifyToken, async (req, res) => {
+router.post('/table/ethnicity', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  const language = req.query.language || 'en';
+  if (cabecera.role === 'admin') {
+    const language = req.query.language || 'en';
 
-  let buscar = req.query.search;
-  let queryBuscar = '';
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
 
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin' || cabecera.role === 'client') {
-      queryBuscar = `AND (p.id like '${buscar}' or p.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
     }
-  }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
 
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(e.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(e.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    console.log("query_from_date", query_from_date)
+    console.log("query_to_date", query_to_date)
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin') {
+        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      }
+    }
+
+    try {
+      const query = `
+      SELECT
+        id,
+        ${language === 'en' ? 'name' : 'name_es'} AS name,
+        enabled,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM ethnicity as e
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM ethnicity as e
+          WHERE 1=1 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.post('/table/provider', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin' || cabecera.role === 'client') {
+        queryBuscar = `AND (p.id like '${buscar}' or p.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      }
+    }
+
     try {
       const query = `
       SELECT
@@ -6674,8 +7196,13 @@ router.get('/table/provider', verifyToken, async (req, res) => {
         DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
       FROM provider as p
-      ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-      WHERE 1=1 ${queryBuscar}
+      LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id 
+      ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ${query_locations}
       ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
       ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
       ORDER BY ${queryOrderBy}
@@ -6686,8 +7213,13 @@ router.get('/table/provider', verifyToken, async (req, res) => {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
           FROM provider as p
-          ${cabecera.role === 'client' ? 'LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE 1=1 ${queryBuscar}
+          LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id 
+          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+          WHERE 1=1 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
           ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
           ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
         `);
@@ -6710,45 +7242,78 @@ router.get('/table/provider', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/client', verifyToken, async (req, res) => {
+router.post('/table/client', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  const language = req.query.language || 'en';
-
-  let buscar = req.query.search;
-  let queryBuscar = '';
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-
-
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or short_name like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-    }
-  }
 
   if (cabecera.role === 'admin') {
+    const language = req.query.language || 'en';
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(c.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(c.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND cl.location_id IN (' + locations.join() + ')';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      if (cabecera.role === 'admin') {
+        queryBuscar = `AND (c.id like '${buscar}' or c.name like '${buscar}' or c.short_name like '${buscar}' or c.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      }
+    }
+
     try {
       const query = `
       SELECT
-        id,
-        name,
-        short_name,
-        enabled,
-        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
-        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
-      FROM client
-      WHERE 1=1 ${queryBuscar}
+        c.id,
+        c.name,
+        c.short_name,
+        c.enabled,
+        DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM client as c
+      LEFT JOIN client_location as cl ON c.id = cl.client_id
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ${query_locations}
+      GROUP BY c.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -6756,8 +7321,14 @@ router.get('/table/client', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
-          FROM client
-          WHERE 1=1 ${queryBuscar}
+          FROM client as c
+          LEFT JOIN client_location as cl ON c.id = cl.client_id
+          WHERE 1=1 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          GROUP BY c.id
         `);
 
         const numOfResults = countRows[0].count;
@@ -6778,42 +7349,66 @@ router.get('/table/client', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/table/location', verifyToken, async (req, res) => {
+router.post('/table/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  let buscar = req.query.search;
-
-  var page = req.query.page ? Number(req.query.page) : 1;
-
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
-
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
-  let havingClause = '';
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    havingClause = `HAVING (location.id like '${buscar}' or location.organization like '${buscar}' or location.community_city like '${buscar}' or partner like '${buscar}' or location.address like '${buscar}' or location.enabled like '${buscar}' or creation_date like '${buscar}')`;
-  }
-
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(l.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(l.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+
+    let buscar = req.query.search;
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+    let havingClause = '';
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      havingClause = `HAVING (l.id like '${buscar}' or l.organization like '${buscar}' or l.community_city like '${buscar}' or partner like '${buscar}' or l.address like '${buscar}' or l.enabled like '${buscar}' or creation_date like '${buscar}')`;
+    }
+
     try {
       const query = `SELECT
-        location.id,
-        location.organization,
-        location.community_city,
+        l.id,
+        l.organization,
+        l.community_city,
         GROUP_CONCAT(DISTINCT client.short_name SEPARATOR ', ') as partner,
-        location.address,
-        location.enabled,
-        DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
-        FROM location
-        LEFT JOIN client_location ON location.id = client_location.location_id
+        l.address,
+        l.enabled,
+        DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+        FROM location as l
+        LEFT JOIN client_location ON l.id = client_location.location_id
         LEFT JOIN client ON client_location.client_id = client.id
-        ${cabecera.role === 'client' ? 'WHERE client_location.client_id = ' + cabecera.client_id : ''}
-        GROUP BY location.id
+        WHERE 1=1 
+        ${query_from_date}
+        ${query_to_date}
+        ${cabecera.role === 'client' ? 'AND client_location.client_id = ' + cabecera.client_id : ''}
+        GROUP BY l.id
         ${havingClause}
         ORDER BY ${queryOrderBy}
         LIMIT ?, ?`
@@ -6827,18 +7422,21 @@ router.get('/table/location', verifyToken, async (req, res) => {
         SELECT COUNT(*) as count
         FROM (
           SELECT
-          location.id,
-          location.organization,
-          location.community_city,
+          l.id,
+          l.organization,
+          l.community_city,
           GROUP_CONCAT(DISTINCT client.short_name SEPARATOR ', ') as partner,
-          location.address,
-          location.enabled,
-          DATE_FORMAT(CONVERT_TZ(location.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
-          FROM location
-          LEFT JOIN client_location ON location.id = client_location.location_id
+          l.address,
+          l.enabled,
+          DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+          FROM location as l
+          LEFT JOIN client_location ON l.id = client_location.location_id
           LEFT JOIN client ON client_location.client_id = client.id
-          ${cabecera.role === 'client' ? 'WHERE client_location.client_id = ' + cabecera.client_id : ''}
-          GROUP BY location.id
+          WHERE 1=1 
+          ${query_from_date}
+          ${query_to_date}
+          ${cabecera.role === 'client' ? 'AND client_location.client_id = ' + cabecera.client_id : ''}
+          GROUP BY l.id
           ${havingClause}
         ) as subquery
       `);
