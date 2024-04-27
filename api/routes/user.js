@@ -67,12 +67,12 @@ router.post('/signin', (req, res) => {
           let data = JSON.stringify(rows[0]);
           console.log("los datos del token son: " + data);
           if (remember) {
-            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '7d' }, (err, token) => {
+            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '1h' }, (err, token) => {
               logger.info(`user id: ${rows[0].id} logueado`);
               res.status(200).json({ token: token, reset_password: reset_password });
             });
           } else {
-            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '8h' }, (err, token) => {
+            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '1h' }, (err, token) => {
               logger.info(`user id: ${rows[0].id} logueado`);
               res.status(200).json({ token: token, reset_password: reset_password });
             });
@@ -1612,6 +1612,24 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
   }
 });
 
+router.get('/answer-types', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        'select id,name,name_es from answer_type',
+      );
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
@@ -2379,8 +2397,382 @@ router.get('/location/exists/search', verifyToken, async (req, res) => {
   }
 });
 
+router.post('/survey/question', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    const connection = await mysqlConnection.promise().getConnection();
+    try {
+      const { name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, answers, locations } = req.body;
+
+      // si depends_on_question_id tiene valor, entonces depends_on_answer_id debe tener valor
+      if (depends_on_question_id && !depends_on_answer_id) {
+        throw new Error('depends_on_answer_id is required when depends_on_question_id is provided');
+      }
+
+      await connection.beginTransaction();
+
+      // Insertar la pregunta
+      const [rows] = await connection.query(
+        'insert into question(name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id) values(?,?,?,?,?)',
+        [name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id]
+      );
+      if (rows.affectedRows === 0) {
+        throw new Error('Could not insert question');
+      }
+      const question_id = rows.insertId;
+
+      // Si answer_type_id es 3 o 4, insertar las respuestas
+      if (answer_type_id === 3 || answer_type_id === 4) {
+        for (let answer of answers) {
+          const [rows] = await connection.query(
+            'insert into answer(question_id, id, name, name_es) values(?,?,?,?)',
+            [question_id, answer.id, answer.name, answer.name_es]
+          );
+          if (rows.affectedRows === 0) {
+            throw new Error('Could not insert answer');
+          }
+        }
+      }
+
+      // insertar las ubicaciones (si hay) y agregarlas a todas las preguntas padres
+      if (locations && locations.length > 0) {
+
+        // si hay valor de 0 en el array de locations, quitarlo
+        const index = locations.indexOf(0);
+        if (index > -1) {
+          locations.splice(index, 1);
+        }
+
+        await addLocationsToQuestionAndParent(connection, question_id, locations);
+      }
+
+      await connection.commit();
+
+      // devolver question_id como id
+      res.json({ id: question_id });
+    } catch (err) {
+      if (connection) {
+        await connection.rollback();
+      }
+      console.log(err);
+      res.status(500).json('Internal server error');
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+async function addLocationsToQuestionAndParent(connection, question_id, locations) {
+  // Obtener las ubicaciones existentes para la pregunta actual
+  const [existingLocations] = await connection.query(
+    'select location_id from question_location where question_id = ?',
+    [question_id]
+  );
+  const existingLocationIds = existingLocations.map(row => row.location_id);
+
+  // Agregar las ubicaciones a la pregunta actual, omitiendo las que ya existen
+  for (let location_id of locations) {
+    if (!existingLocationIds.includes(location_id)) {
+      const [rows] = await connection.query(
+        'insert into question_location(question_id, location_id) values(?,?)',
+        [question_id, location_id]
+      );
+      if (rows.affectedRows === 0) {
+        throw new Error('Could not insert location');
+      }
+    }
+  }
+
+  // Buscar la pregunta padre
+  const [rows] = await connection.query(
+    'select depends_on_question_id from question where id = ?',
+    [question_id]
+  );
+  const parentQuestionId = rows[0]?.depends_on_question_id;
+
+  // Si existe una pregunta padre, agregar las ubicaciones a la pregunta padre
+  if (parentQuestionId) {
+    await addLocationsToQuestionAndParent(connection, parentQuestionId, locations);
+  }
+}
+
+router.post('/survey/location', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    const connection = await mysqlConnection.promise().getConnection();
+    try {
+      const { question_id, locations } = req.body;
+
+      // si question_id y locations tienen valor
+      if (!question_id || !locations) {
+        throw new Error('Missing question_id or locations');
+      }
+
+      // si hay valor de 0 en el array de locations, quitarlo
+      const index = locations.indexOf(0);
+      if (index > -1) {
+        locations.splice(index, 1);
+      }
+
+      await connection.beginTransaction();
+
+      // Agregar las ubicaciones a la pregunta y a todas sus preguntas padres
+      await addLocationsToQuestionAndParent(connection, question_id, locations);
+
+      await connection.commit();
+      res.json('Locations inserted');
+    } catch (err) {
+      if (connection) {
+        await connection.rollback();
+      }
+      console.log(err);
+      res.status(500).json('Internal server error');
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/survey/answer', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    const connection = await mysqlConnection.promise().getConnection();
+    try {
+      const { question_id, answers } = req.body;
+
+      // si question_id y answers tienen valor
+      if (!question_id || !answers) {
+        throw new Error('Missing question_id or answers');
+      }
+
+      await connection.beginTransaction();
+
+      // El array de answers tiene id, name y name_es, agregar a la tabla answer
+      for (let answer of answers) {
+        const [rows] = await connection.query(
+          'insert into answer(question_id, id, name, name_es) values(?,?,?,?)',
+          [question_id, answer.id, answer.name, answer.name_es]
+        );
+        if (rows.affectedRows === 0) {
+          throw new Error('Could not insert answer');
+        }
+      }
+
+      await connection.commit();
+      res.json('Answers inserted');
+    } catch (err) {
+      if (connection) {
+        await connection.rollback();
+      }
+      console.log(err);
+      res.status(500).json('Internal server error');
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+async function disableQuestions(connection, question_id, enabled, answer_id = null) {
+
+  var rows = null;
+  if (!answer_id) {
+    // Desactivar la pregunta
+    [rows] = await connection.query(
+      'update question set enabled = ? where id = ?',
+      [enabled, question_id]
+    );
+  }
+  if ((rows && rows.affectedRows > 0) || answer_id) {
+    // Buscar todas las preguntas que dependen de esta pregunta y, opcionalmente, de una respuesta específica
+    const [dependentQuestions] = await connection.query(
+      'select id from question where depends_on_question_id = ?' + (answer_id ? ' and depends_on_answer_id = ?' : ''),
+      [question_id, answer_id].filter(Boolean)
+    );
+
+    // Desactivar todas las preguntas dependientes
+    for (let question of dependentQuestions) {
+      await disableQuestions(connection, question.id, enabled);
+    }
+  } else {
+    throw new Error('Could not update question');
+  }
+}
+
+router.post('/survey/modify-checkbox', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    const connection = await mysqlConnection.promise().getConnection();
+    try {
+      const { question_id, answer_id, location_id, enabled } = req.body;
+
+      await connection.beginTransaction();
+
+      // modificar answer
+      if (answer_id) {
+        const [rows] = await connection.query(
+          'update answer set enabled = ? where id = ? and question_id = ?',
+          [enabled, answer_id, question_id]
+        );
+        if (rows.affectedRows > 0) {
+          // tambien modificar las question que dependen de esta respuesta
+          await disableQuestions(connection, question_id, enabled, answer_id);
+          await connection.commit();
+          res.json('Answer updated');
+        } else {
+          await connection.rollback();
+          res.status(500).json('Could not update answer');
+        }
+      } else {
+        // modificar question_location
+        if (location_id) {
+          const [rows] = await connection.query(
+            'update question_location set enabled = ? where question_id = ? and location_id = ?',
+            [enabled, question_id, location_id]
+          );
+          if (rows.affectedRows > 0) {
+            await connection.commit();
+            res.json('Location updated');
+          } else {
+            await connection.rollback();
+            res.status(500).json('Could not update location');
+          }
+        } else {
+          // modificar question y las question que dependen de esta pregunta
+          await disableQuestions(connection, question_id, enabled);
+          await connection.commit();
+          res.json('Question updated');
+        }
+      }
+    } catch (err) {
+      if (connection) {
+        await connection.rollback();
+      }
+      console.log(err);
+      res.status(500).json('Internal server error');
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/survey/questions', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const language = req.query.language || 'en';
+
+  if (cabecera.role === 'admin') {
+    try {
+      // get all questions and answers from table question and answer, if language === 'es' then get name_es, else get name
+      const query = `SELECT q.id as question_id, 
+                  q.name AS question_name, 
+                  q.name_es AS question_name_es, 
+                  q.answer_type_id,
+                  ${language === 'en' ? 'at.name' : 'at.name_es'}  AS answer_type_name,
+                  q.depends_on_question_id,
+                  q.depends_on_answer_id,
+                  q.enabled as question_enabled,
+                  a.id as answer_id, 
+                  a.name AS answer_name,
+                  a.name_es AS answer_name_es,
+                  a.enabled as answer_enabled,
+                  l.id as location_id, 
+                  l.community_city AS location_name,
+                  ql.enabled as question_location_enabled
+                  FROM question as q
+                  INNER JOIN answer_type as at ON q.answer_type_id = at.id
+                  LEFT JOIN answer as a ON q.id = a.question_id
+                  LEFT JOIN question_location as ql ON q.id = ql.question_id
+                  LEFT JOIN location as l ON ql.location_id = l.id
+                  ORDER BY q.id, a.id, ql.location_id ASC`;
+      const [rows] = await mysqlConnection.promise().query(query);
+      var questions = [];
+      var question_id = 0;
+      var answer_id = 0;
+      var stop_save_locations = false;
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (row.question_id !== question_id) {
+          questions.push({
+            id: row.question_id,
+            name: row.question_name,
+            name_es: row.question_name_es,
+            depends_on_question_id: row.depends_on_question_id,
+            depends_on_answer_id: row.depends_on_answer_id,
+            answer_type_id: row.answer_type_id,
+            answer_type: row.answer_type_name,
+            enabled: row.question_enabled,
+            loading: 'N',
+            answers: [],
+            locations: []
+          });
+          question_id = row.question_id;
+          stop_save_locations = false;
+          answer_id = 0;
+          location_id = 0;
+        }
+        if (row.answer_id && row.answer_id !== answer_id) {
+          questions[questions.length - 1].answers.push({
+            question_id: row.question_id,
+            id: row.answer_id,
+            name: row.answer_name,
+            name_es: row.answer_name_es,
+            enabled: row.answer_enabled,
+            loading: 'N',
+          });
+          answer_id = row.answer_id;
+          // si no es la primera respuesta, se debe evitar que se guarden las locaciones hasta que cambie de pregunta
+          if (questions[questions.length - 1].answers.length > 1) {
+            stop_save_locations = true;
+          } else {
+            stop_save_locations = false;
+          }
+        }
+        if (row.location_id && row.location_id !== location_id && !stop_save_locations) {
+          questions[questions.length - 1].locations.push({
+            question_id: row.question_id,
+            id: row.location_id,
+            name: row.location_name,
+            enabled: row.question_location_enabled,
+            loading: 'N',
+          });
+          location_id = row.location_id;
+        }
+
+      }
+
+      res.json(questions);
+
+    } catch (error) {
+      console.log(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/register/questions', async (req, res) => {
   const language = req.query.language || 'en';
+  const location_id = req.query.location_id || null;
   try {
     // get all questions and answers from table question and answer, if language === 'es' then get name_es, else get name
     const query = `SELECT q.id as question_id, 
@@ -2390,11 +2782,12 @@ router.get('/register/questions', async (req, res) => {
                   q.depends_on_answer_id,
                   a.id as answer_id, 
                   ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
-                  FROM question q
-                  LEFT JOIN answer a ON q.id = a.question_id
-                  WHERE q.enabled = 'Y'
+                  FROM question as q
+                  INNER JOIN question_location as ql ON q.id = ql.question_id
+                  LEFT JOIN answer as a ON q.id = a.question_id
+                  WHERE q.enabled = 'Y' AND (a.enabled = 'Y' OR a.id IS NULL) AND (ql.location_id = ? AND ql.enabled = 'Y')
                   ORDER BY q.id, a.id ASC`;
-    const [rows] = await mysqlConnection.promise().query(query);
+    const [rows] = await mysqlConnection.promise().query(query, [location_id]);
     var questions = [];
     var question_id = 0;
     for (let i = 0; i < rows.length; i++) {
@@ -2548,7 +2941,8 @@ router.get('/total-days-operation', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `select count(distinct date(creation_date)) as total_days_operation 
         from delivery_beneficiary
-        ${cabecera.role === 'client' ? 'where client_id = ?' : ''}`,
+        where approved = 'Y' 
+        ${cabecera.role === 'client' ? 'AND client_id = ?' : ''}`,
         [cabecera.client_id]
       );
       res.json(rows[0].total_days_operation);
