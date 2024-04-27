@@ -3053,7 +3053,7 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
           (SELECT COUNT(DISTINCT(user.id)) FROM user WHERE role_id = 5 and enabled = 'Y') AS total_beneficiaries
         FROM user
         INNER JOIN delivery_beneficiary ON user.id = delivery_beneficiary.receiving_user_id
-        WHERE user.role_id = 5 AND delivery_beneficiary.approved = 'Y'`
+        WHERE user.role_id = 5 AND user.enabled = 'Y' AND delivery_beneficiary.approved = 'Y'`
       );
       const totalBeneficiariesServed = rows[0].total_beneficiaries_served;
       const totalBeneficiaries = rows[0].total_beneficiaries;
@@ -3070,10 +3070,13 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
         const [rows] = await mysqlConnection.promise().query(
           `SELECT 
             COUNT(DISTINCT u.id) AS total_beneficiaries_served,
-            (SELECT COUNT(DISTINCT(client_user.user_id)) FROM client_user WHERE role_id = 5 and enabled = 'Y' and client_id = ?) AS total_beneficiaries
+            (SELECT COUNT(DISTINCT(u.id)) 
+            FROM user as u
+            INNER JOIN client_user as cu ON u.id = cu.user_id
+            WHERE u.role_id = 5 and u.enabled = 'Y' and cu.client_id = ?) AS total_beneficiaries
           FROM user AS u
           INNER JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-          WHERE u.role_id = 5 AND db.approved = 'Y' AND db.client_id = ?`,
+          WHERE u.role_id = 5 AND u.enabled = 'Y' AND db.approved = 'Y' AND db.client_id = ?`,
           [cabecera.client_id, cabecera.client_id]
         );
         const totalBeneficiariesServed = rows[0].total_beneficiaries_served;
@@ -3090,6 +3093,65 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
     }
   }
 });
+
+router.get('/total-beneficiaries-without-health-insurance', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    // contar los beneficiarios que en la tabla user_question tengan question_id = 1 y en la tabla user_question_answer tengan answer_id = 2
+    // finalmente devolver el porcentaje de beneficiarios que no tienen seguro de salud sobre el total de beneficiarios
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+          COUNT(DISTINCT user.id) AS total_beneficiaries_without_health_insurance,
+          (SELECT COUNT(DISTINCT(user.id)) FROM user WHERE role_id = 5 and enabled = 'Y') AS total_beneficiaries
+        FROM user
+        INNER JOIN user_question ON user.id = user_question.user_id
+        INNER JOIN user_question_answer ON user_question.id = user_question_answer.user_question_id
+        WHERE user.role_id = 5 AND user.enabled = 'Y' AND user_question.question_id = 1 AND user_question_answer.answer_id = 2`
+      );
+      const totalBeneficiariesWithoutHealthInsurance = rows[0].total_beneficiaries_without_health_insurance;
+      const totalBeneficiaries = rows[0].total_beneficiaries;
+      const percentage = (totalBeneficiariesWithoutHealthInsurance / totalBeneficiaries * 100).toFixed(2);
+      res.json(percentage);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    if (cabecera.role === 'client') {
+      // contar los beneficiarios que en la tabla user_question tengan question_id = 1 y en la tabla user_question_answer tengan answer_id = 2
+      // finalmente devolver el porcentaje de beneficiarios que no tienen seguro de salud sobre el total de beneficiarios
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `SELECT
+            COUNT(DISTINCT u.id) AS total_beneficiaries_without_health_insurance,
+            (SELECT COUNT(DISTINCT(u.id)) 
+              FROM user as u
+              INNER JOIN client_user as cu ON u.id = cu.user_id
+              INNER JOIN user_question AS uq ON u.id = uq.user_id 
+              WHERE u.role_id = 5 and u.enabled = 'Y' and cu.client_id = ?) AS total_beneficiaries
+          FROM user AS u
+          INNER JOIN client_user AS cu ON u.id = cu.user_id
+          INNER JOIN user_question AS uq ON u.id = uq.user_id
+          INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+          WHERE u.role_id = 5 AND u.enabled = 'Y' AND uq.question_id = 1 AND uqa.answer_id = 2 AND cu.client_id = ?`,
+          [cabecera.client_id, cabecera.client_id]
+        );
+        const totalBeneficiariesWithoutHealthInsurance = rows[0].total_beneficiaries_without_health_insurance;
+        const totalBeneficiaries = rows[0].total_beneficiaries;
+        const percentage = (totalBeneficiariesWithoutHealthInsurance / totalBeneficiaries * 100).toFixed(2);
+        res.json(percentage);
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  }
+});
+
 
 router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
