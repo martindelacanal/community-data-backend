@@ -2968,6 +2968,31 @@ router.get('/total-days-operation', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/house-hold-size-average', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT AVG(u.household_size) AS house_hold_size_average
+        FROM user u
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+        WHERE u.enabled = 'Y' AND u.role_id = 5 
+        ${cabecera.role === 'client' ? 'AND cu.client_id = ?' : ''}`,
+        [cabecera.client_id]
+      );
+
+      res.json(rows[0].house_hold_size_average);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/total-from-role/:role', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -2997,7 +3022,7 @@ router.get('/total-from-role/:role', verifyToken, async (req, res) => {
         if (role === 'beneficiary') {
           // cuenta los beneficiarios que tienen el client_id en la tabla client_user
           const [rows] = await mysqlConnection.promise().query(
-            `SELECT COUNT(*) AS total
+            `SELECT COUNT(DISTINCT(u.id)) AS total
              FROM client_user as cu
              INNER JOIN user as u ON cu.user_id = u.id
               WHERE u.role_id = 5 AND cu.client_id = ?`,
@@ -3025,7 +3050,7 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
           COUNT(DISTINCT user.id) AS total_beneficiaries_served,
-          (SELECT COUNT(*) FROM user WHERE role_id = 5) AS total_beneficiaries
+          (SELECT COUNT(DISTINCT(user.id)) FROM user WHERE role_id = 5 and enabled = 'Y') AS total_beneficiaries
         FROM user
         INNER JOIN delivery_beneficiary ON user.id = delivery_beneficiary.receiving_user_id
         WHERE user.role_id = 5 AND delivery_beneficiary.approved = 'Y'`
@@ -3045,7 +3070,7 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
         const [rows] = await mysqlConnection.promise().query(
           `SELECT 
             COUNT(DISTINCT u.id) AS total_beneficiaries_served,
-            (SELECT COUNT(*) FROM client_user WHERE client_id = ?) AS total_beneficiaries
+            (SELECT COUNT(DISTINCT(client_user.user_id)) FROM client_user WHERE role_id = 5 and enabled = 'Y' and client_id = ?) AS total_beneficiaries
           FROM user AS u
           INNER JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
           WHERE u.role_id = 5 AND db.approved = 'Y' AND db.client_id = ?`,
@@ -3151,7 +3176,7 @@ router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
       try {
         // TO-DO por ahora cuenta todos
         const [rows] = await mysqlConnection.promise().query(
-          `SELECT COUNT(*) AS total_beneficiaries_qualified
+          `SELECT COUNT(DISTINCT(user_id)) AS total_beneficiaries_qualified
           FROM client_user
           WHERE client_id = ?`,
           [cabecera.client_id]
@@ -5607,7 +5632,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         ${language === 'en' ? 'g.name' : 'g.name_es'} AS name,
-        COUNT(*) AS total
+        COUNT(DISTINCT(u.id)) AS total
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN gender AS g ON u.gender_id = g.id
@@ -5699,7 +5724,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         ${language === 'en' ? 'e.name' : 'e.name_es'} AS name,
-        COUNT(*) AS total
+        COUNT(DISTINCT(u.id)) AS total
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN ethnicity AS e ON u.ethnicity_id = e.id
@@ -5791,7 +5816,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         u.household_size AS name,
-        COUNT(*) AS total
+        COUNT(DISTINCT(u.id)) AS total
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
@@ -5908,7 +5933,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS name,
-        COUNT(*) AS total
+        COUNT(DISTINCT(u.id)) AS total
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
@@ -6139,7 +6164,7 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
           IF(u.email IS NULL, ${language === 'en' ? "'No'" : "'No'"}, ${language === 'en' ? "'Yes'" : "'Si'"}) AS name,
-          COUNT(*) AS total
+          COUNT(DISTINCT(u.id)) AS total
           FROM user u
           ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
           
@@ -6230,7 +6255,7 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
           IF(u.phone IS NULL, ${language === 'en' ? "'No'" : "'No'"}, ${language === 'en' ? "'Yes'" : "'Si'"}) AS name,
-          COUNT(*) AS total
+          COUNT(DISTINCT(u.id)) AS total
           FROM user u
           ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
           
