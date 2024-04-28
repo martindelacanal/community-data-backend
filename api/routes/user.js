@@ -2981,7 +2981,9 @@ router.get('/house-hold-size-average', verifyToken, async (req, res) => {
         ${cabecera.role === 'client' ? 'AND cu.client_id = ?' : ''}`,
         [cabecera.client_id]
       );
-
+      if (rows[0].house_hold_size_average === null) {
+        rows[0].house_hold_size_average = 0;
+      }
       res.json(rows[0].house_hold_size_average);
 
     } catch (err) {
@@ -3058,7 +3060,11 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
       const totalBeneficiariesServed = rows[0].total_beneficiaries_served;
       const totalBeneficiaries = rows[0].total_beneficiaries;
       const percentage = (totalBeneficiariesServed / totalBeneficiaries * 100).toFixed(2);
-      res.json(percentage);
+      if (isNaN(percentage)) {
+        res.json(0);
+      } else {
+        res.json(percentage);
+      }
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
@@ -3082,7 +3088,11 @@ router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
         const totalBeneficiariesServed = rows[0].total_beneficiaries_served;
         const totalBeneficiaries = rows[0].total_beneficiaries;
         const percentage = (totalBeneficiariesServed / totalBeneficiaries * 100).toFixed(2);
-        res.json(percentage);
+        if (isNaN(percentage)) {
+          res.json(0);
+        } else {
+          res.json(percentage);
+        }
       } catch (err) {
         console.log(err);
         res.status(500).json('Internal server error');
@@ -3113,7 +3123,11 @@ router.get('/total-beneficiaries-without-health-insurance', verifyToken, async (
       const totalBeneficiariesWithoutHealthInsurance = rows[0].total_beneficiaries_without_health_insurance;
       const totalBeneficiaries = rows[0].total_beneficiaries;
       const percentage = (totalBeneficiariesWithoutHealthInsurance / totalBeneficiaries * 100).toFixed(2);
-      res.json(percentage);
+      if (isNaN(percentage)) {
+        res.json(0);
+      } else {
+        res.json(percentage);
+      }
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
@@ -3141,7 +3155,11 @@ router.get('/total-beneficiaries-without-health-insurance', verifyToken, async (
         const totalBeneficiariesWithoutHealthInsurance = rows[0].total_beneficiaries_without_health_insurance;
         const totalBeneficiaries = rows[0].total_beneficiaries;
         const percentage = (totalBeneficiariesWithoutHealthInsurance / totalBeneficiaries * 100).toFixed(2);
-        res.json(percentage);
+        if (isNaN(percentage)) {
+          res.json(0);
+        } else {
+          res.json(percentage);
+        }
       } catch (err) {
         console.log(err);
         res.status(500).json('Internal server error');
@@ -3209,19 +3227,6 @@ router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
     try {
-      // const [rows] = await mysqlConnection.promise().query(
-      //   `SELECT
-      //     COUNT(DISTINCT user.id) AS total_beneficiaries_qualified
-      //   FROM user
-      //   INNER JOIN user_question ON user.id = user_question.user_id
-      //   INNER JOIN question ON user_question.question_id = question.id
-      //   WHERE user.role_id = 5
-      //   AND user_question.enabled = 'Y'
-      //   AND question.enabled = 'Y'
-      //   AND (question.recurrent = 'N' OR (question.recurrent = 'Y' AND user_question.creation_date > question.begin_date))
-      //   ${cabecera.role === 'client' ? 'AND question.client_id = ? AND user.client_id = ?' : ''}`,
-      //   [cabecera.client_id, cabecera.client_id]
-      // );
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           COUNT(DISTINCT user.id) AS total_beneficiaries_qualified
@@ -3879,6 +3884,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
         OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
                      WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
+        ${cabecera.role === 'client' ? 'AND EXISTS (SELECT 1 FROM question_location ql INNER JOIN client_location cl ON ql.location_id = cl.location_id WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = \'Y\')' : ''}
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
@@ -5499,6 +5505,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
         OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
                      WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
+        ${cabecera.role === 'client' ? 'AND EXISTS (SELECT 1 FROM question_location ql INNER JOIN client_location cl ON ql.location_id = cl.location_id WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = \'Y\')' : ''}
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
