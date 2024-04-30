@@ -1802,6 +1802,84 @@ router.get('/roles', verifyToken, async (req, res) => {
   }
 });
 
+router.post('/onBoard/answers', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  console.log("req.body", req.body);
+  if (cabecera.role === 'beneficiary') {
+    const secondForm = req.body;
+    const location_id = req.query.location_id || null;
+
+    try {
+
+      // recuperar el client_id de la location_id, para eso se debe revisar primero en la tabla delivery log en la fecha actual, si no hay registros, se debe buscar en la tabla client_location un client_id asociado a la location_id
+      const [rows_client_id] = await mysqlConnection.promise().query('SELECT client_id FROM delivery_log WHERE date(creation_date) = CURDATE() and location_id = ?', [location_id]);
+      let client_id = null;
+      if (rows_client_id.length > 0) {
+        client_id = rows_client_id[0].client_id;
+      } else {
+        const [rows_client_id2] = await mysqlConnection.promise().query('SELECT client_id FROM client_location WHERE location_id = ?', [location_id]);
+        if (rows_client_id2.length > 0) {
+          client_id = rows_client_id2[0].client_id;
+        }
+      }
+
+      // save inserted user id
+      const user_id = cabecera.id;
+      // insertar en tabla client_user el client_id y el user_id si client_id no es null
+      if (client_id) {
+        const [rows_client_user] = await mysqlConnection.promise().query('insert into client_user(client_id, user_id) values(?,?)', [client_id, user_id]);
+      }
+      // insert user_question, iterate array of questions and insert each question with its answer
+      for (let i = 0; i < secondForm.length; i++) {
+        const question_id = secondForm[i].question_id;
+        const answer_type_id = secondForm[i].answer_type_id;
+        const answer = secondForm[i].answer;
+        var user_question_id = null;
+        if (answer) {
+          switch (answer_type_id) {
+            case 1: // texto
+              const [rows] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_text) values(?,?,?,?)',
+                [user_id, question_id, answer_type_id, answer]);
+              break;
+            case 2: // numero
+              const [rows2] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_number) values(?,?,?,?)',
+                [user_id, question_id, answer_type_id, answer]);
+              break;
+            case 3: // opcion simple
+              const [rows3] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
+                [user_id, question_id, answer_type_id]);
+              user_question_id = rows3.insertId;
+              const [rows4] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+                [user_question_id, answer]);
+              break;
+            case 4: // opcion multiple
+              if (answer.length > 0) {
+                const [rows5] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
+                  [user_id, question_id, answer_type_id]);
+                user_question_id = rows5.insertId;
+                for (let j = 0; j < answer.length; j++) {
+                  const answer_id = answer[j];
+                  const [rows6] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+                    [user_question_id, answer_id]);
+                }
+              }
+              break;
+            default:
+              break;
+          }
+        }
+      }
+      res.status(200).json('Data inserted successfully');
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 // get value (true or false) from body and update user_status_id of user. If true update to 3, if false update to 2
 router.post('/onBoard', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -1930,51 +2008,53 @@ router.post('/onBoard', verifyToken, async (req, res) => {
             );
           }
           // insertar el client_id en la tabla client_user
-          if (rows2_client_id.length > 0) {
-            let client_id_exists = false;
-            let update_client_id = false;
-            let client_id_to_update = null;
-            // verificar si el receiving_user_id tiene el client_id insertado en su tabla client_user (no importa la fecha),
-            // si no es asi, insertar el nuevo client_id en la tabla client_user
-            for (let i = 0; i < rows2_client_id.length; i++) {
-              if (rows2_client_id[i].client_id === client_id) {
-                client_id_exists = true;
-              } else {
-                if (rows2_client_id[i].checked === 'N') {
-                  if (rows2_client_id[i].client_same_date === 'Y') {
-                    update_client_id = true;
-                    client_id_to_update = rows2_client_id[i].client_id;
+          if (client_id) {
+            if (rows2_client_id.length > 0) {
+              let client_id_exists = false;
+              let update_client_id = false;
+              let client_id_to_update = null;
+              // verificar si el receiving_user_id tiene el client_id insertado en su tabla client_user (no importa la fecha),
+              // si no es asi, insertar el nuevo client_id en la tabla client_user
+              for (let i = 0; i < rows2_client_id.length; i++) {
+                if (rows2_client_id[i].client_id === client_id) {
+                  client_id_exists = true;
+                } else {
+                  if (rows2_client_id[i].checked === 'N') {
+                    if (rows2_client_id[i].client_same_date === 'Y') {
+                      update_client_id = true;
+                      client_id_to_update = rows2_client_id[i].client_id;
+                    }
                   }
                 }
               }
-            }
 
-            if (!client_id_exists) {
-              if (update_client_id) {
-                const [rows6] = await mysqlConnection.promise().query(
-                  `update client_user set client_id = ? where user_id = ? and client_id = ?`,
-                  [client_id, user_id, client_id_to_update]
-                );
+              if (!client_id_exists) {
+                if (update_client_id) {
+                  const [rows6] = await mysqlConnection.promise().query(
+                    `update client_user set client_id = ? where user_id = ? and client_id = ?`,
+                    [client_id, user_id, client_id_to_update]
+                  );
+                } else {
+                  const [rows7] = await mysqlConnection.promise().query(
+                    'insert into client_user(user_id, client_id) values(?,?)',
+                    [user_id, client_id]
+                  );
+                }
               } else {
-                const [rows7] = await mysqlConnection.promise().query(
-                  'insert into client_user(user_id, client_id) values(?,?)',
-                  [user_id, client_id]
-                );
+                if (update_client_id) {
+                  // eliminar el client_id que no es el actual
+                  const [rows8] = await mysqlConnection.promise().query(
+                    'delete from client_user where user_id = ? and client_id = ?',
+                    [user_id, client_id_to_update]
+                  );
+                }
               }
             } else {
-              if (update_client_id) {
-                // eliminar el client_id que no es el actual
-                const [rows8] = await mysqlConnection.promise().query(
-                  'delete from client_user where user_id = ? and client_id = ?',
-                  [user_id, client_id_to_update]
-                );
-              }
+              const [rows7] = await mysqlConnection.promise().query(
+                'insert into client_user(user_id, client_id) values(?,?)',
+                [user_id, client_id]
+              );
             }
-          } else {
-            const [rows7] = await mysqlConnection.promise().query(
-              'insert into client_user(user_id, client_id) values(?,?)',
-              [user_id, client_id]
-            );
           }
 
         }
@@ -2770,6 +2850,69 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
           location_id = row.location_id;
         }
 
+      }
+
+      res.json(questions);
+
+    } catch (error) {
+      console.log(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/onBoard/questions', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'beneficiary') {
+    const language = req.query.language || 'en';
+    const location_id = req.query.location_id || null;
+    try {
+      const query = `
+      WITH RECURSIVE answered_or_dependent_questions AS (
+        SELECT question_id FROM user_question WHERE user_id = ${cabecera.id}
+        UNION ALL
+        SELECT q.id FROM question q INNER JOIN answered_or_dependent_questions adq ON q.depends_on_question_id = adq.question_id
+      )
+      SELECT q.id as question_id, 
+        ${language === 'en' ? 'q.name' : 'q.name_es'} AS question_name, 
+        q.answer_type_id,
+        q.depends_on_question_id,
+        q.depends_on_answer_id,
+        a.id as answer_id, 
+        ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
+      FROM question as q
+      INNER JOIN question_location as ql ON q.id = ql.question_id
+      LEFT JOIN answer as a ON q.id = a.question_id
+      WHERE q.enabled = 'Y' AND (a.enabled = 'Y' OR a.id IS NULL) AND (ql.location_id = ? AND ql.enabled = 'Y')
+      AND q.id NOT IN (SELECT question_id FROM answered_or_dependent_questions)
+      ORDER BY q.id, a.id ASC`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [location_id]);
+      var questions = [];
+      var question_id = 0;
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (row.question_id !== question_id) {
+          questions.push({
+            id: row.question_id,
+            name: row.question_name,
+            depends_on_question_id: row.depends_on_question_id,
+            depends_on_answer_id: row.depends_on_answer_id,
+            answer_type_id: row.answer_type_id,
+            answers: []
+          });
+          question_id = row.question_id;
+        }
+        if (row.answer_id) {
+          questions[questions.length - 1].answers.push({
+            question_id: row.question_id,
+            id: row.answer_id,
+            name: row.answer_name
+          });
+        }
       }
 
       res.json(questions);
