@@ -5009,11 +5009,19 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
 
       var query_from_date = '';
       if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        if (cabecera.role === 'admin') {
+          query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        } else {
+          query_from_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        }
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        if (cabecera.role === 'admin') {
+          query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        } else {
+          query_to_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        }
       }
       var query_locations = '';
       if (locations.length > 0) {
@@ -5027,22 +5035,19 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
       if (product_types.length > 0) {
         query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
       }
-
       const [rows] = await mysqlConnection.promise().query(
         `SELECT p.id,
-                p.name,
-                pt.name as product_type_name,
-                pt.name_es as product_type_name_es,
-                IFNULL(SUM(product_donation_ticket.quantity), 0) as total_quantity,
-        DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
-                        DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
-        DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
-                        DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+          p.name,
+          pt.name as product_type_name,
+          pt.name_es as product_type_name_es,
+          IFNULL(SUM(product_donation_ticket.quantity), 0) as total_quantity,
+          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,` : `DATE_FORMAT(CONVERT_TZ(min(dt.creation_date), '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,`}
+          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,` : `DATE_FORMAT(CONVERT_TZ(min(dt.creation_date), '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,`}  
+          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,` : `DATE_FORMAT(CONVERT_TZ(min(dt.modification_date), '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,`}
+          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time` : `DATE_FORMAT(CONVERT_TZ(min(dt.modification_date), '+00:00', 'America/Los_Angeles'), '%T') AS modification_time`}
         FROM product as p
         INNER JOIN product_type as pt ON pt.id = p.product_type_id
-        LEFT JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id
-        LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id
-        LEFT JOIN client_location ON dt.location_id = client_location.location_id
+        ${cabecera.role === 'admin' ? 'LEFT JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location ON dt.location_id = client_location.location_id' : 'INNER JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id INNER JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id INNER JOIN client_location ON dt.location_id = client_location.location_id'}
         WHERE 1=1
         ${query_from_date}
         ${query_to_date}
