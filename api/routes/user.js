@@ -1789,7 +1789,7 @@ router.get('/roles', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name \
         from role \
-        where name != "beneficiary" \
+        where name != "beneficiary" and name != "thirdparty" \
         order by name',
       );
       res.json(rows);
