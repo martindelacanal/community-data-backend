@@ -250,7 +250,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage: storage }).array('ticket[]');
 router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
     try {
       if (req.files && req.files.length > 0) {
         formulario = JSON.parse(req.body.form);
@@ -367,7 +367,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
 
 router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     try {
       const id = req.params.id || null;
       formulario = JSON.parse(req.body.form);
@@ -535,7 +535,7 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
 
 router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     try {
       const id = req.params.id || null;
       const [rows] = await mysqlConnection.promise().query(
@@ -630,7 +630,7 @@ router.put('/beneficiary/reset-password', async (req, res) => {
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
     try {
       const { idUser } = req.params;
       const { password } = req.body;
@@ -686,7 +686,7 @@ router.delete('/user/reset-password/:idUser', verifyToken, async (req, res) => {
 
 router.get('/new/location/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     try {
       const id = req.params.id || null;
       const [rows] = await mysqlConnection.promise().query(
@@ -722,7 +722,7 @@ router.get('/new/location/:id', verifyToken, async (req, res) => {
 
 router.post('/new/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     try {
       formulario = req.body;
       const organization = formulario.organization || null;
@@ -769,7 +769,7 @@ router.post('/new/location', verifyToken, async (req, res) => {
 
 router.put('/new/location/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     try {
       const id = req.params.id || null;
       formulario = req.body;
@@ -1645,7 +1645,7 @@ router.get('/answer-types', verifyToken, async (req, res) => {
 
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
+  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,organization,community_city,address from location where enabled = "Y" order by community_city'
@@ -1704,7 +1704,7 @@ router.get('/register/locations', async (req, res) => {
 
 router.get('/providers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name from provider order by name',
@@ -1721,7 +1721,7 @@ router.get('/providers', verifyToken, async (req, res) => {
 
 router.get('/products', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name,product_type_id from product order by name',
@@ -1740,7 +1740,7 @@ router.get('/product_types', verifyToken, async (req, res) => {
   const id = req.query.id || null;
   const language = req.query.language || 'en';
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
     try {
       const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
                   FROM product_type ${id ? ' WHERE id = ?' : ''} ORDER BY name`;
@@ -1758,7 +1758,7 @@ router.get('/product_types', verifyToken, async (req, res) => {
 
 router.get('/clients', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'delivery') {
+  if (cabecera.role === 'admin' || cabecera.role === 'delivery' || cabecera.role === 'opsmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select c.id,c.name,c.short_name, \
@@ -2294,7 +2294,7 @@ router.get('/donation_id/exists/search', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const donation_id = req.query.donation_id || null;
   try {
-    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
       if (donation_id) {
         const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ?', [donation_id]);
         if (rows.length > 0) {
@@ -2470,7 +2470,7 @@ router.get('/location/exists/search', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const community_city = req.query.community_city || null;
   try {
-    if (cabecera.role === 'admin') {
+    if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
       if (community_city) {
         const [rows] = await mysqlConnection.promise().query('select community_city from location where REPLACE(LOWER(community_city), " ", "") = REPLACE(LOWER(?), " ", "")', [community_city]);
         if (rows.length > 0) {
@@ -3593,7 +3593,7 @@ router.get('/total-delivered', verifyToken, async (req, res) => {
 
 router.get('/map/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     try {
       let enabled = req.query.enabled ? req.query.enabled : null;
       let ids = req.query.ids ? req.query.ids.split(',') : [];
@@ -3839,7 +3839,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
 
 router.post('/message', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
     try {
       const user_id = cabecera.id;
       const message = req.body.message || null;
@@ -3869,7 +3869,7 @@ router.post('/message', verifyToken, async (req, res) => {
 router.put('/settings/password', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
     try {
       const user_id = cabecera.id;
       const { actual_password, new_password } = req.body;
@@ -4910,7 +4910,7 @@ router.post('/table/gender/download-csv', verifyToken, async (req, res) => {
 
 router.post('/table/location/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -4990,7 +4990,7 @@ router.post('/table/location/download-csv', verifyToken, async (req, res) => {
 
 router.post('/table/product/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -5041,13 +5041,13 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
           pt.name as product_type_name,
           pt.name_es as product_type_name_es,
           IFNULL(SUM(product_donation_ticket.quantity), 0) as total_quantity,
-          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,` : `DATE_FORMAT(CONVERT_TZ(min(dt.creation_date), '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,`}
-          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,` : `DATE_FORMAT(CONVERT_TZ(min(dt.creation_date), '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,`}  
-          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,` : `DATE_FORMAT(CONVERT_TZ(min(dt.modification_date), '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,`}
-          ${cabecera.role === 'admin' ? `DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time` : `DATE_FORMAT(CONVERT_TZ(min(dt.modification_date), '+00:00', 'America/Los_Angeles'), '%T') AS modification_time`}
+          ${cabecera.role === 'admin' || cabecera.role === 'opsmanager' ? `DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,` : `DATE_FORMAT(CONVERT_TZ(min(dt.creation_date), '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,`}
+          ${cabecera.role === 'admin' || cabecera.role === 'opsmanager' ? `DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,` : `DATE_FORMAT(CONVERT_TZ(min(dt.creation_date), '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,`}  
+          ${cabecera.role === 'admin' || cabecera.role === 'opsmanager' ? `DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,` : `DATE_FORMAT(CONVERT_TZ(min(dt.modification_date), '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,`}
+          ${cabecera.role === 'admin' || cabecera.role === 'opsmanager' ? `DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time` : `DATE_FORMAT(CONVERT_TZ(min(dt.modification_date), '+00:00', 'America/Los_Angeles'), '%T') AS modification_time`}
         FROM product as p
         INNER JOIN product_type as pt ON pt.id = p.product_type_id
-        ${cabecera.role === 'admin' ? 'LEFT JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location ON dt.location_id = client_location.location_id' : 'INNER JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id INNER JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id INNER JOIN client_location ON dt.location_id = client_location.location_id'}
+        ${cabecera.role === 'admin' || cabecera.role === 'opsmanager' ? 'LEFT JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location ON dt.location_id = client_location.location_id' : 'INNER JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id INNER JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id INNER JOIN client_location ON dt.location_id = client_location.location_id'}
         WHERE 1=1
         ${query_from_date}
         ${query_to_date}
@@ -5486,7 +5486,7 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
 
 router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6886,26 +6886,25 @@ router.get('/table/notification', verifyToken, async (req, res) => {
   let buscar = req.query.search;
   let queryBuscar = '';
 
-  var page = req.query.page ? Number(req.query.page) : 1;
+  if (cabecera.role === 'admin') {
 
-  if (page < 1) {
-    page = 1;
-  }
-  var resultsPerPage = 10;
-  var start = (page - 1) * resultsPerPage;
+    var page = req.query.page ? Number(req.query.page) : 1;
 
-  var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-  var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-  var queryOrderBy = `${orderBy} ${orderType}`;
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
 
-  if (buscar) {
-    buscar = '%' + buscar + '%';
-    if (cabecera.role === 'admin') {
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
       queryBuscar = `WHERE (message.id like '${buscar}' or message.user_id like '${buscar}' or user.username like '${buscar}' or message.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(message.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
-  }
 
-  if (cabecera.role === 'admin') {
     try {
       const query = `SELECT
       message.id,
@@ -7019,9 +7018,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin' || cabecera.role === 'client') {
-        queryBuscar = `AND (u.id like '${buscar}' or u.username like '${buscar}' or u.email like '${buscar}' or u.firstname like '${buscar}' or u.lastname like '${buscar}' or role.name like '${buscar}' or u.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = `AND (u.id like '${buscar}' or u.username like '${buscar}' or u.email like '${buscar}' or u.firstname like '${buscar}' or u.lastname like '${buscar}' or role.name like '${buscar}' or u.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     var tableRole = req.query.tableRole;
@@ -7175,9 +7172,7 @@ router.post('/table/delivered', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin' || cabecera.role === 'client') {
-        queryBuscar = ` AND (db.id like '${buscar}' or db.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or db.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or db.location_id like '${buscar}' or location.community_city like '${buscar}' or db.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = ` AND (db.id like '${buscar}' or db.delivering_user_id like '${buscar}' or user_delivery.username like '${buscar}' or db.receiving_user_id like '${buscar}' or user_beneficiary.username like '${buscar}' or db.location_id like '${buscar}' or location.community_city like '${buscar}' or db.approved like '${buscar}' or DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -7242,7 +7237,7 @@ router.post('/table/delivered', verifyToken, async (req, res) => {
 
 router.post('/table/ticket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
@@ -7347,7 +7342,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
 
 router.post('/table/product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     const language = req.query.language || 'en';
 
     const filters = req.body;
@@ -7405,10 +7400,8 @@ router.post('/table/product', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin' || cabecera.role === 'client') {
-        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or product_type like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-        queryBuscarCount = `AND (p.id like '${buscar}' or p.name like '${buscar}' or pt.name like '${buscar}' or pt.name_es like '${buscar}' or p.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or product_type like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscarCount = `AND (p.id like '${buscar}' or p.name like '${buscar}' or pt.name like '${buscar}' or pt.name_es like '${buscar}' or p.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -7539,9 +7532,7 @@ router.post('/table/product-type', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin') {
-        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -7632,9 +7623,7 @@ router.post('/table/gender', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin') {
-        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -7735,9 +7724,7 @@ router.post('/table/ethnicity', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin') {
-        queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or name_es like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -7832,9 +7819,7 @@ router.post('/table/provider', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin' || cabecera.role === 'client') {
-        queryBuscar = `AND (p.id like '${buscar}' or p.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = `AND (p.id like '${buscar}' or p.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -7941,9 +7926,7 @@ router.post('/table/client', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      if (cabecera.role === 'admin') {
-        queryBuscar = `AND (c.id like '${buscar}' or c.name like '${buscar}' or c.short_name like '${buscar}' or c.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      }
+      queryBuscar = `AND (c.id like '${buscar}' or c.name like '${buscar}' or c.short_name like '${buscar}' or c.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -8000,7 +7983,7 @@ router.post('/table/client', verifyToken, async (req, res) => {
 
 router.post('/table/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
@@ -8345,7 +8328,7 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
 
 router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     try {
       const { idLocation } = req.params;
 
@@ -8649,7 +8632,7 @@ router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
 
 router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     try {
       const { idProduct } = req.params;
 
@@ -8889,7 +8872,7 @@ router.get('/view/ethnicity/:idEthnicity', verifyToken, async (req, res) => {
 
 router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
     try {
       const { idTicket } = req.params;
 
@@ -8960,7 +8943,7 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const { idTicket } = req.params;
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
 
     const [rows] = await mysqlConnection.promise().query(`
                           select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
