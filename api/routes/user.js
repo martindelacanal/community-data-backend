@@ -5491,6 +5491,8 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -5498,6 +5500,22 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       }
       if (filters.to_date) {
         to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+      var query_providers = '';
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
       }
 
       const [rows] = await mysqlConnection.promise().query(
@@ -5526,7 +5544,11 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
         LEFT JOIN product_type as pt ON product.product_type_id = pt.id
-        WHERE dt.date >= ? AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)
+        WHERE 1=1
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_providers}
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         ORDER BY dt.date, dt.id`,
         [from_date, to_date, cabecera.client_id]
@@ -7241,6 +7263,8 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+    const providers = filters.providers || [];
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -7249,7 +7273,6 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     if (filters.to_date) {
       to_date = new Date(filters.to_date).toISOString().slice(0, 10);
     }
-
     var query_from_date = '';
     if (filters.from_date) {
       query_from_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
@@ -7258,7 +7281,15 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     if (filters.to_date) {
       query_to_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
     }
-
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+    }
+    var query_providers = '';
+    if (providers.length > 0) {
+      query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+    }
+    
     let buscar = req.query.search;
     let queryBuscar = '';
 
@@ -7300,6 +7331,8 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       ${queryBuscar}
       ${query_from_date}
       ${query_to_date}
+      ${query_locations}
+      ${query_providers}
       GROUP BY dt.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
@@ -7320,6 +7353,8 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         ${queryBuscar}
         ${query_from_date}
         ${query_to_date}
+        ${query_locations}
+        ${query_providers}
       `);
 
         const numOfResults = countRows[0].count;
@@ -7704,8 +7739,6 @@ router.post('/table/ethnicity', verifyToken, async (req, res) => {
     if (filters.to_date) {
       query_to_date = 'AND CONVERT_TZ(e.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
     }
-    console.log("query_from_date", query_from_date)
-    console.log("query_to_date", query_to_date)
     let buscar = req.query.search;
     let queryBuscar = '';
 
