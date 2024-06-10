@@ -7101,7 +7101,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
       ${query_min_age}
       ${query_max_age}
       ${query_zipcode}
-      GROUP BY u.id
+      ${tableRole === 'client' ? 'GROUP BY u.id' : ''}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
@@ -7126,7 +7126,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
           ${query_min_age}
           ${query_max_age}
           ${query_zipcode}
-          GROUP BY u.id
+          ${tableRole === 'client' ? 'GROUP BY u.id' : ''}
         `);
 
         const numOfResults = countRows[0].count;
@@ -7289,7 +7289,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     if (providers.length > 0) {
       query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
     }
-    
+
     let buscar = req.query.search;
     let queryBuscar = '';
 
