@@ -128,7 +128,12 @@ router.post('/signup', async (req, res) => {
   try {
 
     // recuperar el client_id de la location_id, para eso se debe revisar primero en la tabla delivery log en la fecha actual, si no hay registros, se debe buscar en la tabla client_location un client_id asociado a la location_id
-    const [rows_client_id] = await mysqlConnection.promise().query('SELECT client_id FROM delivery_log WHERE date(creation_date) = CURDATE() AND operation_id = 3 AND client_id IS NOT NULL AND location_id = ?', [location_id]);
+    const [rows_client_id] = await mysqlConnection.promise().query(`SELECT client_id 
+                                                                    FROM delivery_log 
+                                                                    WHERE date(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles')) 
+                                                                    AND operation_id = 3 
+                                                                    AND client_id IS NOT NULL 
+                                                                    AND location_id = ?`, [location_id]);
     let client_id = null;
     if (rows_client_id.length > 0) {
       client_id = rows_client_id[0].client_id;
@@ -1944,7 +1949,9 @@ router.post('/onBoard', verifyToken, async (req, res) => {
           `select dl.client_id
           from delivery_log as dl
           where date(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
-          and dl.operation_id = 3 and dl.location_id = ?
+          AND dl.operation_id = 3 
+          AND dl.client_id IS NOT NULL 
+          AND dl.location_id = ?
           order by dl.creation_date desc
           limit 1`,
           [location_id]
