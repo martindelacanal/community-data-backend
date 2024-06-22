@@ -5611,7 +5611,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
 
       // Crear un archivo ZIP
       const zip = new JSZip();
-      zip.file("tickets-with-products.csv", csvData);
+      zip.file("tickets-with-food.csv", csvData);
       zip.file("tickets.csv", csvDataWithoutProduct);
 
       // Establecer encabezados antes de enviar el cuerpo de la respuesta
