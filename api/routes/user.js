@@ -1515,8 +1515,8 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
           // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
           // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
           const [rows_client_user] = await mysqlConnection.promise().query(
-            'select * from client_user where (user_id = ? and client_id = ?) or (date(creation_date) = curdate() and checked = "N")',
-            [receiving_user_id, client_id]
+            'select * from client_user where user_id = ? and (client_id = ? or (client_id <> ? and date(creation_date) = curdate() and checked = "N"))',
+            [receiving_user_id, client_id, client_id]
           );
           let insertarClientUser = true;
           if (rows_client_user.length > 0) {
@@ -1530,15 +1530,14 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
                     'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receiving_user_id, client_id]
                   );
                 }
+              } else {
+                // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
+                if (rows_client_user[i].checked === 'N') {
+                  const [rows_delete] = await mysqlConnection.promise().query(
+                    'delete from client_user where user_id = ? and client_id = ?', [receiving_user_id, rows_client_user[i].client_id]
+                  );
+                }
               }
-              // else {
-              //   // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
-              //   if (rows_client_user[i].checked === 'N') {
-              //     const [rows_delete] = await mysqlConnection.promise().query(
-              //       'delete from client_user where user_id = ? and client_id = ?', [receiving_user_id, rows_client_user[i].client_id]
-              //     );
-              //   }
-              // }
             }
             if (insertarClientUser) {
               // insertar en client_user
@@ -4206,7 +4205,7 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -4472,7 +4471,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND u.location_id IN (' + locations.join() + ') ';
+        query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7057,13 +7056,13 @@ router.post('/table/user', verifyToken, async (req, res) => {
         case 'all':
           queryTableRole = 'AND (role.id != 2 AND role.id != 5)';
           if (locations.length > 0) {
-            query_locations = 'AND u.location_id IN (' + locations.join() + ')';
+            query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
           }
           break;
         case 'beneficiary':
           queryTableRole = 'AND role.id = 5';
           if (locations.length > 0) {
-            query_locations = 'AND u.location_id IN (' + locations.join() + ') ';
+            query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
           }
           if (cabecera.role === 'client') {
             queryTableRole += ' AND client_user.client_id = ' + cabecera.client_id;
