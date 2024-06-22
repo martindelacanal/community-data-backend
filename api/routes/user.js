@@ -6,6 +6,7 @@ const bcryptjs = require('bcryptjs');
 const axios = require('axios');
 const logger = require('../utils/logger.js');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
+const JSZip = require('jszip');
 
 // S3 INICIO
 const S3Client = require("@aws-sdk/client-s3").S3Client;
@@ -5559,7 +5560,6 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ORDER BY dt.date, dt.id`,
         [from_date, to_date, cabecera.client_id]
       );
-      // WHERE CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
 
       var headers_array = [
         { id: 'id', title: 'ID' },
@@ -5588,9 +5588,42 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=tickets-table.csv');
-      res.setHeader('Content-type', 'text/csv; charset=utf-8');
-      res.send(csvData);
+      // res.setHeader('Content-disposition', 'attachment; filename=tickets-table.csv');
+      // res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      // res.send(csvData);
+
+      // Generar el segundo CSV
+      const headersArrayWithoutProduct = headers_array.filter(header => !['product_id', 'product', 'product_type', 'quantity'].includes(header.id));
+      const csvStringifierWithoutProduct = createCsvStringifier({
+        header: headersArrayWithoutProduct,
+        fieldDelimiter: ';'
+      });
+      const uniqueTickets = new Set();
+      const uniqueRows = rows.filter(row => {
+        if (!uniqueTickets.has(row.id)) {
+          uniqueTickets.add(row.id);
+          return true;
+        }
+        return false;
+      });
+      let csvDataWithoutProduct = csvStringifierWithoutProduct.getHeaderString();
+      csvDataWithoutProduct += csvStringifierWithoutProduct.stringifyRecords(uniqueRows);
+
+      // Crear un archivo ZIP
+      const zip = new JSZip();
+      zip.file("tickets-with-products.csv", csvData);
+      zip.file("tickets.csv", csvDataWithoutProduct);
+
+      // Establecer encabezados antes de enviar el cuerpo de la respuesta
+      res.setHeader('Content-disposition', 'attachment; filename=tickets.zip');
+      res.setHeader('Content-type', 'application/zip');
+
+      zip.generateNodeStream({ type: 'nodebuffer', streamFiles: true })
+        .pipe(res)
+        .on('finish', function () {
+          // No es necesario llamar a res.end() aquí, ya que .pipe() manejará el fin del stream.
+          // También, asegúrate de no establecer ningún encabezado o intentar modificar la respuesta después de este punto.
+        });
 
     } catch (err) {
       console.log(err);
