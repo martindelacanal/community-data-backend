@@ -2933,9 +2933,20 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/register/questions', async (req, res) => {
+router.get('/register/questions', verifyTokenOptional, async (req, res) => {
+  const cabecera = req.data ? JSON.parse(req.data.data) : null;
   const language = req.query.language || 'en';
-  const location_id = req.query.location_id || null;
+  let location_id = req.query.location_id || null;
+  if (location_id === 'null' || location_id === 'undefined') {
+    location_id = null;
+  }
+  var client_questions = '';
+  if (cabecera && cabecera.role === 'client') {
+    client_questions = `AND EXISTS (SELECT 1 \
+                                    FROM question_location ql \
+                                    INNER JOIN client_location cl ON ql.location_id = cl.location_id \
+                                    WHERE ql.question_id = q.id AND cl.client_id = ${cabecera.client_id})`;
+  }
   try {
     // get all questions and answers from table question and answer, if language === 'es' then get name_es, else get name
     const query = `SELECT q.id as question_id, 
@@ -2946,9 +2957,11 @@ router.get('/register/questions', async (req, res) => {
                   a.id as answer_id, 
                   ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
                   FROM question as q
-                  INNER JOIN question_location as ql ON q.id = ql.question_id
+                  ${location_id ? 'INNER JOIN question_location as ql ON q.id = ql.question_id' : ''}
                   LEFT JOIN answer as a ON q.id = a.question_id
-                  WHERE q.enabled = 'Y' AND (a.enabled = 'Y' OR a.id IS NULL) AND (ql.location_id = ? AND ql.enabled = 'Y')
+                  WHERE q.enabled = 'Y' AND (a.enabled = 'Y' OR a.id IS NULL) 
+                  ${location_id ? 'AND (ql.location_id = ? AND ql.enabled = \'Y\')' : 'AND q.answer_type_id IN (3, 4)'}
+                  ${client_questions}
                   ORDER BY q.id, a.id ASC`;
     const [rows] = await mysqlConnection.promise().query(query, [location_id]);
     var questions = [];
@@ -5646,6 +5659,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       const min_age = filters.min_age || 0;
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
+      const register_form = filters.register_form || null;
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -5689,7 +5703,37 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
-
+      var query_register_form = '';
+      if (filters.register_form) {
+        // el campo register_form es un formulario donde los nombres de sus campos son el id de la pregunta y el contenido puede ser un numero o un array de numeros, si es un array de numeros es una pregunta multiple choice
+        // se debe filtrar por las preguntas que esten en el campo register_form y que tengan el contenido que se esta buscando
+        // si el contenido es un array de numeros o es solo un numero, se debe buscar que el campo answer_id de la tabla user_question_answer este en el array para esa pregunta
+        // se debe respetar que para las preguntas que no son multiple choice, el contenido debe ser exactamente igual al contenido de la respuesta
+        // para las preguntas que son multiple choice, se debe respetar que de cada pregunta donde se eligió una respuesta como filtro, se debe filtrar que el usuario tenga para todas esas preguntas al menos una de las respuestas elegidas en cada pregunta elegida en el filtro
+        const conditions = [];
+        for (const [question_id, content] of Object.entries(register_form)) {
+          if (Array.isArray(content)) {
+            if (content.length > 0) {
+              conditions.push(`u.id IN (
+                                      SELECT uq.user_id 
+                                      FROM user_question AS uq
+                                      INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+                                      WHERE uqa.answer_id IN (${content.join()}) AND uq.question_id = ${question_id}
+                                    )`);
+            }
+          } else if (content) {
+            conditions.push(`u.id IN (
+                                      SELECT uq.user_id 
+                                      FROM user_question AS uq
+                                      INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+                                      WHERE uqa.answer_id = ${content} AND uq.question_id = ${question_id}
+                                    )`);
+          }
+        }
+        if (conditions.length > 0) {
+          query_register_form = `AND (${conditions.join(' AND ')})`;
+        }
+      }
       let toDate = new Date(to_date);
       toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
 
@@ -5704,16 +5748,17 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
                 uq.answer_number AS answer_number
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        CROSS JOIN question AS q
+        INNER JOIN question AS q ON q.enabled = 'Y' AND (q.answer_type_id = 3 OR q.answer_type_id = 4)
         LEFT JOIN answer_type as at ON q.answer_type_id = at.id
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-        LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        LEFT JOIN answer as a ON a.id = uqa.answer_id AND a.question_id = q.id
         LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 AND q.enabled = 'Y' AND (q.answer_type_id = 3 or q.answer_type_id = 4) 
+        WHERE u.role_id = 5 
         AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
+             OR u.id IN (SELECT db3.receiving_user_id 
+                         FROM delivery_beneficiary db3 
+                         WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
         ${cabecera.role === 'client' ? 'AND EXISTS (SELECT 1 FROM question_location ql INNER JOIN client_location cl ON ql.location_id = cl.location_id WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = \'Y\')' : ''}
         ${query_locations}
         ${query_genders}
@@ -5721,9 +5766,10 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-        group by u.id, q.id, a.id
-        order by q.id, a.id, u.id`,
+        ${query_register_form}
+        ${cabecera.role === 'client' ? 'AND cu.client_id = ?' : ''}
+        GROUP BY u.id, q.id, a.id
+        ORDER BY q.id, a.id, u.id`,
         [from_date, toDate, from_date, toDate, cabecera.client_id]
       );
 
@@ -7021,6 +7067,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
     const min_age = filters.min_age || 0;
     const max_age = filters.max_age || 150;
     const zipcode = filters.zipcode || null;
+    const register_form = filters.register_form || null;
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -7060,6 +7107,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
     if (filters.zipcode) {
       query_zipcode = 'AND u.zipcode = ' + zipcode;
     }
+    var query_register_form = '';
 
     let buscar = req.query.search;
     let queryBuscar = '';
@@ -7097,6 +7145,32 @@ router.post('/table/user', verifyToken, async (req, res) => {
           if (locations.length > 0) {
             query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
           }
+          if (filters.register_form) {
+            const conditions = [];
+            for (const [question_id, content] of Object.entries(register_form)) {
+              if (Array.isArray(content)) {
+                if (content.length > 0) {
+                  conditions.push(`u.id IN (
+                                          SELECT uq.user_id 
+                                          FROM user_question AS uq
+                                          INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+                                          WHERE uqa.answer_id IN (${content.join()}) AND uq.question_id = ${question_id}
+                                        )`);
+                }
+              } else if (content) {
+                conditions.push(`u.id IN (
+                                          SELECT uq.user_id 
+                                          FROM user_question AS uq
+                                          INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+                                          WHERE uqa.answer_id = ${content} AND uq.question_id = ${question_id}
+                                        )`);
+              }
+            }
+            if (conditions.length > 0) {
+              query_register_form = `AND (${conditions.join(' AND ')})`;
+            }
+          }
+
           if (cabecera.role === 'client') {
             queryTableRole += ' AND client_user.client_id = ' + cabecera.client_id;
           }
@@ -7114,7 +7188,6 @@ router.post('/table/user', verifyToken, async (req, res) => {
           queryTableRole = '';
       }
     }
-
     try {
       const query = `SELECT
       u.id,
@@ -7140,6 +7213,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
       ${query_min_age}
       ${query_max_age}
       ${query_zipcode}
+      ${query_register_form}
       ${tableRole === 'client' ? 'GROUP BY u.id' : ''}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
@@ -7165,6 +7239,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
           ${query_min_age}
           ${query_max_age}
           ${query_zipcode}
+          ${query_register_form}
           ${tableRole === 'client' ? 'GROUP BY u.id' : ''}
         `);
 
@@ -9089,6 +9164,27 @@ function verifyToken(req, res, next) {
     res.status(401).json('Token vacio');
   }
 
+}
+
+function verifyTokenOptional(req, res, next) {
+
+  if (!req.headers.authorization) {
+    next();
+  } else {
+    const token = req.headers.authorization.substr(7);
+    if (token && token !== '' && token !== 'null') {
+      jwt.verify(token, process.env.JWT_SECRET, (error, authData) => {
+        if (error) {
+          res.status(403).json('Error en el token');
+        } else {
+          req.data = authData;
+          next();
+        }
+      });
+    } else {
+      next();
+    }
+  }
 }
 
 module.exports = router;
