@@ -636,7 +636,7 @@ router.put('/beneficiary/reset-password', async (req, res) => {
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const { idUser } = req.params;
       const { password } = req.body;
@@ -3034,7 +3034,7 @@ router.get('/ethnicity', async (req, res) => {
 
 router.get('/pounds-delivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       // sum total_weight from donation_ticket
       const [rows] = await mysqlConnection.promise().query(
@@ -3076,7 +3076,7 @@ router.get('/pounds-delivered', verifyToken, async (req, res) => {
 
 router.get('/total-locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `select count(id) as total_locations 
@@ -3111,7 +3111,7 @@ router.get('/total-locations', verifyToken, async (req, res) => {
 
 router.get('/total-days-operation', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       // count distinct days from field creation_date in table delivery_beneficiary, if cabecera.role === 'client' then sum only days from client_id (cabecera.client_id)
       const [rows] = await mysqlConnection.promise().query(
@@ -3160,7 +3160,7 @@ router.get('/house-hold-size-average', verifyToken, async (req, res) => {
 
 router.get('/total-from-role/:role', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const { role } = req.params;
       if (role === 'beneficiary' || role === 'stocker' || role === 'delivery') {
@@ -3209,7 +3209,7 @@ router.get('/total-from-role/:role', verifyToken, async (req, res) => {
 
 router.get('/total-beneficiaries-served', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       // get percentage of users with role 'beneficiary' that are approved in table 'delivery_beneficiary' compared to the total of beneficiaries in table user
       const [rows] = await mysqlConnection.promise().query(
@@ -3336,7 +3336,7 @@ router.get('/total-beneficiaries-without-health-insurance', verifyToken, async (
 
 router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `select count(user.id) as total 
@@ -3358,7 +3358,7 @@ router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res
 
 router.get('/total-beneficiaries-recurring-today', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       // beneficiarios que ya estaban registrados en una fecha distinta a la de hoy y que aparecieron en delivery_beneficiary en la fecha de hoy
       const [rows] = await mysqlConnection.promise().query(
@@ -3388,7 +3388,7 @@ para que el beneficiario (user.role = 5) sea considerado como beneficiario calif
 // TO-DO
 router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -3424,7 +3424,7 @@ router.get('/total-beneficiaries-qualified', verifyToken, async (req, res) => {
 
 router.get('/total-clients', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -3444,7 +3444,7 @@ router.get('/total-clients', verifyToken, async (req, res) => {
 
 router.get('/total-enabled-users', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -3481,7 +3481,7 @@ router.get('/total-enabled-users', verifyToken, async (req, res) => {
 
 router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -3517,7 +3517,7 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
 
 router.get('/total-locations-enabled', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -3554,7 +3554,7 @@ router.get('/total-locations-enabled', verifyToken, async (req, res) => {
 
 router.get('/total-products-uploaded', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -3592,7 +3592,7 @@ router.get('/total-products-uploaded', verifyToken, async (req, res) => {
 
 router.get('/total-delivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -3613,7 +3613,7 @@ router.get('/total-delivered', verifyToken, async (req, res) => {
 
 router.get('/map/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       let enabled = req.query.enabled ? req.query.enabled : null;
       let ids = req.query.ids ? req.query.ids.split(',') : [];
@@ -3672,7 +3672,7 @@ router.get('/map/locations', verifyToken, async (req, res) => {
 
 router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
     try {
       const language = req.query.language || 'en';
       const { tabSelected } = req.params;
@@ -3859,7 +3859,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
 
 router.post('/message', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const user_id = cabecera.id;
       const message = req.body.message || null;
@@ -3889,7 +3889,7 @@ router.post('/message', verifyToken, async (req, res) => {
 router.put('/settings/password', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const user_id = cabecera.id;
       const { actual_password, new_password } = req.body;
@@ -5648,7 +5648,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
 // TO-DO que hacer con las preguntas que no son multiple choice
 router.post('/metrics/health/questions', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -5895,7 +5895,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
 
 router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -5987,7 +5987,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
 
 router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6079,7 +6079,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
 
 router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6196,7 +6196,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
 
 router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6313,7 +6313,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
 
 router.post('/metrics/participant/register', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6430,7 +6430,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
 
 router.post('/metrics/participant/email', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6521,7 +6521,7 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
 
 router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6612,7 +6612,7 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
 
 router.post('/metrics/product/reach', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6708,7 +6708,7 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
 
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6780,7 +6780,7 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
 
 router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6880,7 +6880,7 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
 
 router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       var page = req.query.page ? Number(req.query.page) : 1;
       if (page < 1) {
@@ -7373,7 +7373,7 @@ router.post('/table/delivered', verifyToken, async (req, res) => {
 
 router.post('/table/ticket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
@@ -7491,7 +7491,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
 
 router.post('/table/product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     const language = req.query.language || 'en';
 
     const filters = req.body;
@@ -8130,7 +8130,7 @@ router.post('/table/client', verifyToken, async (req, res) => {
 
 router.post('/table/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
@@ -8475,7 +8475,7 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
 
 router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const { idLocation } = req.params;
 
@@ -8779,7 +8779,7 @@ router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
 
 router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const { idProduct } = req.params;
 
@@ -9019,7 +9019,7 @@ router.get('/view/ethnicity/:idEthnicity', verifyToken, async (req, res) => {
 
 router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const { idTicket } = req.params;
 
@@ -9090,7 +9090,7 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const { idTicket } = req.params;
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
 
     const [rows] = await mysqlConnection.promise().query(`
                           select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
