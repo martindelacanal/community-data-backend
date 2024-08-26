@@ -5032,7 +5032,7 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
         if (cabecera.role === 'admin') {
           query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
         } else {
-          query_from_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+          query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
         }
       }
       var query_to_date = '';
@@ -5040,7 +5040,7 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
         if (cabecera.role === 'admin') {
           query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
         } else {
-          query_to_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+          query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
         }
       }
       var query_locations = '';
@@ -5523,11 +5523,11 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       }
       var query_from_date = '';
       if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
       if (locations.length > 0) {
@@ -7389,11 +7389,11 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     }
     var query_from_date = '';
     if (filters.from_date) {
-      query_from_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
     }
     var query_to_date = '';
     if (filters.to_date) {
-      query_to_date = 'AND CONVERT_TZ(dt.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
     }
     var query_locations = '';
     if (locations.length > 0) {
