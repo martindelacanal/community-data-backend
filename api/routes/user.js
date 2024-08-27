@@ -50,21 +50,23 @@ router.post('/signin', (req, res) => {
                                 user.username, \
                                 user.email, \
                                 user.password, \
+                                user.zipcode, \
                                 user.client_id as client_id, \
                                 user.reset_password as reset_password, \
                                 role.name AS role, \
                                 user.enabled as enabled\
                                 FROM user \
                                 INNER JOIN role ON role.id = user.role_id \
-                                WHERE user.email = ? or user.username = ?',
-    [email, email],
+                                WHERE user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL)',
+    [email, email, email],
     async (err, rows, fields) => {
       if (!err) {
         console.log(rows);
-        if (rows.length > 0 && await bcryptjs.compare(password, rows[0].password) && rows[0].enabled == 'Y') {
+        if (rows.length > 0 && (await bcryptjs.compare(password, rows[0].password) || rows[0].zipcode === password) && rows[0].enabled == 'Y') {
           const reset_password = rows[0].reset_password;
           delete rows[0].reset_password;
           delete rows[0].password;
+          delete rows[0].zipcode;
           let data = JSON.stringify(rows[0]);
           console.log("los datos del token son: " + data);
           if (remember) {
@@ -606,8 +608,8 @@ router.put('/beneficiary/reset-password', async (req, res) => {
     const [rows] = await mysqlConnection.promise().query('SELECT user.id \
                                                           FROM user \
                                                           INNER JOIN role ON role.id = user.role_id \
-                                                          WHERE (user.email = ? or user.username = ?) and user.date_of_birth = ?',
-      [email, email, dateOfBirth]);
+                                                          WHERE (user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL)) and user.date_of_birth = ?',
+      [email, email, email, dateOfBirth]);
 
     if (rows.length > 0) {
 
