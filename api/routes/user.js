@@ -38,6 +38,19 @@ router.get('/ping', (req, res) => {
   res.status(200).send();
 });
 
+const jwtSignAsync = (data, secret, options) => {
+  return new Promise((resolve, reject) => {
+    jwt.sign(data, secret, options, (err, token) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(token);
+      }
+    });
+  });
+};
+
+
 router.post('/signin', (req, res) => {
 
   const email = req.body.email || null;
@@ -46,39 +59,65 @@ router.post('/signin', (req, res) => {
   console.log(req.body);
 
   mysqlConnection.query('SELECT user.id, \
-                                user.firstname, \
-                                user.username, \
-                                user.email, \
-                                user.password, \
-                                user.zipcode, \
-                                user.client_id as client_id, \
-                                user.reset_password as reset_password, \
-                                role.name AS role, \
-                                user.enabled as enabled\
-                                FROM user \
-                                INNER JOIN role ON role.id = user.role_id \
-                                WHERE user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL)',
+                                  user.firstname, \
+                                  user.lastname, \
+                                  user.username, \
+                                  user.email, \
+                                  user.password, \
+                                  user.zipcode, \
+                                  DATE_FORMAT(CONVERT_TZ(user.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y") AS creation_date, \
+                                  user.client_id as client_id, \
+                                  user.reset_password as reset_password, \
+                                  role.name AS role, \
+                                  user.enabled as enabled\
+                                  FROM user \
+                                  INNER JOIN role ON role.id = user.role_id \
+                                  WHERE user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL) \
+                                  AND user.enabled = "Y" \
+                                  order by user.id DESC',
     [email, email, email],
     async (err, rows, fields) => {
       if (!err) {
         console.log(rows);
-        if (rows.length > 0 && (await bcryptjs.compare(password, rows[0].password) || rows[0].zipcode === password) && rows[0].enabled == 'Y') {
-          const reset_password = rows[0].reset_password;
-          delete rows[0].reset_password;
-          delete rows[0].password;
-          delete rows[0].zipcode;
-          let data = JSON.stringify(rows[0]);
-          console.log("los datos del token son: " + data);
-          if (remember) {
-            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '1h' }, (err, token) => {
-              logger.info(`user id: ${rows[0].id} logueado`);
-              res.status(200).json({ token: token, reset_password: reset_password });
-            });
+        if (rows.length > 0) {
+          const validUsers = [];
+          for (const row of rows) {
+            if ((await bcryptjs.compare(password, row.password) || row.zipcode === password) && row.enabled == 'Y') {
+              const reset_password = row.reset_password;
+              let creation_date_aux = row.creation_date;
+              let last_name_aux = row.lastname;
+              delete row.reset_password;
+              delete row.password;
+              delete row.zipcode;
+              delete row.lastname;
+              delete row.creation_date;
+              let data = JSON.stringify(row);
+              console.log("los datos del token son: " + data);
+              try {
+                const token = await jwtSignAsync({ data }, process.env.JWT_SECRET, { expiresIn: '1h' });
+                validUsers.push({
+                  id: row.id,
+                  firstname: row.firstname,
+                  lastname: last_name_aux,
+                  creation_date: creation_date_aux,
+                  token: token,
+                  reset_password: reset_password
+                });
+              } catch (err) {
+                logger.error(err);
+                return res.status(500).send();
+              }
+            }
+          }
+          if (validUsers.length === 1) {
+            logger.info(`user id: ${validUsers[0].id} logueado`);
+            res.status(200).json({ token: validUsers[0].token, reset_password: validUsers[0].reset_password });
+          } else if (validUsers.length > 1) {
+            logger.info(`multiple users found for ${email}`);
+            res.status(200).json(validUsers);
           } else {
-            jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '1h' }, (err, token) => {
-              logger.info(`user id: ${rows[0].id} logueado`);
-              res.status(200).json({ token: token, reset_password: reset_password });
-            });
+            logger.info(`user ${email} no logueado`);
+            res.status(401).send();
           }
         } else {
           logger.info(`user ${email} no logueado`);
@@ -91,7 +130,7 @@ router.post('/signin', (req, res) => {
       }
     }
   )
-})
+});
 
 router.get('/refresh-token', verifyToken, (req, res) => {
   console.log("renovacion de token")
@@ -1639,12 +1678,18 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
       const delivering_user_id = cabecera.id;
       // PHONE
       const receiving_user_phone = req.body.phone;
+      const user_id_from_phone_list = req.body.user_id;
       const location_id = req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null;
       const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
-      const [row_receiving_user_id] = await mysqlConnection.promise().query(
-        'select id from user where phone = ?', [receiving_user_phone]
-      );
-      const receiving_user_id = row_receiving_user_id.length > 0 ? row_receiving_user_id[0].id : null;
+      let receiving_user_id = null;
+      if (user_id_from_phone_list === 0) {
+        const [row_receiving_user_id] = await mysqlConnection.promise().query(
+          'select id from user where phone = ?', [receiving_user_phone]
+        );
+        receiving_user_id = row_receiving_user_id.length > 0 ? row_receiving_user_id[0].id : null;
+      } else {
+        receiving_user_id = user_id_from_phone_list;
+      }
       if (receiving_user_phone && receiving_user_id) {
         // actualizar location_id y client_id del user beneficiary
         const [rows2_update_user] = await mysqlConnection.promise().query(
@@ -2391,14 +2436,19 @@ router.get('/phone/exists/search', async (req, res) => {
   const phone = req.query.phone || null;
   try {
     if (phone) {
-      const [rows] = await mysqlConnection.promise().query('select phone from user where phone = ?', [phone]);
+      const [rows] = await mysqlConnection.promise().query('select id, \
+                                                            firstname, \
+                                                            lastname, \
+                                                            DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y") AS creation_date \
+                                                            from user where phone = ? AND enabled = "Y" AND role_id = 5 \
+                                                            order by id desc', [phone]);
       if (rows.length > 0) {
-        res.json(true);
+        res.json(rows);
       } else {
-        res.json(false);
+        res.json([]);
       }
     } else {
-      res.json(false);
+      res.json([]);
     }
   } catch (err) {
     console.log(err);
