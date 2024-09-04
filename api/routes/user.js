@@ -1826,7 +1826,7 @@ router.get('/locations', verifyToken, async (req, res) => {
   if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select id,organization,community_city,address from location where enabled = "Y" order by community_city'
+        'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y" order by community_city'
       );
       res.json(rows);
     } catch (err) {
@@ -1837,7 +1837,7 @@ router.get('/locations', verifyToken, async (req, res) => {
     if (cabecera.role === 'admin') {
       try {
         const [rows] = await mysqlConnection.promise().query(
-          'select id,organization,community_city,address from location where enabled = "Y" order by community_city'
+          'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y" order by community_city'
         );
         res.json(rows);
       } catch (err) {
@@ -1848,7 +1848,7 @@ router.get('/locations', verifyToken, async (req, res) => {
       if (cabecera.role === 'client') {
         try {
           const [rows] = await mysqlConnection.promise().query(
-            `select l.id, l.organization, l.community_city, l.address 
+            `select l.id, l.organization, l.community_city, l.address, ST_Y(l.coordinates) as latitude, ST_X(l.coordinates) as longitude 
                   from location as l
                   inner join client_location as cl on l.id = cl.location_id
                   where cl.client_id = ? and l.enabled = "Y" order by l.community_city`,
