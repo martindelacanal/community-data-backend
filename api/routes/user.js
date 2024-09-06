@@ -306,6 +306,8 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         const total_weight = formulario.total_weight || null;
         var provider = formulario.provider || null;
         const destination = formulario.destination || null;
+        const audit_status = formulario.audit_status || null;
+        const notes = formulario.notes || null;
         const delivered_by = formulario.delivered_by || null;
         var products = formulario.products || [];
         var date = null;
@@ -344,8 +346,8 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           }
         }
         const [rows] = await mysqlConnection.promise().query(
-          'insert into donation_ticket(donation_id, total_weight, provider_id, location_id, date, delivered_by) values(?,?,?,?,?,?)',
-          [donation_id, total_weight, provider, destination, date, delivered_by]
+          'insert into donation_ticket(donation_id, total_weight, provider_id, location_id, audit_status_id, notes, date, delivered_by) values(?,?,?,?,?,?,?,?)',
+          [donation_id, total_weight, provider, destination, audit_status, notes, date, delivered_by]
         );
 
         if (rows.affectedRows > 0) {
@@ -495,6 +497,8 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
       const total_weight = formulario.total_weight || null;
       var provider = formulario.provider || null;
       const destination = formulario.destination || null;
+      const audit_status = formulario.audit_status || null;
+      const notes = formulario.notes || null;
       const delivered_by = formulario.delivered_by || null;
       var products = formulario.products || [];
       var date = null;
@@ -533,8 +537,8 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
         }
       }
       const [rows_update_ticket] = await mysqlConnection.promise().query(
-        'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, date = ?, delivered_by = ? WHERE id = ?',
-        [donation_id, total_weight, provider, destination, date, delivered_by, id]
+        'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, audit_status_id = ?, notes = ?, date = ?, delivered_by = ? WHERE id = ?',
+        [donation_id, total_weight, provider, destination, audit_status, notes, date, delivered_by, id]
       );
 
       try {
@@ -592,6 +596,8 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 t.location_id as destination,
                 t.date,
                 t.delivered_by,
+                t.audit_status_id as audit_status,
+                t.notes,
                 p.name as product,
                 p.product_type_id as product_type,
                 pdt.quantity as quantity,
@@ -614,6 +620,8 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
           destination: rows[0].destination,
           date: rows[0].date,
           delivered_by: rows[0].delivered_by,
+          audit_status: rows[0].audit_status,
+          notes: rows[0].notes,
           image_count: rows[0].image_count,
           products: []
         };
@@ -1924,6 +1932,24 @@ router.get('/product_types', verifyToken, async (req, res) => {
                   FROM product_type ${id ? ' WHERE id = ?' : ''} ORDER BY name`;
       const params = id ? [id] : [];
       const [rows] = await mysqlConnection.promise().query(query, params);
+      res.json(rows);
+    } catch (error) {
+      console.log(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/audit_status', verifyToken, async (req, res) => {
+  const language = req.query.language || 'en';
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
+    try {
+      const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
+                  FROM audit_status WHERE enabled = 'Y' ORDER BY name`;
+      const [rows] = await mysqlConnection.promise().query(query);
       res.json(rows);
     } catch (error) {
       console.log(error);
@@ -5698,6 +5724,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
+      const language = req.query.language || 'en';
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -5732,6 +5759,8 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 loc.community_city as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 dt.delivered_by,
+                as1.name as audit_status,
+                dt.notes,
                 u.id as created_by_id,
                 u.username as created_by_username,
                 DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
@@ -5742,6 +5771,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 pdt.quantity as quantity
         FROM donation_ticket as dt
         LEFT JOIN provider as p ON dt.provider_id = p.id
+        LEFT JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         LEFT JOIN location as loc ON dt.location_id = loc.id
         ${cabecera.role === 'client' ? 'LEFT JOIN client_location cl ON dt.location_id = cl.location_id' : ''}
         LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
@@ -5768,6 +5798,8 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         { id: 'location', title: 'Location' },
         { id: 'date', title: 'Date' },
         { id: 'delivered_by', title: 'Delivered by' },
+        { id: 'audit_status', title: 'Audit status' },
+        { id: 'notes', title: 'Notes' },
         { id: 'created_by_id', title: 'Created by ID' },
         { id: 'created_by_username', title: 'Created by username' },
         { id: 'creation_date', title: 'Creation date' },
@@ -7564,6 +7596,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     let to_date = filters.to_date || '2100-01-01';
     const locations = filters.locations || [];
     const providers = filters.providers || [];
+    const language = req.query.language || 'en';
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -7618,10 +7651,12 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       location.community_city as location,
       DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
       dt.delivered_by,
+      ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
       COUNT(DISTINCT pdt.product_id) AS products,
       DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket as dt
       INNER JOIN provider ON dt.provider_id = provider.id
+      INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
       INNER JOIN location ON dt.location_id = location.id
       ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
       INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
@@ -9305,6 +9340,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const { idTicket } = req.params;
+      const language = req.query.language || 'en';
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT dt.id,
@@ -9314,6 +9350,8 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 loc.community_city as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 dt.delivered_by,
+                ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
+                dt.notes,
                 u.id as created_by_id,
                 u.username as created_by_username,
                 DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
@@ -9322,6 +9360,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 pdt.quantity as quantity
         FROM donation_ticket as dt
         INNER JOIN provider as p ON dt.provider_id = p.id
+        INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         INNER JOIN location as loc ON dt.location_id = loc.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
         LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
@@ -9345,6 +9384,8 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         ticket["location"] = rows[0].location;
         ticket["date"] = rows[0].date;
         ticket["delivered_by"] = rows[0].delivered_by;
+        ticket["audit_status"] = rows[0].audit_status;
+        ticket["notes"] = rows[0].notes;
         ticket["created_by_id"] = rows[0].created_by_id;
         ticket["created_by_username"] = rows[0].created_by_username;
         ticket["creation_date"] = rows[0].creation_date;
