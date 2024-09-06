@@ -2072,12 +2072,19 @@ router.post('/onBoard', verifyToken, async (req, res) => {
         'update user set user_status_id = ?, location_id = ?, client_id = ? where id = ?',
         [user_status_id, location_id, client_id, user_id]
       );
-      // insertar en tabla delivery_log la operation
-      const [rows2] = await mysqlConnection.promise().query(
-        'insert into delivery_log(user_id, operation_id, location_id, client_id) values(?,?,?,?)',
-        [user_id, user_status_id, location_id, client_id]
-      );
-
+      if (user_status_id == 3) {
+        // insertar en tabla delivery_log la operation
+        const [rows2] = await mysqlConnection.promise().query(
+          'insert into delivery_log(user_id, operation_id, location_id, client_id) values(?,?,?,?)',
+          [user_id, user_status_id, location_id, client_id]
+        );
+      } else {
+        // modificar el campo offboarding_date en el ultimo elemento de la tabla delivery_log que tenga operation_id 3 y user_id ordenando por fecha descendente
+        const [rows2] = await mysqlConnection.promise().query(
+          'update delivery_log set offboarding_date = now() where user_id = ? and operation_id = 3 order by creation_date desc limit 1',
+          [user_id]
+        );
+      }
       if (rows.affectedRows > 0) {
         // update token
         let object_token = {
@@ -2306,10 +2313,10 @@ router.get('/user/status', verifyToken, async (req, res) => {
             const diff = fechaActual.getTime() - fecha.getTime();
             const hours = Math.floor(diff / (1000 * 60 * 60));
             // const minutes = Math.floor(diff / (1000 * 60));
-            if (hours >= 8) { // si pasaron 8hs, insertar en delivery_log con operation_id 4, actualizar status de user a 4 y su location_id a null
+            if (hours >= 8) { // si pasaron 8hs, modificar el campo offboarding_date del ultimo delivery_log con operation_id 3, actualizar status de user a 4 y su location_id a null
               const [rows3] = await mysqlConnection.promise().query(
-                'insert into delivery_log(user_id, operation_id, location_id) values(?,?,?)',
-                [cabecera.id, 4, rows[0].location_id]
+                'update delivery_log set offboarding_date = now() where id = ?',
+                [rows2[0].id]
               );
               const [rows4] = await mysqlConnection.promise().query(
                 'update user set user_status_id = 4, location_id = null where id = ?',
@@ -7888,6 +7895,104 @@ router.post('/table/product-type', verifyToken, async (req, res) => {
           ${query_to_date}
         `);
 
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.post('/table/worker', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+    const language = req.query.language || 'en';
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(dl.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(dl.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      queryBuscar = `AND (dl.id like '${buscar}' or dl.user_id like '${buscar}' or u.username like '${buscar}' or u.firstname like '${buscar}' or u.lastname like '${buscar}' or l.community_city like '${buscar}' or DATE_FORMAT(CONVERT_TZ(onboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(offboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+
+    try {
+      const query = `
+      SELECT
+        dl.id,
+        dl.user_id,
+        u.username,
+        u.firstname,
+        u.lastname,
+        l.community_city,
+        DATE_FORMAT(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as onboarding_date,
+        DATE_FORMAT(CONVERT_TZ(dl.offboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as offboarding_date
+      FROM delivery_log as dl
+      INNER JOIN user as u ON dl.user_id = u.id
+      LEFT JOIN location as l ON dl.location_id = l.id
+      WHERE user.enabled = 'Y' and operation_id = 3 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM delivery_log as dl
+          INNER JOIN user as u ON dl.user_id = u.id
+          LEFT JOIN location as l ON dl.location_id = l.id
+          WHERE user.enabled = 'Y' and operation_id = 3 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
+        `);
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
 
