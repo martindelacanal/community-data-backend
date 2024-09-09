@@ -4997,6 +4997,66 @@ router.post('/table/delivered/download-csv', verifyToken, async (req, res) => {
 }
 );
 
+router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const language = req.query.language || 'en';
+      const idUser = req.params.id;
+
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+
+      const [table_rows_worker] = await mysqlConnection.promise().query(
+        `SELECT
+          db.id,
+          db.receiving_user_id,
+          user.username as username,
+          location.community_city as location,
+          DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+        FROM delivery_beneficiary as db
+        INNER JOIN user ON db.receiving_user_id = user.id
+        INNER JOIN location ON db.location_id = location.id
+        WHERE db.delivering_user_id = ?
+        ${query_from_date}
+        ${query_to_date}
+        ORDER BY db.id`,
+        [idUser]
+      );
+
+      if (table_rows_worker.length > 0) {
+        res.status(200).json(table_rows_worker);
+      } else {
+        res.status(404).json([]);
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 router.post('/table/ethnicity/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -8009,7 +8069,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
       FROM delivery_log as dl
       INNER JOIN user as u ON dl.user_id = u.id
       LEFT JOIN location as l ON dl.location_id = l.id
-      WHERE user.enabled = 'Y' and operation_id = 3 
+      WHERE u.enabled = 'Y' and dl.operation_id = 3 
       ${queryBuscar}
       ${query_from_date}
       ${query_to_date}
@@ -8023,7 +8083,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
           FROM delivery_log as dl
           INNER JOIN user as u ON dl.user_id = u.id
           LEFT JOIN location as l ON dl.location_id = l.id
-          WHERE user.enabled = 'Y' and operation_id = 3 
+          WHERE u.enabled = 'Y' and dl.operation_id = 3 
           ${queryBuscar}
           ${query_from_date}
           ${query_to_date}
@@ -8303,7 +8363,7 @@ router.post('/table/provider', verifyToken, async (req, res) => {
       ${query_to_date}
       ${query_locations}
       ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
-      ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
+      GROUP BY p.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -8320,7 +8380,7 @@ router.post('/table/provider', verifyToken, async (req, res) => {
           ${query_to_date}
           ${query_locations}
           ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
-          ${cabecera.role === 'client' ? 'GROUP BY p.id' : ''}
+          GROUP BY p.id
         `);
 
         const numOfResults = countRows[0].count;
