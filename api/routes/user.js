@@ -8355,15 +8355,11 @@ router.post('/table/provider', verifyToken, async (req, res) => {
         DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
         DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
       FROM provider as p
-      LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id 
-      ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
       WHERE 1=1 
       ${queryBuscar}
       ${query_from_date}
       ${query_to_date}
       ${query_locations}
-      ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
-      GROUP BY p.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -8372,15 +8368,11 @@ router.post('/table/provider', verifyToken, async (req, res) => {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
           FROM provider as p
-          LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id 
-          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
           WHERE 1=1 
           ${queryBuscar}
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
-          ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
-          GROUP BY p.id
         `);
 
         const numOfResults = countRows[0].count;
