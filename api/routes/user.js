@@ -389,8 +389,8 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           try {
             // insertar en stocker_log la operation 5 (create), el ticket insertado y el id del usuario logueado
             const [rows2] = await mysqlConnection.promise().query(
-              'insert into stocker_log(user_id, operation_id, donation_ticket_id) values(?,?,?)',
-              [cabecera.id, 5, donation_ticket_id]
+              'insert into stocker_log(user_id, operation_id, donation_ticket_id, audit_status_id) values(?,?,?,?)',
+              [cabecera.id, 5, donation_ticket_id, audit_status]
             );
           } catch (error) {
             console.log(error);
@@ -570,8 +570,8 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
       try {
         // insertar en stocker_log la operation 6 (edit), el ticket insertado y el id del usuario logueado
         const [rows2] = await mysqlConnection.promise().query(
-          'insert into stocker_log(user_id, operation_id, donation_ticket_id) values(?,?,?)',
-          [cabecera.id, 6, id]
+          'insert into stocker_log(user_id, operation_id, donation_ticket_id, audit_status_id) values(?,?,?,?)',
+          [cabecera.id, 6, id, audit_status]
         );
       } catch (error) {
         console.log(error);
