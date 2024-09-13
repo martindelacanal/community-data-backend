@@ -136,7 +136,7 @@ router.get('/refresh-token', verifyToken, (req, res) => {
   console.log("renovacion de token")
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     jwt.sign({ data: req.data.data }, process.env.JWT_SECRET, { expiresIn: '1h' }, (err, token) => {
       res.status(200).json({ token: token });
     });
@@ -416,7 +416,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
 
 router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
     try {
       const id = req.params.id || null;
       formulario = JSON.parse(req.body.form);
@@ -593,7 +593,7 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
 
 router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
     try {
       const id = req.params.id || null;
       const [rows] = await mysqlConnection.promise().query(
@@ -692,7 +692,7 @@ router.put('/beneficiary/reset-password', async (req, res) => {
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     try {
       const { idUser } = req.params;
       const { password } = req.body;
@@ -1838,7 +1838,7 @@ router.get('/answer-types', verifyToken, async (req, res) => {
 
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y" order by community_city'
@@ -1897,7 +1897,7 @@ router.get('/register/locations', async (req, res) => {
 
 router.get('/providers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name from provider order by name',
@@ -1914,7 +1914,7 @@ router.get('/providers', verifyToken, async (req, res) => {
 
 router.get('/products', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name,product_type_id from product order by name',
@@ -1933,7 +1933,7 @@ router.get('/product_types', verifyToken, async (req, res) => {
   const id = req.query.id || null;
   const language = req.query.language || 'en';
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
     try {
       const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
                   FROM product_type ${id ? ' WHERE id = ?' : ''} ORDER BY name`;
@@ -1952,7 +1952,7 @@ router.get('/product_types', verifyToken, async (req, res) => {
 router.get('/audit_status', verifyToken, async (req, res) => {
   const language = req.query.language || 'en';
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
     try {
       const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
                   FROM audit_status WHERE enabled = 'Y' ORDER BY name`;
@@ -2519,7 +2519,7 @@ router.get('/donation_id/exists/search', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const donation_id = req.query.donation_id || null;
   try {
-    if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
       if (donation_id) {
         const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ?', [donation_id]);
         if (rows.length > 0) {
@@ -2543,7 +2543,7 @@ router.get('/product/exists/search', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const name = req.query.name || null;
   try {
-    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
       if (name) {
         const [rows] = await mysqlConnection.promise().query('select name from product where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
         if (rows.length > 0) {
@@ -2567,7 +2567,7 @@ router.get('/product-type/exists/search', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const name = req.query.name || null;
   try {
-    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
       if (name) {
         const [rows] = await mysqlConnection.promise().query('select name from product_type where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
         if (rows.length > 0) {
@@ -2639,7 +2639,7 @@ router.get('/provider/exists/search', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const name = req.query.name || null;
   try {
-    if (cabecera.role === 'admin' || cabecera.role === 'stocker') {
+    if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
       if (name) {
         const [rows] = await mysqlConnection.promise().query('select name from provider where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
         if (rows.length > 0) {
@@ -4077,7 +4077,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
 
 router.post('/message', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     try {
       const user_id = cabecera.id;
       const message = req.body.message || null;
@@ -4107,7 +4107,7 @@ router.post('/message', verifyToken, async (req, res) => {
 router.put('/settings/password', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     try {
       const user_id = cabecera.id;
       const { actual_password, new_password } = req.body;
@@ -6896,7 +6896,7 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
 
 router.post('/metrics/product/reach', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -6992,7 +6992,7 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
 
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -7064,7 +7064,7 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
 
 router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -7164,7 +7164,7 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
 
 router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
     try {
       var page = req.query.page ? Number(req.query.page) : 1;
       if (page < 1) {
@@ -7657,7 +7657,7 @@ router.post('/table/delivered', verifyToken, async (req, res) => {
 
 router.post('/table/ticket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
@@ -9398,7 +9398,7 @@ router.get('/view/ethnicity/:idEthnicity', verifyToken, async (req, res) => {
 
 router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
     try {
       const { idTicket } = req.params;
       const language = req.query.language || 'en';
@@ -9475,7 +9475,7 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const { idTicket } = req.params;
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
 
     const [rows] = await mysqlConnection.promise().query(`
                           select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
