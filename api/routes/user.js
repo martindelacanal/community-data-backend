@@ -345,14 +345,29 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             );
           }
         }
-        const [rows] = await mysqlConnection.promise().query(
-          'insert into donation_ticket(donation_id, total_weight, provider_id, location_id, audit_status_id, notes, date, delivered_by) values(?,?,?,?,?,?,?,?)',
-          [donation_id, total_weight, provider, destination, audit_status, notes, date, delivered_by]
-        );
+        let query = 'INSERT INTO donation_ticket(donation_id, total_weight, provider_id, location_id, date, delivered_by';
+        let values = 'VALUES(?,?,?,?,?,?';
+        let params = [donation_id, total_weight, provider, destination, date, delivered_by];
+
+        if (audit_status !== null) {
+          query += ', audit_status_id';
+          values += ', ?';
+          params.push(audit_status);
+        }
+
+        query += ') ' + values + ')';
+
+        const [rows] = await mysqlConnection.promise().query(query, params);
 
         if (rows.affectedRows > 0) {
           const donation_ticket_id = rows.insertId;
           try {
+            if (notes) {
+              await mysqlConnection.promise().query(
+                'insert into donation_ticket_note(donation_ticket_id, user_id, note) values(?,?,?)',
+                [donation_ticket_id, cabecera.id, notes]
+              );
+            }
             for (let i = 0; i < products.length; i++) {
               await mysqlConnection.promise().query(
                 'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
@@ -535,17 +550,24 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
           );
         }
       }
-      let query = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, notes = ?, date = ?, delivered_by = ?';
-      let params = [donation_id, total_weight, provider, destination, notes, date, delivered_by];
-      
+      // insertar en donation_ticket_note si notes no es null
+      if (notes) {
+        await mysqlConnection.promise().query(
+          'insert into donation_ticket_note(donation_ticket_id, user_id, note) values(?,?,?)',
+          [id, cabecera.id, notes]
+        );
+      }
+      let query = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, date = ?, delivered_by = ?';
+      let params = [donation_id, total_weight, provider, destination, date, delivered_by];
+
       if (audit_status !== null) {
         query += ', audit_status_id = ?';
         params.push(audit_status);
       }
-      
+
       query += ' WHERE id = ?';
       params.push(id);
-      
+
       const [rows_update_ticket] = await mysqlConnection.promise().query(query, params);
 
       try {
@@ -604,7 +626,6 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 t.date,
                 t.delivered_by,
                 t.audit_status_id as audit_status,
-                t.notes,
                 p.name as product,
                 p.product_type_id as product_type,
                 pdt.quantity as quantity,
@@ -628,7 +649,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
           date: rows[0].date,
           delivered_by: rows[0].delivered_by,
           audit_status: rows[0].audit_status,
-          notes: rows[0].notes,
+          notes: [],
           image_count: rows[0].image_count,
           products: []
         };
@@ -638,6 +659,33 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
             product_type: row.product_type,
             quantity: row.quantity
           });
+        }
+
+        const [rows_notes] = await mysqlConnection.promise().query(
+          `SELECT dtn.id,
+                  dtn.user_id,
+                  u.firstname,
+                  u.lastname,
+                  dtn.note,
+                  DATE_FORMAT(CONVERT_TZ(dtn.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS creation_date
+                  FROM donation_ticket as t
+                  INNER JOIN donation_ticket_note as dtn ON t.id = dtn.donation_ticket_id
+                  INNER JOIN user as u ON dtn.user_id = u.id
+                  WHERE t.id = ?`,
+          [id]
+        );
+
+        if (rows_notes.length > 0) {
+          for (let row of rows_notes) {
+            newTicket.notes.push({
+              id: row.id,
+              user_id: row.user_id,
+              firstname: row.firstname,
+              lastname: row.lastname,
+              note: row.note,
+              creation_date: row.creation_date
+            });
+          }
         }
 
         res.json(newTicket);
@@ -5827,7 +5875,6 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 dt.delivered_by,
                 as1.name as audit_status,
-                dt.notes,
                 u.id as created_by_id,
                 u.username as created_by_username,
                 DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
@@ -5866,7 +5913,6 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         { id: 'date', title: 'Date' },
         { id: 'delivered_by', title: 'Delivered by' },
         { id: 'audit_status', title: 'Audit status' },
-        { id: 'notes', title: 'Notes' },
         { id: 'created_by_id', title: 'Created by ID' },
         { id: 'created_by_username', title: 'Created by username' },
         { id: 'creation_date', title: 'Creation date' },
@@ -9412,7 +9458,6 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 dt.delivered_by,
                 ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
-                dt.notes,
                 u.id as created_by_id,
                 u.username as created_by_username,
                 DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
@@ -9446,7 +9491,6 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         ticket["date"] = rows[0].date;
         ticket["delivered_by"] = rows[0].delivered_by;
         ticket["audit_status"] = rows[0].audit_status;
-        ticket["notes"] = rows[0].notes;
         ticket["created_by_id"] = rows[0].created_by_id;
         ticket["created_by_username"] = rows[0].created_by_username;
         ticket["creation_date"] = rows[0].creation_date;
@@ -9455,6 +9499,22 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
           products.push({ product_id: rows[i].product_id, product: rows[i].product, quantity: rows[i].quantity });
         }
         ticket["products"] = products;
+
+        const [rows_notes] = await mysqlConnection.promise().query(
+          `SELECT dtn.id,
+                  dtn.user_id,
+                  u.firstname,
+                  u.lastname,
+                  dtn.note,
+                  DATE_FORMAT(CONVERT_TZ(dtn.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS creation_date
+                  FROM donation_ticket as t
+                  INNER JOIN donation_ticket_note as dtn ON t.id = dtn.donation_ticket_id
+                  INNER JOIN user as u ON dtn.user_id = u.id
+                  WHERE t.id = ?`,
+          [idTicket]
+        );
+
+        ticket["notes"] = rows_notes;
 
         res.json(ticket);
       } else {
