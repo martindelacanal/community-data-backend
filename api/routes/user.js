@@ -416,7 +416,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
 
 router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker') {
     try {
       const id = req.params.id || null;
       formulario = JSON.parse(req.body.form);
@@ -492,7 +492,6 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
           res.status(500).send("Error interno");
         }
       }
-
       const donation_id = formulario.donation_id || null;
       const total_weight = formulario.total_weight || null;
       var provider = formulario.provider || null;
@@ -536,10 +535,18 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
           );
         }
       }
-      const [rows_update_ticket] = await mysqlConnection.promise().query(
-        'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, audit_status_id = ?, notes = ?, date = ?, delivered_by = ? WHERE id = ?',
-        [donation_id, total_weight, provider, destination, audit_status, notes, date, delivered_by, id]
-      );
+      let query = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, notes = ?, date = ?, delivered_by = ?';
+      let params = [donation_id, total_weight, provider, destination, notes, date, delivered_by];
+      
+      if (audit_status !== null) {
+        query += ', audit_status_id = ?';
+        params.push(audit_status);
+      }
+      
+      query += ' WHERE id = ?';
+      params.push(id);
+      
+      const [rows_update_ticket] = await mysqlConnection.promise().query(query, params);
 
       try {
         // delete all product_donation_ticket records for the ticket
@@ -586,7 +593,7 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
 
 router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker') {
     try {
       const id = req.params.id || null;
       const [rows] = await mysqlConnection.promise().query(
@@ -7650,7 +7657,7 @@ router.post('/table/delivered', verifyToken, async (req, res) => {
 
 router.post('/table/ticket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker') {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
@@ -7722,6 +7729,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
       WHERE 1=1
       ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
+      ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
       ${queryBuscar}
       ${query_from_date}
       ${query_to_date}
@@ -7744,6 +7752,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         WHERE 1=1
         ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
+        ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
         ${queryBuscar}
         ${query_from_date}
         ${query_to_date}
@@ -9389,7 +9398,7 @@ router.get('/view/ethnicity/:idEthnicity', verifyToken, async (req, res) => {
 
 router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker') {
     try {
       const { idTicket } = req.params;
       const language = req.query.language || 'en';
@@ -9466,7 +9475,7 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const { idTicket } = req.params;
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker') {
 
     const [rows] = await mysqlConnection.promise().query(`
                           select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
