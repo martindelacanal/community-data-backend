@@ -7140,14 +7140,15 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
         `SELECT 
           DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) AS name,
           COUNT(DISTINCT receiving_user_id) AS value
-          FROM delivery_beneficiary
+          FROM delivery_beneficiary AS db1
           WHERE approved = 'Y'
           AND delivering_user_id = ?
-          AND receiving_user_id NOT IN (
-            SELECT receiving_user_id
-            FROM delivery_beneficiary
-            WHERE approved = 'Y'
-            AND creation_date < CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM delivery_beneficiary AS db2
+            WHERE db2.receiving_user_id = db1.receiving_user_id
+            AND db2.approved = 'Y'
+            AND db2.creation_date < db1.creation_date
           )
           GROUP BY DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))`,
         [idUser]
@@ -7156,40 +7157,62 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
       // Consulta para "Recurring" agrupada por día
       const [recurringRows] = await mysqlConnection.promise().query(
         `SELECT 
-        DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) AS name,
-        COUNT(DISTINCT receiving_user_id) AS value
-        FROM delivery_beneficiary
-        WHERE approved = 'Y'
-        AND delivering_user_id = ?
-        AND receiving_user_id IN (
-          SELECT receiving_user_id
-          FROM delivery_beneficiary
+          DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) AS name,
+          COUNT(DISTINCT receiving_user_id) AS value
+          FROM delivery_beneficiary AS db1
           WHERE approved = 'Y'
-          AND creation_date < CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')
-        )
-        GROUP BY DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))`,
+          AND delivering_user_id = ?
+          AND EXISTS (
+            SELECT 1
+            FROM delivery_beneficiary AS db2
+            WHERE db2.receiving_user_id = db1.receiving_user_id
+            AND db2.approved = 'Y'
+            AND db2.creation_date < db1.creation_date
+          )
+          GROUP BY DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))`,
         [idUser]
       );
 
-      console.log("newRows", newRows);
-      console.log("recurringRows", recurringRows);
+      // Obtener los días únicos de ambos conjuntos de resultados
+      const uniqueDays = new Set([
+        ...newRows.map(row => row.name),
+        ...recurringRows.map(row => row.name)
+      ]);
 
-      series_new = newRows.map(row => ({
-        value: row.value,
-        name: row.name
-      }));
+      // Crear un objeto para cada conjunto de resultados
+      const newMap = {};
+      newRows.forEach(row => {
+        newMap[row.name] = row.value;
+      });
 
-      series_recurring = recurringRows.map(row => ({
-        value: row.value,
-        name: row.name
-      }));
+      const recurringMap = {};
+      recurringRows.forEach(row => {
+        recurringMap[row.name] = row.value;
+      });
+
+      // Construir las series finales
+      const series_new = [];
+      const series_recurring = [];
+
+      uniqueDays.forEach(day => {
+        series_new.push({
+          name: day,
+          value: newMap[day] || 0
+        });
+        series_recurring.push({
+          name: day,
+          value: recurringMap[day] || 0
+        });
+      });
+
+      // Ordenar las series por fecha
+      series_new.sort((a, b) => new Date(a.name) - new Date(b.name));
+      series_recurring.sort((a, b) => new Date(a.name) - new Date(b.name));
 
       const result = [
         { name: language === 'en' ? 'New' : 'Nuevos', series: series_new },
         { name: language === 'en' ? 'Recurring' : 'Recurrentes', series: series_recurring }
       ];
-
-      console.log(result);
 
       res.json(result);
     } catch (err) {
