@@ -347,17 +347,17 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         }
         let query = 'INSERT INTO donation_ticket(donation_id, total_weight, provider_id, location_id, date, delivered_by';
         let values = 'VALUES(?,?,?,?,?,?';
-        let params = [donation_id, total_weight, provider, destination, date, delivered_by];
+        let parametros_insert_donation_ticket = [donation_id, total_weight, provider, destination, date, delivered_by];
 
         if (audit_status !== null) {
           query += ', audit_status_id';
           values += ', ?';
-          params.push(audit_status);
+          parametros_insert_donation_ticket.push(audit_status);
         }
 
         query += ') ' + values + ')';
 
-        const [rows] = await mysqlConnection.promise().query(query, params);
+        const [rows] = await mysqlConnection.promise().query(query, parametros_insert_donation_ticket);
 
         if (rows.affectedRows > 0) {
           const donation_ticket_id = rows.insertId;
@@ -558,17 +558,17 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
         );
       }
       let query = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, date = ?, delivered_by = ?';
-      let params = [donation_id, total_weight, provider, destination, date, delivered_by];
+      let parametros_update_donation_ticket = [donation_id, total_weight, provider, destination, date, delivered_by];
 
       if (audit_status !== null) {
         query += ', audit_status_id = ?';
-        params.push(audit_status);
+        parametros_update_donation_ticket.push(audit_status);
       }
 
       query += ' WHERE id = ?';
-      params.push(id);
+      parametros_update_donation_ticket.push(id);
 
-      const [rows_update_ticket] = await mysqlConnection.promise().query(query, params);
+      const [rows_update_ticket] = await mysqlConnection.promise().query(query, parametros_update_donation_ticket);
 
       try {
         // delete all product_donation_ticket records for the ticket
@@ -5057,7 +5057,7 @@ router.post('/table/delivered/download-csv', verifyToken, async (req, res) => {
 
 router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const language = req.query.language || 'en';
       const idUser = req.params.id;
@@ -5065,15 +5065,6 @@ router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
-
-
-      // Convertir a formato ISO y obtener solo la fecha
-      if (filters.from_date) {
-        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
-      }
-      if (filters.to_date) {
-        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
-      }
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -7038,6 +7029,177 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
   }
 }
 );
+
+router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+    try {
+      const { idUser } = req.params;
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND location_id IN (' + locations.join() + ')';
+      }
+
+      // Consulta para "New"
+      const [newRows] = await mysqlConnection.promise().query(
+        `SELECT 
+          ${language === 'en' ? '"New"' : 'Nuevos'} AS name,
+          COUNT(DISTINCT receiving_user_id) AS total
+          FROM delivery_beneficiary
+          WHERE approved = 'Y'
+          AND delivering_user_id = ?
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          AND receiving_user_id NOT IN (
+            SELECT receiving_user_id
+            FROM delivery_beneficiary
+            WHERE approved = 'Y'
+            AND creation_date < CONVERT_TZ(?, '+00:00', 'America/Los_Angeles')
+          )`,
+        [idUser, from_date]
+      );
+
+      // Consulta para "Recurring"
+      const [recurringRows] = await mysqlConnection.promise().query(
+        `SELECT 
+          ${language === 'en' ? '"Recurring"' : 'Recurrentes'} AS name,
+          COUNT(DISTINCT receiving_user_id) AS total
+          FROM delivery_beneficiary
+          WHERE approved = 'Y'
+          AND delivering_user_id = ?
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          AND receiving_user_id IN (
+            SELECT receiving_user_id
+            FROM delivery_beneficiary
+            WHERE approved = 'Y'
+            AND creation_date < CONVERT_TZ(?, '+00:00', 'America/Los_Angeles')
+          )`,
+        [idUser, from_date]
+      );
+
+      const result = [
+        newRows[0],
+        recurringRows[0]
+      ];
+
+      res.json(result);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Forbidden');
+  }
+});
+
+router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+    try {
+      const { idUser } = req.params;
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND location_id IN (' + locations.join() + ')';
+      }
+
+      // Consulta para "New" agrupada por día
+      const [newRows] = await mysqlConnection.promise().query(
+        `SELECT 
+          DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) AS name,
+          COUNT(DISTINCT receiving_user_id) AS value
+          FROM delivery_beneficiary
+          WHERE approved = 'Y'
+          AND delivering_user_id = ?
+          AND receiving_user_id NOT IN (
+            SELECT receiving_user_id
+            FROM delivery_beneficiary
+            WHERE approved = 'Y'
+            AND creation_date < CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')
+          )
+          GROUP BY DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))`,
+        [idUser]
+      );
+
+      // Consulta para "Recurring" agrupada por día
+      const [recurringRows] = await mysqlConnection.promise().query(
+        `SELECT 
+        DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) AS name,
+        COUNT(DISTINCT receiving_user_id) AS value
+        FROM delivery_beneficiary
+        WHERE approved = 'Y'
+        AND delivering_user_id = ?
+        AND receiving_user_id IN (
+          SELECT receiving_user_id
+          FROM delivery_beneficiary
+          WHERE approved = 'Y'
+          AND creation_date < CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')
+        )
+        GROUP BY DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))`,
+        [idUser]
+      );
+
+      console.log("newRows", newRows);
+      console.log("recurringRows", recurringRows);
+
+      series_new = newRows.map(row => ({
+        value: row.value,
+        name: row.name
+      }));
+
+      series_recurring = recurringRows.map(row => ({
+        value: row.value,
+        name: row.name
+      }));
+
+      const result = [
+        { name: language === 'en' ? 'New' : 'Nuevos', series: series_new },
+        { name: language === 'en' ? 'Recurring' : 'Recurrentes', series: series_recurring }
+      ];
+
+      console.log(result);
+
+      res.json(result);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Forbidden');
+  }
+});
 
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
