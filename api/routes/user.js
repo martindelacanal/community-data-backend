@@ -3938,7 +3938,7 @@ router.get('/map/locations', verifyToken, async (req, res) => {
         }
       }
 
-      const [rows] = await mysqlConnection.promise().query(query, params);
+      const [rows] = await mysqlConnection.promise().query(query, params_maps);
       const locations = rows.map(row => ({
         position: { lat: row.lat, lng: row.lng },
         label: row.label
