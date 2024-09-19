@@ -3893,10 +3893,10 @@ router.get('/map/locations', verifyToken, async (req, res) => {
         FROM location
         WHERE 1=1`;
 
-      let params = [];
+      let params_maps = [];
 
       if (cabecera.role === 'client') {
-        params.push(cabecera.client_id);
+        params_maps.push(cabecera.client_id);
         query = `SELECT
           ST_X(location.coordinates) as lng, 
           ST_Y(location.coordinates) as lat, 
@@ -3906,7 +3906,7 @@ router.get('/map/locations', verifyToken, async (req, res) => {
           WHERE client_location.client_id = ?`;
       }
       if (enabled) {
-        params.push(enabled);
+        params_maps.push(enabled);
         query += ' AND location.enabled = ?';
       }
       if (ids.length > 0) {
@@ -3914,7 +3914,7 @@ router.get('/map/locations', verifyToken, async (req, res) => {
         query += ` AND location.id IN (${placeholders})`;
         for (let i = 0; i < ids.length; i++) {
           ids[i] = parseInt(ids[i]);
-          params.push(ids[i]);
+          params_maps.push(ids[i]);
         }
       }
 
@@ -6692,26 +6692,26 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
 
-      let params = [];
+      let params_metrics_participant = [];
       let clientCondition = '';
       let toDate = new Date(to_date);
       toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final para que la comparación sea menor que la fecha final
 
       if (cabecera.role === 'client') {
         clientCondition = 'and cu.client_id = ?';
-        params.push(cabecera.client_id);
+        params_metrics_participant.push(cabecera.client_id);
       }
 
-      params.push(from_date, toDate);
+      params_metrics_participant.push(from_date, toDate);
 
       if (cabecera.role === 'client') {
-        params.push(cabecera.client_id);
+        params_metrics_participant.push(cabecera.client_id);
       }
 
-      params.push(from_date, toDate, from_date);
+      params_metrics_participant.push(from_date, toDate, from_date);
 
       if (cabecera.role === 'client') {
-        params.push(cabecera.client_id);
+        params_metrics_participant.push(cabecera.client_id);
       }
 
       const [rows] = await mysqlConnection.promise().query(
@@ -6737,7 +6737,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                 BETWEEN ? AND ? 
                 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? ${clientCondition} ${query_locations} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS recurring
         LIMIT 1`,
-        params
+        params_metrics_participant
       );
       if (rows[0]) {
         res.json({ total: rows[0].total, new: rows[0].new, recurring: rows[0].recurring });
