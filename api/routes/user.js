@@ -1676,7 +1676,8 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
             if (rows2.affectedRows > 0) {
               return res.status(200).json({ could_approve: 'Y' });
             } else {
-              return res.status(500).json('Could not update delivering_user_id');
+              console.log('error qr 501: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows[0].id: ' + rows[0].id);
+              return res.status(501).json('Could not update delivering_user_id');
             }
           } else {
             // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
@@ -1689,7 +1690,8 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
                 if (rows2.affectedRows > 0) {
                   res.json('Beneficiary approved successfully');
                 } else {
-                  res.status(500).json('Could not approve beneficiary');
+                  console.log('error qr 502: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows[0].id: ' + rows[0].id);
+                  res.status(502).json('Could not approve beneficiary');
                 }
               } else {
                 res.json({ could_approve: 'Y' });
@@ -1706,7 +1708,8 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
               if (rows3.affectedRows > 0) {
                 return res.status(200).json({ could_approve: 'Y' });
               } else {
-                return res.status(500).json('Could not create delivery_beneficiary');
+                console.log('error qr 503: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows: ' + rows);
+                return res.status(503).json('Could not create delivery_beneficiary');
               }
 
             }
@@ -1721,13 +1724,13 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
           // res.status(200).json({ error: 'receiving_location_null' });
         }
       } catch (error) {
-        console.log(error);
+        console.log(error + 'error qr 500: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows[0].id: ' + rows[0].id);
         logger.error(error);
         res.status(500).json('Internal server error');
       }
     } else {
-      console.log(req.body);
-      res.status(401).json('Unauthorized');
+      console.log(json.stringify(req.body) + 'error qr 401: ' + new Date());
+      res.status(402).json('Unauthorized');
     }
   } else {
     res.status(401).json('Unauthorized');
