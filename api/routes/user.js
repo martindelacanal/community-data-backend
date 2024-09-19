@@ -1887,6 +1887,26 @@ router.get('/answer-types', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/workers', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        'select id,username \
+        from user \
+        where role_id = 4 \
+        order by username',
+      );
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
@@ -5072,9 +5092,11 @@ router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < \'' + to_date + '\'';
       }
 
+      console.log("query_from_date: ", query_from_date);
+      console.log("query_to_date: ", query_to_date);
       const [table_rows_worker] = await mysqlConnection.promise().query(
         `SELECT
           db.id,
@@ -7048,7 +7070,7 @@ router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') < \'' + to_date + '\'';
       }
       var query_locations = '';
       if (locations.length > 0) {
@@ -8260,6 +8282,7 @@ router.post('/table/worker/download-csv', verifyToken, async (req, res) => {
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
     const locations = filters.locations || [];
+    const workers = filters.workers || [];
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -8281,6 +8304,10 @@ router.post('/table/worker/download-csv', verifyToken, async (req, res) => {
     if (locations.length > 0) {
       query_locations = 'AND dl.location_id IN (' + locations.join() + ')';
     }
+    var query_workers = '';
+    if (workers.length > 0) {
+      query_workers = 'AND dl.user_id IN (' + workers.join() + ')';
+    }
 
     try {
       const [rows] = await mysqlConnection.promise().query(`
@@ -8300,6 +8327,7 @@ router.post('/table/worker/download-csv', verifyToken, async (req, res) => {
       ${query_from_date}
       ${query_to_date}
       ${query_locations}
+      ${query_workers}
       ORDER BY dl.id`
       );
 
@@ -8345,6 +8373,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
     const locations = filters.locations || [];
+    const workers = filters.workers || [];
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -8365,6 +8394,10 @@ router.post('/table/worker', verifyToken, async (req, res) => {
     var query_locations = '';
     if (locations.length > 0) {
       query_locations = 'AND dl.location_id IN (' + locations.join() + ')';
+    }
+    var query_workers = '';
+    if (workers.length > 0) {
+      query_workers = 'AND dl.user_id IN (' + workers.join() + ')';
     }
 
     let buscar = req.query.search;
@@ -8407,6 +8440,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
       ${query_from_date}
       ${query_to_date}
       ${query_locations}
+      ${query_workers}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -8422,6 +8456,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
+          ${query_workers}
         `);
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
