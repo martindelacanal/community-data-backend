@@ -8251,7 +8251,7 @@ router.post('/table/product-type', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/table/worker', verifyToken, async (req, res) => {
+router.post('/table/worker/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     const language = req.query.language || 'en';
@@ -8259,6 +8259,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -8275,6 +8276,95 @@ router.post('/table/worker', verifyToken, async (req, res) => {
     var query_to_date = '';
     if (filters.to_date) {
       query_to_date = 'AND CONVERT_TZ(dl.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND dl.location_id IN (' + locations.join() + ')';
+    }
+
+    try {
+      const [rows] = await mysqlConnection.promise().query(`
+      SELECT
+        dl.id,
+        dl.user_id,
+        u.username,
+        u.firstname,
+        u.lastname,
+        l.community_city,
+        DATE_FORMAT(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as onboarding_date,
+        DATE_FORMAT(CONVERT_TZ(dl.offboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as offboarding_date
+      FROM delivery_log as dl
+      INNER JOIN user as u ON dl.user_id = u.id
+      LEFT JOIN location as l ON dl.location_id = l.id
+      WHERE u.enabled = 'Y' and dl.operation_id = 3 
+      ${query_from_date}
+      ${query_to_date}
+      ${query_locations}
+      ORDER BY dl.id`
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'user_id', title: 'User ID' },
+        { id: 'username', title: 'Username' },
+        { id: 'firstname', title: 'First Name' },
+        { id: 'lastname', title: 'Last Name' },
+        { id: 'community_city', title: 'Location' },
+        { id: 'onboarding_date', title: 'Onboarding Date' },
+        { id: 'offboarding_date', title: 'Offboarding Date' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=workers-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.post('/table/worker', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+    const language = req.query.language || 'en';
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(dl.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(dl.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND dl.location_id IN (' + locations.join() + ')';
     }
 
     let buscar = req.query.search;
@@ -8316,6 +8406,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
       ${queryBuscar}
       ${query_from_date}
       ${query_to_date}
+      ${query_locations}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -8330,6 +8421,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
           ${queryBuscar}
           ${query_from_date}
           ${query_to_date}
+          ${query_locations}
         `);
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
