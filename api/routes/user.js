@@ -5095,8 +5095,6 @@ router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
         query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < \'' + to_date + '\'';
       }
 
-      console.log("query_from_date: ", query_from_date);
-      console.log("query_to_date: ", query_to_date);
       const [table_rows_worker] = await mysqlConnection.promise().query(
         `SELECT
           db.id,
@@ -5374,7 +5372,7 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
         if (cabecera.role === 'admin') {
           query_from_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
         } else {
-          query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+          query_from_date = 'AND dt.date >= \'' + from_date + '\'';
         }
       }
       var query_to_date = '';
@@ -5382,7 +5380,7 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
         if (cabecera.role === 'admin') {
           query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
         } else {
-          query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+          query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
         }
       }
       var query_locations = '';
@@ -5866,11 +5864,11 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       }
       var query_from_date = '';
       if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        query_from_date = 'AND dt.date >= \'' + from_date + '\'';
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
       if (locations.length > 0) {
@@ -5880,7 +5878,6 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       if (providers.length > 0) {
         query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
       }
-
       const [rows] = await mysqlConnection.promise().query(
         `SELECT dt.id,
                 dt.donation_id,
@@ -6981,13 +6978,13 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
       var query_from_date_product = '';
       if (filters.from_date) {
         query_from_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
-        query_from_date_product = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        query_from_date_product = 'AND dt.date >= \'' + from_date + '\'';
       }
       var query_to_date = '';
       var query_to_date_product = '';
       if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-        query_to_date_product = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date_product = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
       var query_locations_product = '';
@@ -7269,11 +7266,11 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
 
       var query_from_date = '';
       if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        query_from_date = 'AND dt.date >= \'' + from_date + '\'';
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
       if (locations.length > 0) {
@@ -7341,11 +7338,11 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
 
       var query_from_date = '';
       if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        query_from_date = 'AND dt.date >= \'' + from_date + '\'';
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
       if (locations.length > 0) {
@@ -7448,11 +7445,11 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
 
       var query_from_date = '';
       if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+        query_from_date = 'AND dt.date >= \'' + from_date + '\'';
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+        query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
       if (locations.length > 0) {
@@ -7930,11 +7927,11 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     }
     var query_from_date = '';
     if (filters.from_date) {
-      query_from_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      query_from_date = 'AND dt.date >= \'' + from_date + '\'';
     }
     var query_to_date = '';
     if (filters.to_date) {
-      query_to_date = 'AND CONVERT_TZ(dt.date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
     }
     var query_locations = '';
     if (locations.length > 0) {
@@ -7956,7 +7953,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     var resultsPerPage = 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'date';
     var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
     var queryOrderBy = `${orderBy} ${orderType}`;
 
