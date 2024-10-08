@@ -8433,26 +8433,30 @@ router.post('/table/worker', verifyToken, async (req, res) => {
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+
+    if (orderBy === 'id') {
+      orderBy = 'first_onboarding_id';
+    }
+
     var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
     var queryOrderBy = `${orderBy} ${orderType}`;
 
-
     if (buscar) {
       buscar = '%' + buscar + '%';
-      queryBuscar = `AND (dl.id like '${buscar}' or dl.user_id like '${buscar}' or u.username like '${buscar}' or u.firstname like '${buscar}' or u.lastname like '${buscar}' or l.community_city like '${buscar}' or DATE_FORMAT(CONVERT_TZ(onboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(offboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (first_onboarding_id like '${buscar}' or dl.user_id like '${buscar}' or u.username like '${buscar}' or u.firstname like '${buscar}' or u.lastname like '${buscar}' or l.community_city like '${buscar}' or DATE_FORMAT(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(dl.offboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
       const query = `
       SELECT
-        dl.id,
         dl.user_id,
         u.username,
         u.firstname,
         u.lastname,
         l.community_city,
-        DATE_FORMAT(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as onboarding_date,
-        DATE_FORMAT(CONVERT_TZ(dl.offboarding_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as offboarding_date
+        DATE_FORMAT(MIN(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')), '%m/%d/%Y %T') as onboarding_date,
+        DATE_FORMAT(MAX(CONVERT_TZ(dl.offboarding_date, '+00:00', 'America/Los_Angeles')), '%m/%d/%Y %T') as offboarding_date,
+        (SELECT id FROM delivery_log WHERE user_id = dl.user_id AND DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) ORDER BY creation_date ASC LIMIT 1) as first_onboarding_id
       FROM delivery_log as dl
       INNER JOIN user as u ON dl.user_id = u.id
       LEFT JOIN location as l ON dl.location_id = l.id
@@ -8462,6 +8466,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
       ${query_to_date}
       ${query_locations}
       ${query_workers}
+      GROUP BY dl.user_id, DATE(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles'))
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
@@ -8469,15 +8474,27 @@ router.post('/table/worker', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
-          FROM delivery_log as dl
-          INNER JOIN user as u ON dl.user_id = u.id
-          LEFT JOIN location as l ON dl.location_id = l.id
-          WHERE u.enabled = 'Y' and dl.operation_id = 3 
-          ${queryBuscar}
-          ${query_from_date}
-          ${query_to_date}
-          ${query_locations}
-          ${query_workers}
+          FROM (
+            SELECT 
+              dl.user_id,
+              u.username,
+              u.firstname,
+              u.lastname,
+              l.community_city,
+              DATE_FORMAT(MIN(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')), '%m/%d/%Y %T') as onboarding_date,
+              DATE_FORMAT(MAX(CONVERT_TZ(dl.offboarding_date, '+00:00', 'America/Los_Angeles')), '%m/%d/%Y %T') as offboarding_date,
+              (SELECT id FROM delivery_log WHERE user_id = dl.user_id AND DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) ORDER BY creation_date ASC LIMIT 1) as first_onboarding_id
+            FROM delivery_log as dl
+            INNER JOIN user as u ON dl.user_id = u.id
+            LEFT JOIN location as l ON dl.location_id = l.id
+            WHERE u.enabled = 'Y' and dl.operation_id = 3 
+            ${queryBuscar}
+            ${query_from_date}
+            ${query_to_date}
+            ${query_locations}
+            ${query_workers}
+            GROUP BY dl.user_id, DATE(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles'))
+          ) as subquery
         `);
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
