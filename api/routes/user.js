@@ -133,7 +133,6 @@ router.post('/signin', (req, res) => {
 });
 
 router.get('/refresh-token', verifyToken, (req, res) => {
-  console.log("renovacion de token")
   const cabecera = JSON.parse(req.data.data);
 
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
@@ -636,7 +635,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 INNER join product_donation_ticket as pdt on t.id = pdt.donation_ticket_id
                 INNER join product as p on pdt.product_id = p.id
                 INNER join product_type as pt on p.product_type_id = pt.id
-                WHERE t.id = ?
+                WHERE t.id = ? AND t.enabled = 'Y'
                 GROUP BY t.id, pdt.product_id`,
         [id]
       );
@@ -671,7 +670,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                   FROM donation_ticket as t
                   INNER JOIN donation_ticket_note as dtn ON t.id = dtn.donation_ticket_id
                   INNER JOIN user as u ON dtn.user_id = u.id
-                  WHERE t.id = ?`,
+                  WHERE t.id = ? AND t.enabled = 'Y'`,
           [id]
         );
 
@@ -2592,7 +2591,7 @@ router.get('/donation_id/exists/search', verifyToken, async (req, res) => {
   try {
     if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
       if (donation_id) {
-        const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ?', [donation_id]);
+        const [rows] = await mysqlConnection.promise().query('select donation_id from donation_ticket where donation_id = ? AND enabled = "Y"', [donation_id]);
         if (rows.length > 0) {
           res.json(true);
         } else {
@@ -3328,7 +3327,8 @@ router.get('/pounds-delivered', verifyToken, async (req, res) => {
       // sum total_weight from donation_ticket
       const [rows] = await mysqlConnection.promise().query(
         `select sum(total_weight) as pounds_delivered 
-        from donation_ticket`
+        from donation_ticket
+        where enabled = 'Y'`
       );
       if (rows[0].pounds_delivered === null) {
         rows[0].pounds_delivered = 0;
@@ -3345,7 +3345,7 @@ router.get('/pounds-delivered', verifyToken, async (req, res) => {
           `select sum(dt.total_weight) as pounds_delivered 
           from donation_ticket as dt
           inner join client_location as cl on dt.location_id = cl.location_id
-          where cl.client_id = ?`,
+          where cl.client_id = ? AND dt.enabled = 'Y'`,
           [cabecera.client_id]
         );
         if (rows[0].pounds_delivered === null) {
@@ -3775,7 +3775,8 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           COUNT(DISTINCT donation_ticket.id) AS total_tickets_uploaded
-        FROM donation_ticket`
+        FROM donation_ticket
+        WHERE enabled = 'Y'`
       );
       res.json(rows[0].total_tickets_uploaded);
     } catch (err) {
@@ -3790,7 +3791,7 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
             COUNT(DISTINCT dt.id) AS total_tickets_uploaded
             FROM donation_ticket as dt
             INNER JOIN client_location as cl ON dt.location_id = cl.location_id
-            WHERE cl.client_id = ?`,
+            WHERE cl.client_id = ? AND dt.enabled = 'Y'`,
           [cabecera.client_id]
         );
         res.json(rows[0].total_tickets_uploaded);
@@ -3865,7 +3866,7 @@ router.get('/total-products-uploaded', verifyToken, async (req, res) => {
             INNER JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
             INNER JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
             INNER JOIN client_location as cl ON dt.location_id = cl.location_id
-            WHERE cl.client_id = ?`,
+            WHERE cl.client_id = ? AND dt.enabled = 'Y'`,
           [cabecera.client_id]
         );
         res.json(rows[0].total_products_uploaded);
@@ -3980,6 +3981,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
                 SUM(total_weight) AS value,
                 DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
               FROM donation_ticket
+              WHERE enabled = 'Y'
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
           );
@@ -4067,7 +4069,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
                   DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
                 FROM donation_ticket as dt
                 INNER JOIN client_location as cl ON dt.location_id = cl.location_id
-                WHERE cl.client_id = ?
+                WHERE cl.client_id = ? AND dt.enabled = 'Y'
                 GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
                 ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`,
               [cabecera.client_id]
@@ -5906,7 +5908,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
         LEFT JOIN product_type as pt ON product.product_type_id = pt.id
-        WHERE 1=1
+        WHERE dt.enabled = 'Y'
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
@@ -7025,7 +7027,7 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
           INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           INNER JOIN product as p ON pdt.product_id = p.id
           ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE 1=1
+          WHERE dt.enabled = 'Y'
           ${query_from_date_product}
           ${query_to_date_product}
           ${query_locations_product}
@@ -7295,7 +7297,7 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
           INNER JOIN product as p ON pdt.product_id = p.id
           INNER JOIN product_type as pt ON p.product_type_id = pt.id
           ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE 1=1
+          WHERE dt.enabled = 'Y'
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
@@ -7365,7 +7367,7 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as p ON pdt.product_id = p.id
         INNER JOIN location as l ON dt.location_id = l.id
-        WHERE 1=1
+        WHERE dt.enabled = 'Y'
         ${cabecera.role === 'client' ? 'and dt.location_id IN (SELECT location_id FROM client_location WHERE client_id = ?)' : ''}
         ${query_from_date}
         ${query_to_date}
@@ -7472,7 +7474,7 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as p ON pdt.product_id = p.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-        WHERE 1=1
+        WHERE dt.enabled = 'Y'
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
@@ -7980,7 +7982,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       INNER JOIN location ON dt.location_id = location.id
       ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
       INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-      WHERE 1=1
+      WHERE dt.enabled = 'Y'
       ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
       ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
       ${queryBuscar}
@@ -8003,7 +8005,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         INNER JOIN location ON dt.location_id = location.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-        WHERE 1=1
+        WHERE dt.enabled = 'Y'
         ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
         ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
         ${queryBuscar}
@@ -8024,6 +8026,28 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     } catch (error) {
       console.log(error);
       logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.delete('/ticket/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    const id = req.params.id;
+    try {
+      // update del campo ENABLED en donation_ticket por 'N'
+      const [rows] = await mysqlConnection.promise().query(
+        `UPDATE donation_ticket
+        SET enabled = 'N'
+        WHERE id = ?`,
+        [id]
+      );
+      res.json('Ticket eliminado');
+    } catch (error) {
+      console.log(error);
       res.status(500).json('Error interno');
     }
   } else {
@@ -9175,7 +9199,7 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
               INNER JOIN provider ON dt.provider_id = provider.id
               INNER JOIN location ON dt.location_id = location.id
               INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-              WHERE sl.user_id = ?`,
+              WHERE sl.user_id = ? AND dt.enabled = 'Y'`,
               [idUser]
             );
             user["table_rows"] = table_rows_stocker.map(row => {
@@ -9785,7 +9809,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
-        WHERE dt.id = ?
+        WHERE dt.id = ? AND dt.enabled = 'Y'
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}`,
         [idTicket, cabecera.client_id]
       );
@@ -9822,7 +9846,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                   FROM donation_ticket as t
                   INNER JOIN donation_ticket_note as dtn ON t.id = dtn.donation_ticket_id
                   INNER JOIN user as u ON dtn.user_id = u.id
-                  WHERE t.id = ?`,
+                  WHERE t.id = ? AND t.enabled = 'Y'`,
           [idTicket]
         );
 
