@@ -48,7 +48,7 @@ async function sendEmailWithAttachment(subject, message, csvData, password) {
       // Opciones del correo
       let mailOptions = {
         from: 'bienestarcommunity@gmail.com',
-        to: 'martin.delacanalerbetta@gmail.com',
+        to: 'martin.delacanalerbetta@gmail.com, mazzottadamian@gmail.com',
         subject: subject,
         text: message,
         attachments: [

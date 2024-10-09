@@ -7957,6 +7957,11 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'date';
     var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+
+    if (orderBy === 'date') {
+      orderBy = 'dt.date';
+    }
+    
     var queryOrderBy = `${orderBy} ${orderType}`;
 
     if (buscar) {
