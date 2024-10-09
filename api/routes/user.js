@@ -7958,11 +7958,11 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     var orderBy = req.query.orderBy ? req.query.orderBy : 'date';
     var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
 
-    if (orderBy === 'date') {
-      orderBy = 'dt.date';
-    }
-    
     var queryOrderBy = `${orderBy} ${orderType}`;
+
+    if (orderBy === 'date') {
+      queryOrderBy = `dt.date ${orderType}, dt.id desc`;
+    }
 
     if (buscar) {
       buscar = '%' + buscar + '%';
@@ -8007,6 +8007,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         SELECT COUNT(DISTINCT dt.id) as count
         FROM donation_ticket as dt
         INNER JOIN provider ON dt.provider_id = provider.id
+        INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         INNER JOIN location ON dt.location_id = location.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
