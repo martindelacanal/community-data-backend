@@ -5087,6 +5087,11 @@ router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
+      from_date = from_date.split('T')[0];
+      to_date = to_date.split('T')[0];
+
+      const locations = filters.locations || [];
+      const workers = filters.workers || [];
 
       var query_from_date = '';
       if (filters.from_date) {
@@ -5094,7 +5099,17 @@ router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < \'' + to_date + '\'';
+        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND db.location_id IN (' + locations.join() + ')';
+      }
+      var query_workers = '';
+      if (workers.length > 0) {
+        query_workers = 'AND db.delivering_user_id IN (' + workers.join() + ')';
+      } else {
+        query_workers = 'AND db.delivering_user_id = ' + idUser;
       }
 
       const [table_rows_worker] = await mysqlConnection.promise().query(
@@ -5107,23 +5122,27 @@ router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
         FROM delivery_beneficiary as db
         INNER JOIN user ON db.receiving_user_id = user.id
         INNER JOIN location ON db.location_id = location.id
-        WHERE db.delivering_user_id = ?
+        WHERE 1=1
         ${query_from_date}
         ${query_to_date}
+        ${query_locations}
+        ${query_workers}
         ORDER BY db.id`,
-        [idUser]
+        []
       );
 
       if (table_rows_worker.length > 0) {
         res.status(200).json(table_rows_worker);
       } else {
-        res.status(404).json([]);
+        res.status(200).json([]);
       }
 
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -7059,7 +7078,11 @@ router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
+      from_date = from_date.split('T')[0];
+      to_date = to_date.split('T')[0];
+      console.log("filters", filters);
       const locations = filters.locations || [];
+      const workers = filters.workers || [];
 
       const language = req.query.language || 'en';
 
@@ -7069,11 +7092,17 @@ router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
       }
       var query_to_date = '';
       if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') < \'' + to_date + '\'';
+        query_to_date = 'AND CONVERT_TZ(creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
       if (locations.length > 0) {
         query_locations = 'AND location_id IN (' + locations.join() + ')';
+      }
+      var query_workers = '';
+      if (workers.length > 0) {
+        query_workers = 'AND delivering_user_id IN (' + workers.join() + ')';
+      } else {
+        query_workers = 'AND delivering_user_id = ' + idUser;
       }
 
       // Consulta para "New"
@@ -7083,17 +7112,17 @@ router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
           COUNT(DISTINCT receiving_user_id) AS total
           FROM delivery_beneficiary
           WHERE approved = 'Y'
-          AND delivering_user_id = ?
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
+          ${query_workers}
           AND receiving_user_id NOT IN (
             SELECT receiving_user_id
             FROM delivery_beneficiary
             WHERE approved = 'Y'
             AND creation_date < CONVERT_TZ(?, '+00:00', 'America/Los_Angeles')
           )`,
-        [idUser, from_date]
+        [from_date]
       );
 
       // Consulta para "Recurring"
@@ -7103,17 +7132,17 @@ router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
           COUNT(DISTINCT receiving_user_id) AS total
           FROM delivery_beneficiary
           WHERE approved = 'Y'
-          AND delivering_user_id = ?
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
+          ${query_workers}
           AND receiving_user_id IN (
             SELECT receiving_user_id
             FROM delivery_beneficiary
             WHERE approved = 'Y'
             AND creation_date < CONVERT_TZ(?, '+00:00', 'America/Los_Angeles')
           )`,
-        [idUser, from_date]
+        [from_date]
       );
 
       const result = [
@@ -7140,6 +7169,7 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
+      const workers = filters.workers || [];
 
       const language = req.query.language || 'en';
 
@@ -7155,6 +7185,12 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
       if (locations.length > 0) {
         query_locations = 'AND location_id IN (' + locations.join() + ')';
       }
+      var query_workers = '';
+      if (workers.length > 0) {
+        query_workers = 'AND delivering_user_id IN (' + workers.join() + ')';
+      } else {
+        query_workers = 'AND delivering_user_id = ' + idUser;
+      }
 
       // Consulta para "New" agrupada por día
       const [newRows] = await mysqlConnection.promise().query(
@@ -7163,7 +7199,10 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
           COUNT(DISTINCT receiving_user_id) AS value
           FROM delivery_beneficiary AS db1
           WHERE approved = 'Y'
-          AND delivering_user_id = ?
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_workers}
           AND NOT EXISTS (
             SELECT 1
             FROM delivery_beneficiary AS db2
@@ -7172,7 +7211,7 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
             AND db2.creation_date < db1.creation_date
           )
           GROUP BY DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))`,
-        [idUser]
+        []
       );
 
       // Consulta para "Recurring" agrupada por día
@@ -7182,7 +7221,10 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
           COUNT(DISTINCT receiving_user_id) AS value
           FROM delivery_beneficiary AS db1
           WHERE approved = 'Y'
-          AND delivering_user_id = ?
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_workers}
           AND EXISTS (
             SELECT 1
             FROM delivery_beneficiary AS db2
@@ -7191,7 +7233,7 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
             AND db2.creation_date < db1.creation_date
           )
           GROUP BY DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))`,
-        [idUser]
+        []
       );
 
       // Obtener los días únicos de ambos conjuntos de resultados
