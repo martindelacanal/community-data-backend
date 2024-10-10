@@ -7287,6 +7287,129 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
   }
 });
 
+router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || null;
+      let to_date = filters.to_date || null;
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
+      const product_types = filters.product_types || [];
+
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      const language = req.query.language || 'en';
+
+      if (!from_date || !to_date) {
+        const [dateRange] = await mysqlConnection.promise().query(
+          `SELECT 
+            MIN(date) AS min_date, 
+            MAX(date) AS max_date 
+          FROM donation_ticket 
+          WHERE enabled = 'Y'`
+        );
+        if (!from_date) from_date = dateRange[0].min_date.toISOString().slice(0, 10);
+        if (!to_date) to_date = dateRange[0].max_date.toISOString().slice(0, 10);
+      }
+
+      var query_from_date = '';
+      if (from_date) {
+        query_from_date = 'AND dt.date >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (to_date) {
+        query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      }
+      var query_providers = '';
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      }
+      var query_product_types = '';
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+      }
+      
+      const [rows] = await mysqlConnection.promise().query(
+        `WITH RECURSIVE months AS (
+            SELECT DATE_FORMAT('${from_date}', '%m/%Y') AS month_year, '${from_date}' AS date
+            UNION ALL
+            SELECT DATE_FORMAT(DATE_ADD(date, INTERVAL 1 MONTH), '%m/%Y'), DATE_ADD(date, INTERVAL 1 MONTH)
+            FROM months
+            WHERE DATE_ADD(date, INTERVAL 1 MONTH) <= '${to_date}'
+          )
+          SELECT 
+            pr.name AS name,
+            COALESCE(SUM(pdt.quantity), 0) AS data,
+            m.month_year AS month
+          FROM months m
+          LEFT JOIN donation_ticket as dt ON DATE_FORMAT(dt.date, '%m/%Y') = m.month_year
+          LEFT JOIN provider as pr ON dt.provider_id = pr.id
+          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          LEFT JOIN product as p ON pdt.product_id = p.id
+          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+          WHERE dt.enabled = 'Y' OR dt.enabled IS NULL
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
+          ${cabecera.role === 'client' ? 'AND cl.client_id = ?' : ''}
+          GROUP BY name, month
+          ORDER BY month ASC`,
+        [cabecera.client_id]
+      );
+
+      // Transform rows to the desired structure
+      const categories = [...new Set(rows.map(row => row.month))].sort((a, b) => {
+        const [monthA, yearA] = a.split('/').map(Number);
+        const [monthB, yearB] = b.split('/').map(Number);
+        return new Date(yearA, monthA - 1) - new Date(yearB, monthB - 1);
+      });
+
+      const providersMap = new Map();
+
+      // Initialize providersMap with all providers and all months with 0 data
+      rows.forEach(row => {
+        if (!providersMap.has(row.name)) {
+          providersMap.set(row.name, Array(categories.length).fill(0));
+        }
+      });
+
+      // Fill providersMap with actual data
+      rows.forEach(row => {
+        const index = categories.indexOf(row.month);
+        providersMap.get(row.name)[index] = row.data;
+      });
+
+      const series = Array.from(providersMap, ([name, data]) => ({ name, data }));
+
+      const result = {
+        series,
+        categories
+      };
+
+      res.json(result);
+    } catch (error) {
+      console.log(error);
+      res.status(500).send(error.message);
+    }
+  } else {
+    res.status(403).send('Forbidden');
+  }
+});
+
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {

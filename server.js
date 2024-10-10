@@ -8,7 +8,7 @@ const mysqlConnection = require('./api/connection/connection.js');
 const schedule = require('node-schedule');
 
 const logger = require('./api/utils/logger.js');
-const email = require('./api/email/email.js');
+// const email = require('./api/email/email.js');
 
 schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
     // Modificar todos los delivery_log con operation_id = 3 y offboarding_date = null que hayan sido creados hace más de 5 horas y agregarle la fecha actual
