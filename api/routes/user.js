@@ -7287,6 +7287,326 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
   }
 });
 
+router.post('/metrics/participant/register_history', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (
+    cabecera.role === 'admin' ||
+    cabecera.role === 'client' ||
+    cabecera.role === 'director' ||
+    cabecera.role === 'auditor'
+  ) {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || null;
+      let to_date = filters.to_date || null;
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+      const interval = filters.interval || 'month';
+      const language = req.query.language || 'en';
+      
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      } else {
+        // Si no se proporciona, obtener la fecha mínima de la base de datos
+        const [dateRange] = await mysqlConnection
+          .promise()
+          .query(
+            `SELECT 
+              MIN(creation_date) AS min_date
+            FROM (
+              SELECT creation_date FROM user WHERE enabled = 'Y'
+              UNION ALL
+              SELECT creation_date FROM delivery_beneficiary
+            ) AS combined_dates`
+          );
+        from_date = dateRange[0].min_date.toISOString().slice(0, 10);
+      }
+
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      } else {
+        // Si no se proporciona, obtener la fecha máxima de la base de datos
+        const [dateRange] = await mysqlConnection
+          .promise()
+          .query(
+            `SELECT 
+              MAX(creation_date) AS max_date
+            FROM (
+              SELECT creation_date FROM user WHERE enabled = 'Y'
+              UNION ALL
+              SELECT creation_date FROM delivery_beneficiary
+            ) AS combined_dates`
+          );
+        to_date = dateRange[0].max_date.toISOString().slice(0, 10);
+      }
+
+      // Validar las fechas para evitar inyección SQL
+      const isValidDate = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date);
+      if (!isValidDate(from_date) || !isValidDate(to_date)) {
+        return res.status(400).send('Invalid date format.');
+      }
+
+      // Ajustar to_date para que incluya todo el último período
+      const toDateObj = new Date(to_date);
+      switch (interval) {
+        case 'day':
+          // No es necesario ajustar
+          break;
+        case 'week':
+          // Ajustar al último día de la semana (sábado)
+          toDateObj.setDate(toDateObj.getDate() + (6 - toDateObj.getDay()));
+          break;
+        case 'month':
+          // Ajustar al último día del mes
+          const lastDay = getLastDayOfMonth(toDateObj.getFullYear(), toDateObj.getMonth());
+          toDateObj.setDate(lastDay);
+          break;
+        case 'quarter':
+          // Ajustar al último día del trimestre
+          const currentQuarter = Math.floor(toDateObj.getMonth() / 3);
+          toDateObj.setMonth(currentQuarter * 3 + 2); // Último mes del trimestre
+          toDateObj.setDate(getLastDayOfMonth(toDateObj.getFullYear(), toDateObj.getMonth()));
+          break;
+        case 'year':
+          // Ajustar al último día del año
+          toDateObj.setMonth(11); // Diciembre
+          toDateObj.setDate(31);
+          break;
+        default:
+          // Por defecto, tratamos como 'month'
+          const lastDayDefault = getLastDayOfMonth(toDateObj.getFullYear(), toDateObj.getMonth());
+          toDateObj.setDate(lastDayDefault);
+          break;
+      }
+      to_date = toDateObj.toISOString().slice(0, 10);
+
+      // Definir formato de fecha e intervalo según el parámetro 'interval'
+      let dateFormatString;
+      switch (interval) {
+        case 'day':
+          dateFormatString = '%Y-%m-%d';
+          break;
+        case 'week':
+          dateFormatString = '%x-W%v'; // Número de semana ISO
+          break;
+        case 'month':
+          dateFormatString = '%Y-%m';
+          break;
+        case 'quarter':
+          dateFormatString = '%Y-Q%q';
+          break;
+        case 'year':
+          dateFormatString = '%Y';
+          break;
+        default:
+          dateFormatString = '%Y-%m';
+          break;
+      }
+
+      // Generar los períodos en código
+      const periods = generatePeriods(from_date, to_date, interval);
+
+      // Construir consultas parametrizadas
+      const params = [];
+
+      let query_conditions = '';
+      let query_join_client_user = '';
+
+      if (genders.length > 0) {
+        query_conditions += ` AND u.gender_id IN (${genders.map(() => '?').join(',')})`;
+        params.push(...genders);
+      }
+      if (ethnicities.length > 0) {
+        query_conditions += ` AND u.ethnicity_id IN (${ethnicities.map(() => '?').join(',')})`;
+        params.push(...ethnicities);
+      }
+      if (filters.min_age) {
+        query_conditions += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ?`;
+        params.push(min_age);
+      }
+      if (filters.max_age) {
+        query_conditions += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ?`;
+        params.push(max_age);
+      }
+      if (filters.zipcode) {
+        query_conditions += ' AND u.zipcode = ?';
+        params.push(zipcode);
+      }
+      if (cabecera.role === 'client') {
+        query_join_client_user = 'INNER JOIN client_user cu ON u.id = cu.user_id';
+        query_conditions += ' AND cu.client_id = ?';
+        params.push(cabecera.client_id);
+      }
+
+      let query_locations = '';
+      if (locations.length > 0) {
+        query_locations = ` AND u.location_id IN (${locations.map(() => '?').join(',')})`;
+        params.push(...locations);
+      }
+
+      // Ajustar las fechas y agregar un día a to_date
+      const fromDateUTC = from_date + ' 00:00:00';
+      const toDateUTC = to_date + ' 23:59:59';
+
+      // Consulta para nuevos usuarios
+      const newUsersQuery = `
+        SELECT
+          DATE_FORMAT(u.creation_date, '${dateFormatString}') AS period,
+          COUNT(DISTINCT u.id) AS new_users
+        FROM user u
+        ${query_join_client_user}
+        WHERE u.enabled = 'Y' AND u.role_id = 5
+          AND u.creation_date BETWEEN ? AND ?
+          ${query_conditions}
+          ${query_locations}
+        GROUP BY period
+      `;
+
+      // Parámetros para la consulta de nuevos usuarios
+      const newUsersParams = [fromDateUTC, toDateUTC, ...params];
+
+      // Consulta para usuarios recurrentes
+      const recurringUsersQuery = `
+        SELECT
+          dp.period,
+          COUNT(DISTINCT dp.user_id) AS recurring_users
+        FROM (
+          SELECT
+            u.id AS user_id,
+            DATE_FORMAT(db.creation_date, '${dateFormatString}') AS period,
+            COUNT(*) OVER (PARTITION BY u.id ORDER BY DATE_FORMAT(db.creation_date, '${dateFormatString}')) AS cumulative_deliveries
+          FROM delivery_beneficiary db
+          JOIN user u ON u.id = db.receiving_user_id
+          ${query_join_client_user}
+          WHERE u.enabled = 'Y' AND u.role_id = 5
+            AND db.creation_date BETWEEN ? AND ?
+            ${query_conditions}
+            ${query_locations.replace(/u\./g, 'db.')}
+          GROUP BY u.id, period
+        ) dp
+        WHERE dp.cumulative_deliveries > 1
+        GROUP BY dp.period
+      `;
+
+      // Parámetros para la consulta de usuarios recurrentes
+      const recurringUsersParams = [fromDateUTC, toDateUTC, ...params];
+
+      // Ejecutar la consulta de nuevos usuarios
+      const [newUsersRows] = await mysqlConnection.promise().query(newUsersQuery, newUsersParams);
+
+      // Ejecutar la consulta de usuarios recurrentes
+      const [recurringUsersRows] = await mysqlConnection.promise().query(recurringUsersQuery, recurringUsersParams);
+
+      // Crear un mapa de períodos a datos
+      const periodsMap = new Map();
+      periods.forEach(period => {
+        periodsMap.set(period, { new_users: 0, recurring_users: 0 });
+      });
+
+      // Rellenar los datos de nuevos usuarios
+      newUsersRows.forEach(row => {
+        if (periodsMap.has(row.period)) {
+          periodsMap.get(row.period).new_users = row.new_users;
+        }
+      });
+
+      // Rellenar los datos de usuarios recurrentes
+      recurringUsersRows.forEach(row => {
+        if (periodsMap.has(row.period)) {
+          periodsMap.get(row.period).recurring_users = row.recurring_users;
+        }
+      });
+
+      // Preparar los datos para la respuesta
+      const categories = Array.from(periodsMap.keys());
+      const newUsersData = [];
+      const recurringUsersData = [];
+
+      categories.forEach(period => {
+        const data = periodsMap.get(period);
+        newUsersData.push(data.new_users);
+        recurringUsersData.push(data.recurring_users);
+      });
+
+      const series = [
+        { name: language === 'en' ? 'New' : 'Nuevos', data: newUsersData },
+        { name: language === 'en' ? 'Recurring' : 'Recurrentes', data: recurringUsersData },
+      ];
+
+      const result = {
+        series,
+        categories,
+      };
+
+      res.json(result);
+    } catch (error) {
+      console.log(error);
+      res.status(500).send(error.message);
+    }
+  } else {
+    res.status(403).send('Forbidden');
+  }
+});
+
+// Funciones auxiliares
+function generatePeriods(startDate, endDate, interval) {
+  const periods = [];
+  let current = new Date(startDate);
+  const end = new Date(endDate);
+
+  while (current <= end) {
+    let period;
+    switch (interval) {
+      case 'day':
+        period = current.toISOString().slice(0, 10);
+        current.setDate(current.getDate() + 1);
+        break;
+      case 'week':
+        const weekNumber = getWeekNumber(current);
+        period = `${current.getFullYear()}-W${weekNumber}`;
+        current.setDate(current.getDate() + 7);
+        break;
+      case 'month':
+        period = current.toISOString().slice(0, 7);
+        current.setMonth(current.getMonth() + 1);
+        break;
+      case 'quarter':
+        const quarter = Math.floor(current.getMonth() / 3) + 1;
+        period = `${current.getFullYear()}-Q${quarter}`;
+        current.setMonth(current.getMonth() + 3);
+        break;
+      case 'year':
+        period = `${current.getFullYear()}`;
+        current.setFullYear(current.getFullYear() + 1);
+        break;
+      default:
+        period = current.toISOString().slice(0, 7);
+        current.setMonth(current.getMonth() + 1);
+        break;
+    }
+    periods.push(period);
+  }
+  return periods;
+}
+
+function getLastDayOfMonth(year, month) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function getWeekNumber(d) {
+  d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+}
+
+
 router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
@@ -7297,6 +7617,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+      const interval = filters.interval || 'month';
 
       if (filters.from_date) {
         from_date = new Date(filters.from_date).toISOString().slice(0, 10);
@@ -7304,8 +7625,6 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       if (filters.to_date) {
         to_date = new Date(filters.to_date).toISOString().slice(0, 10);
       }
-
-      const language = req.query.language || 'en';
 
       if (!from_date || !to_date) {
         const [dateRange] = await mysqlConnection.promise().query(
@@ -7319,77 +7638,129 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         if (!to_date) to_date = dateRange[0].max_date.toISOString().slice(0, 10);
       }
 
-      var query_from_date = '';
-      if (from_date) {
-        query_from_date = 'AND dt.date >= \'' + from_date + '\'';
+      let dateFormatString;
+      let dateAddInterval;
+      switch (interval) {
+        case 'day':
+          dateFormatString = '%Y-%m-%d';
+          dateAddInterval = '1 DAY';
+          break;
+        case 'week':
+          dateFormatString = '%x-W%v';
+          dateAddInterval = '1 WEEK';
+          break;
+        case 'month':
+          dateFormatString = '%Y-%m';
+          dateAddInterval = '1 MONTH';
+          break;
+        case 'quarter':
+          dateFormatString = '%Y-Q%q';
+          dateAddInterval = '1 QUARTER';
+          break;
+        case 'year':
+          dateFormatString = '%Y';
+          dateAddInterval = '1 YEAR';
+          break;
+        default:
+          dateFormatString = '%Y-%m';
+          dateAddInterval = '1 MONTH';
+          break;
       }
-      var query_to_date = '';
-      if (to_date) {
-        query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
-      if (locations.length > 0) {
-        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
-      }
-      var query_providers = '';
-      if (providers.length > 0) {
-        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
-      }
-      var query_product_types = '';
-      if (product_types.length > 0) {
-        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
-      }
-      
-      const [rows] = await mysqlConnection.promise().query(
-        `WITH RECURSIVE months AS (
-            SELECT DATE_FORMAT('${from_date}', '%m/%Y') AS month_year, '${from_date}' AS date
-            UNION ALL
-            SELECT DATE_FORMAT(DATE_ADD(date, INTERVAL 1 MONTH), '%m/%Y'), DATE_ADD(date, INTERVAL 1 MONTH)
-            FROM months
-            WHERE DATE_ADD(date, INTERVAL 1 MONTH) <= '${to_date}'
-          )
-          SELECT 
-            pr.name AS name,
-            COALESCE(SUM(pdt.quantity), 0) AS data,
-            m.month_year AS month
-          FROM months m
-          LEFT JOIN donation_ticket as dt ON DATE_FORMAT(dt.date, '%m/%Y') = m.month_year
-          LEFT JOIN provider as pr ON dt.provider_id = pr.id
-          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-          LEFT JOIN product as p ON pdt.product_id = p.id
-          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
-          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE dt.enabled = 'Y' OR dt.enabled IS NULL
-          ${query_from_date}
-          ${query_to_date}
-          ${query_locations}
-          ${query_providers}
-          ${query_product_types}
-          ${cabecera.role === 'client' ? 'AND cl.client_id = ?' : ''}
-          GROUP BY name, month
-          ORDER BY month ASC`,
-        [cabecera.client_id]
-      );
 
-      // Transform rows to the desired structure
-      const categories = [...new Set(rows.map(row => row.month))].sort((a, b) => {
-        const [monthA, yearA] = a.split('/').map(Number);
-        const [monthB, yearB] = b.split('/').map(Number);
-        return new Date(yearA, monthA - 1) - new Date(yearB, monthB - 1);
+      let query_from_date = '';
+      let query_to_date = '';
+      let query_locations = '';
+      let query_providers = '';
+      let query_product_types = '';
+      const params = [from_date, from_date, to_date];
+
+      if (from_date) {
+        query_from_date = 'AND dt.date >= ?';
+        params.push(from_date);
+      }
+      if (to_date) {
+        query_to_date = 'AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)';
+        params.push(to_date);
+      }
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.map(() => '?').join(',') + ')';
+        params.push(...locations);
+      }
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
+        params.push(...providers);
+      }
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.map(() => '?').join(',') + ')';
+        params.push(...product_types);
+      }
+      if (cabecera.role === 'client') {
+        params.push(cabecera.client_id);
+      }
+
+      const query = `
+        WITH RECURSIVE date_ranges AS (
+          SELECT DATE_FORMAT(?, '${dateFormatString}') AS period, ? AS date
+          UNION ALL
+          SELECT DATE_FORMAT(DATE_ADD(date, INTERVAL ${dateAddInterval}), '${dateFormatString}'), DATE_ADD(date, INTERVAL ${dateAddInterval})
+          FROM date_ranges
+          WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
+        )
+        SELECT 
+          pr.name AS name,
+          COALESCE(SUM(pdt.quantity), 0) AS data,
+          date_ranges.period AS period
+        FROM date_ranges
+        LEFT JOIN donation_ticket as dt ON DATE_FORMAT(dt.date, '${dateFormatString}') = date_ranges.period
+        LEFT JOIN provider as pr ON dt.provider_id = pr.id
+        LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        LEFT JOIN product as p ON pdt.product_id = p.id
+        LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+        ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+        WHERE dt.enabled = 'Y'
+        ${query_from_date}
+        ${query_to_date}
+        ${query_locations}
+        ${query_providers}
+        ${query_product_types}
+        ${cabecera.role === 'client' ? 'AND cl.client_id = ?' : ''}
+        GROUP BY name, period
+        ORDER BY period ASC
+      `;
+
+      const [rows] = await mysqlConnection.promise().query(query, params);
+
+      // Transformar las filas al formato deseado
+      const categories = [...new Set(rows.map(row => row.period))].sort((a, b) => {
+        if (interval === 'week') {
+          const [yearA, weekA] = a.split('-W').map(Number);
+          const [yearB, weekB] = b.split('-W').map(Number);
+          const dateA = new Date(yearA, 0, (weekA - 1) * 7);
+          const dateB = new Date(yearB, 0, (weekB - 1) * 7);
+          return dateA - dateB;
+        } else if (interval === 'quarter') {
+          const [yearA, quarterA] = a.split('-Q').map(Number);
+          const [yearB, quarterB] = b.split('-Q').map(Number);
+          const dateA = new Date(yearA, (quarterA - 1) * 3);
+          const dateB = new Date(yearB, (quarterB - 1) * 3);
+          return dateA - dateB;
+        } else {
+          return new Date(a) - new Date(b);
+        }
       });
 
       const providersMap = new Map();
 
-      // Initialize providersMap with all providers and all months with 0 data
+      // Inicializar providersMap con todos los proveedores y todos los periodos con datos en 0
       rows.forEach(row => {
         if (!providersMap.has(row.name)) {
           providersMap.set(row.name, Array(categories.length).fill(0));
         }
       });
 
-      // Fill providersMap with actual data
+      // Rellenar providersMap con datos reales
       rows.forEach(row => {
-        const index = categories.indexOf(row.month);
+        const index = categories.indexOf(row.period);
         providersMap.get(row.name)[index] = row.data;
       });
 
@@ -7401,6 +7772,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       };
 
       res.json(result);
+
     } catch (error) {
       console.log(error);
       res.status(500).send(error.message);
@@ -7409,6 +7781,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
     res.status(403).send('Forbidden');
   }
 });
+
 
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -7540,7 +7913,7 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         ${query_providers}
         ${query_product_types}
         GROUP BY l.id
-        ORDER BY name`,
+        ORDER BY total desc`,
         [cabecera.client_id]
       );
 
