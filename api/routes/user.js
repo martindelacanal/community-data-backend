@@ -5077,6 +5077,36 @@ router.post('/table/delivered/download-csv', verifyToken, async (req, res) => {
 }
 );
 
+router.get('/view/worker/username/:idWorker', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+    try {
+      const { idWorker } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT u.username
+          FROM user as u
+          WHERE u.id = ?`,
+        [idWorker]
+      );
+
+      if (rows.length > 0) {
+
+        res.json(rows[0].username);
+      } else {
+        res.status(404).json('worker no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
 router.post('/view/worker/table/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
@@ -7307,7 +7337,7 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const zipcode = filters.zipcode || null;
       const interval = filters.interval || 'month';
       const language = req.query.language || 'en';
-      
+
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
         from_date = new Date(filters.from_date).toISOString().slice(0, 10);
