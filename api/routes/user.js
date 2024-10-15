@@ -6040,13 +6040,20 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
 }
 );
 // TO-DO que hacer con las preguntas que no son multiple choice
+const moment = require('moment-timezone');
+
 router.post('/metrics/health/questions', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
       const filters = req.body;
-      let from_date = filters.from_date || '1970-01-01';
-      let to_date = filters.to_date || '2100-01-01';
+      const language = req.query.language || 'en';
+
+      // Manejo de fechas y zonas horarias
+      const timeZone = 'America/Los_Angeles';
+      const from_date = filters.from_date ? moment.tz(filters.from_date, timeZone).utc().format('YYYY-MM-DD HH:mm:ss') : '1970-01-01 00:00:00';
+      const to_date = filters.to_date ? moment.tz(filters.to_date, timeZone).utc().endOf('day').format('YYYY-MM-DD HH:mm:ss') : '2100-01-01 23:59:59';
+
       const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
@@ -6055,237 +6062,187 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       const zipcode = filters.zipcode || null;
       const register_form = filters.register_form || null;
 
-      // Convertir a formato ISO y obtener solo la fecha
-      if (filters.from_date) {
-        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
-      }
-      if (filters.to_date) {
-        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
-      }
+      // Calcular rangos de fechas de nacimiento para edades
+      const today = moment.tz(timeZone).startOf('day');
+      const minBirthDate = today.clone().subtract(max_age, 'years').format('YYYY-MM-DD');
+      const maxBirthDate = today.clone().subtract(min_age, 'years').format('YYYY-MM-DD');
 
-      const language = req.query.language || 'en';
+      // Construir cláusulas dinámicas para filtros
+      let whereClauses = [];
+      let params = [];
 
-      var query_from_date = '';
-      if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
-      }
-      var query_to_date = '';
-      if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
+      whereClauses.push(`u.role_id = 5`);
+
+      // Filtro de fechas
+      whereClauses.push(`(u.creation_date BETWEEN ? AND ? OR db.creation_date BETWEEN ? AND ?)`);
+      params.push(from_date, to_date, from_date, to_date);
+
+      // Filtro de ubicaciones
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
+        whereClauses.push(`(db.location_id IN (${locations.map(() => '?').join(',')}) OR u.location_id IN (${locations.map(() => '?').join(',')}))`);
+        params.push(...locations, ...locations);
       }
-      var query_genders = '';
+
+      // Filtro de género
       if (genders.length > 0) {
-        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+        whereClauses.push(`u.gender_id IN (${genders.map(() => '?').join(',')})`);
+        params.push(...genders);
       }
-      var query_ethnicities = '';
+
+      // Filtro de etnia
       if (ethnicities.length > 0) {
-        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+        whereClauses.push(`u.ethnicity_id IN (${ethnicities.map(() => '?').join(',')})`);
+        params.push(...ethnicities);
       }
-      var query_min_age = '';
-      if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+
+      // Filtro de edad
+      if (filters.min_age || filters.max_age) {
+        whereClauses.push(`u.date_of_birth BETWEEN ? AND ?`);
+        params.push(minBirthDate, maxBirthDate);
       }
-      var query_max_age = '';
-      if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+
+      // Filtro de código postal
+      if (zipcode) {
+        whereClauses.push(`u.zipcode = ?`);
+        params.push(zipcode);
       }
-      var query_zipcode = '';
-      if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + zipcode;
-      }
-      var query_register_form = '';
+
+      // Filtro de formulario de registro
       if (filters.register_form) {
-        // el campo register_form es un formulario donde los nombres de sus campos son el id de la pregunta y el contenido puede ser un numero o un array de numeros, si es un array de numeros es una pregunta multiple choice
-        // se debe filtrar por las preguntas que esten en el campo register_form y que tengan el contenido que se esta buscando
-        // si el contenido es un array de numeros o es solo un numero, se debe buscar que el campo answer_id de la tabla user_question_answer este en el array para esa pregunta
-        // se debe respetar que para las preguntas que no son multiple choice, el contenido debe ser exactamente igual al contenido de la respuesta
-        // para las preguntas que son multiple choice, se debe respetar que de cada pregunta donde se eligió una respuesta como filtro, se debe filtrar que el usuario tenga para todas esas preguntas al menos una de las respuestas elegidas en cada pregunta elegida en el filtro
         const conditions = [];
         for (const [question_id, content] of Object.entries(register_form)) {
           if (Array.isArray(content)) {
             if (content.length > 0) {
+              // Manejar arreglos no vacíos
               conditions.push(`u.id IN (
-                                      SELECT uq.user_id 
-                                      FROM user_question AS uq
-                                      INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-                                      WHERE uqa.answer_id IN (${content.join()}) AND uq.question_id = ${question_id}
-                                    )`);
+                  SELECT uq.user_id FROM user_question uq
+                  INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
+                  WHERE uq.question_id = ? AND uqa.answer_id IN (${content.map(() => '?').join(',')})
+                )`);
+              params.push(question_id, ...content);
             }
+            // Si el arreglo está vacío, no agregar ninguna condición
           } else if (content) {
+            // Manejar valores únicos no nulos/definidos
             conditions.push(`u.id IN (
-                                      SELECT uq.user_id 
-                                      FROM user_question AS uq
-                                      INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-                                      WHERE uqa.answer_id = ${content} AND uq.question_id = ${question_id}
-                                    )`);
+                SELECT uq.user_id FROM user_question uq
+                INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
+                WHERE uq.question_id = ? AND uqa.answer_id = ?
+              )`);
+            params.push(question_id, content);
           }
+          // Si content es falsy (e.g., null, undefined, vacío), no agregar ninguna condición
         }
         if (conditions.length > 0) {
-          query_register_form = `AND (${conditions.join(' AND ')})`;
+          whereClauses.push(conditions.join(' AND '));
         }
-      }
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+      }      
 
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT u.id AS user_id,
-                q.id AS question_id,
-                at.id AS answer_type_id,
-                ${language === 'en' ? 'q.name' : 'q.name_es'} AS question,
-                a.id AS answer_id,
-                ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer,
-                uq.answer_text AS answer_text,
-                uq.answer_number AS answer_number
+      // Filtro específico para clientes
+      if (cabecera.role === 'client') {
+        whereClauses.push(`cu.client_id = ?`);
+        params.push(cabecera.client_id);
+      }
+
+      // Construir la consulta SQL
+      const query = `
+        SELECT u.id AS user_id,
+               q.id AS question_id,
+               at.id AS answer_type_id,
+               ${language === 'en' ? 'q.name' : 'q.name_es'} AS question,
+               a.id AS answer_id,
+               ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer,
+               uq.answer_text AS answer_text,
+               uq.answer_number AS answer_number
         FROM user u
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        INNER JOIN question AS q ON q.enabled = 'Y' AND (q.answer_type_id = 3 OR q.answer_type_id = 4)
-        LEFT JOIN answer_type as at ON q.answer_type_id = at.id
-        LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
-        LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-        LEFT JOIN answer as a ON a.id = uqa.answer_id AND a.question_id = q.id
-        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 
-        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-             OR u.id IN (SELECT db3.receiving_user_id 
-                         FROM delivery_beneficiary db3 
-                         WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
-        ${cabecera.role === 'client' ? 'AND EXISTS (SELECT 1 FROM question_location ql INNER JOIN client_location cl ON ql.location_id = cl.location_id WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = \'Y\')' : ''}
-        ${query_locations}
-        ${query_genders}
-        ${query_ethnicities}
-        ${query_min_age}
-        ${query_max_age}
-        ${query_zipcode}
-        ${query_register_form}
-        ${cabecera.role === 'client' ? 'AND cu.client_id = ?' : ''}
+        INNER JOIN question q ON q.enabled = 'Y' AND q.answer_type_id IN (3, 4)
+        LEFT JOIN answer_type at ON q.answer_type_id = at.id
+        LEFT JOIN user_question uq ON u.id = uq.user_id AND uq.question_id = q.id
+        LEFT JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
+        LEFT JOIN answer a ON a.id = uqa.answer_id AND a.question_id = q.id
+        LEFT JOIN delivery_beneficiary db ON u.id = db.receiving_user_id
+        WHERE ${whereClauses.join(' AND ')}
         GROUP BY u.id, q.id, a.id
-        ORDER BY q.id, a.id, u.id`,
-        [from_date, toDate, from_date, toDate, cabecera.client_id]
-      );
+        ORDER BY q.id, a.id, u.id
+      `;
 
-      // crear array de objetos pregunta, cada pregunta tiene un array de objetos respuesta, donde cada respuesta tiene un nombre y la suma de usuarios que la eligieron
-      // iterar el array rows y agregar el campo question, ir sumando sus respuestas sobre esa question hasta que cambie de question_id, luego se pushea el objeto question al array questions
-      // estructura:
-      // questions = [
-      //   {
-      //     question_id: 1,
-      //     question: '¿Cuál es su género?',
-      //     answers: [
-      //       {
-      //         answer_id: 1,
-      //         answer: 'Masculino',
-      //         total: 5
-      //       }
-      //     ]
-      //   }
-      // ]
-      const questions = [];
-      let currentQuestion = null;
+      const [rows] = await mysqlConnection.promise().query(query, params);
+
+      // Procesamiento de resultados
+      const questionsMap = {};
 
       for (const row of rows) {
-        if (row.question_id !== (currentQuestion && currentQuestion.question_id)) {
-          const question = {
+        if (!questionsMap[row.question_id]) {
+          questionsMap[row.question_id] = {
             question_id: row.question_id,
             question: row.question,
-            answers: []
+            answers: {}
           };
-          questions.push(question);
-          currentQuestion = question;
         }
+
+        const question = questionsMap[row.question_id];
 
         if (row.answer_id) {
-          const answer = {
-            answer_id: row.answer_id,
-            answer: row.answer,
-            total: 1
-          };
-
-          const existingAnswer = currentQuestion.answers.find(a => a.answer_id === answer.answer_id);
-          if (existingAnswer) {
-            existingAnswer.total++;
-            answer.answer = null;
-          } else {
-            currentQuestion.answers.push(answer);
+          if (!question.answers[row.answer_id]) {
+            question.answers[row.answer_id] = {
+              answer_id: row.answer_id,
+              answer: row.answer,
+              total: 0
+            };
           }
+          question.answers[row.answer_id].total += 1;
         }
       }
-
 
       // Obtener todas las posibles respuestas para cada pregunta
       const [answerRows] = await mysqlConnection.promise().query(`
         SELECT q.id AS question_id, 
-              a.id AS answer_id, 
-              ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer
-              FROM question q
-              JOIN answer_type at ON q.answer_type_id = at.id
-              JOIN answer a ON q.id = a.question_id
-              WHERE q.enabled = 'Y' AND at.id = 3 OR at.id = 4
-              ORDER BY q.id, a.id
+               a.id AS answer_id, 
+               ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer
+        FROM question q
+        JOIN answer a ON q.id = a.question_id
+        WHERE q.enabled = 'Y' AND q.answer_type_id IN (3, 4)
+        ORDER BY q.id, a.id
       `);
 
-      const possibleAnswers = {};
+      // Asegurarse de que todas las respuestas posibles están incluidas
       for (const row of answerRows) {
-        if (!possibleAnswers[row.question_id]) {
-          possibleAnswers[row.question_id] = [];
+        if (!questionsMap[row.question_id]) {
+          questionsMap[row.question_id] = {
+            question_id: row.question_id,
+            question: row.question,
+            answers: {}
+          };
         }
-        possibleAnswers[row.question_id].push({
-          answer_id: row.answer_id,
-          answer: row.answer,
-          total: 0
-        });
-      }
 
-      // Contar cuántas veces se ha elegido cada respuesta
-      const answerCounts = {};
-      for (const row of rows) {
-        if (row.answer_id) {
-          if (!answerCounts[row.question_id]) {
-            answerCounts[row.question_id] = {};
-          }
-          if (!answerCounts[row.question_id][row.answer_id]) {
-            answerCounts[row.question_id][row.answer_id] = 0;
-          }
-          answerCounts[row.question_id][row.answer_id]++;
+        const question = questionsMap[row.question_id];
+
+        if (!question.answers[row.answer_id]) {
+          question.answers[row.answer_id] = {
+            answer_id: row.answer_id,
+            answer: row.answer,
+            total: 0
+          };
         }
       }
 
-      // Agregar las respuestas que no fueron elegidas
-      for (const question of questions) {
-        if (possibleAnswers[question.question_id]) {
-          for (const answer of possibleAnswers[question.question_id]) {
-            // Verificar si answerCounts[question.question_id] existe y, si no, crearlo
-            if (!answerCounts[question.question_id]) {
-              answerCounts[question.question_id] = {};
-            }
-            // Ahora puedes acceder a answerCounts[question.question_id][answer.answer_id] de manera segura
-            if (!answerCounts[question.question_id][answer.answer_id]) {
-              answerCounts[question.question_id][answer.answer_id] = 0;
-            }
-            answer.total = answerCounts[question.question_id][answer.answer_id];
-
-            // Verificar si la respuesta ya está en la lista de respuestas de la pregunta
-            const answerExists = question.answers.some(a => a.answer_id === answer.answer_id);
-
-            // Solo agregar la respuesta si no está ya en la lista de respuestas de la pregunta
-            if (!answerExists) {
-              question.answers.push(answer);
-            }
-          }
-        }
-      }
+      // Convertir el mapa en una lista
+      const questions = Object.values(questionsMap).map(question => ({
+        question_id: question.question_id,
+        question: question.question,
+        answers: Object.values(question.answers)
+      }));
 
       res.json(questions);
     } catch (err) {
-      console.log(err);
+      console.error(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Forbidden');
   }
-}
-);
+});
 
 router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
