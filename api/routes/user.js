@@ -7274,6 +7274,7 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
   }
 });
 
+
 router.post('/metrics/participant/register_history', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (
@@ -7294,6 +7295,11 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const zipcode = filters.zipcode || null;
       const interval = filters.interval || 'month';
       const language = req.query.language || 'en';
+
+      // Función auxiliar para obtener el último día del mes
+      const getLastDayOfMonth = (year, month) => {
+        return new Date(year, month + 1, 0).getDate();
+      };
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -7372,26 +7378,33 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       }
       to_date = toDateObj.toISOString().slice(0, 10);
 
-      // Definir formato de fecha e intervalo según el parámetro 'interval'
-      let dateFormatString;
+      // Definir expresiones de período dinámicas según el parámetro 'interval'
+      let periodExpressionUser;
+      let periodExpressionDelivery;
       switch (interval) {
         case 'day':
-          dateFormatString = '%Y-%m-%d';
+          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y-%m-%d')";
+          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y-%m-%d')";
           break;
         case 'week':
-          dateFormatString = '%x-W%v'; // Número de semana ISO
+          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%x-W%v')"; // Número de semana ISO
+          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%x-W%v')";
           break;
         case 'month':
-          dateFormatString = '%Y-%m';
+          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y-%m')";
+          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y-%m')";
           break;
         case 'quarter':
-          dateFormatString = '%Y-Q%q';
+          periodExpressionUser = "CONCAT(YEAR(u.creation_date), '-Q', QUARTER(u.creation_date))";
+          periodExpressionDelivery = "CONCAT(YEAR(db_current.creation_date), '-Q', QUARTER(db_current.creation_date))";
           break;
         case 'year':
-          dateFormatString = '%Y';
+          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y')";
+          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y')";
           break;
         default:
-          dateFormatString = '%Y-%m';
+          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y-%m')";
+          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y-%m')";
           break;
       }
 
@@ -7443,7 +7456,7 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       // Consulta para nuevos usuarios
       const newUsersQuery = `
         SELECT
-          DATE_FORMAT(u.creation_date, '${dateFormatString}') AS period,
+          ${periodExpressionUser} AS period,
           COUNT(DISTINCT u.id) AS new_users
         FROM user u
         ${query_join_client_user}
@@ -7458,26 +7471,26 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const newUsersParams = [fromDateUTC, toDateUTC, ...params];
 
       // Consulta para usuarios recurrentes
+      // **Lógica Generalizada para Todos los Intervalos**
+      // Un usuario es recurrente si tiene al menos una entrega en el período actual y al menos una entrega en un período anterior.
       const recurringUsersQuery = `
         SELECT
-          dp.period,
-          COUNT(DISTINCT dp.user_id) AS recurring_users
-        FROM (
-          SELECT
-            u.id AS user_id,
-            DATE_FORMAT(db.creation_date, '${dateFormatString}') AS period,
-            COUNT(*) OVER (PARTITION BY u.id ORDER BY DATE_FORMAT(db.creation_date, '${dateFormatString}')) AS cumulative_deliveries
-          FROM delivery_beneficiary db
-          JOIN user u ON u.id = db.receiving_user_id
+          ${periodExpressionDelivery} AS period,
+          COUNT(DISTINCT db_current.receiving_user_id) AS recurring_users
+        FROM delivery_beneficiary db_current
+        JOIN user u ON u.id = db_current.receiving_user_id
           ${query_join_client_user}
-          WHERE u.enabled = 'Y' AND u.role_id = 5
-            AND db.creation_date BETWEEN ? AND ?
-            ${query_conditions}
-            ${query_locations.replace(/u\./g, 'db.')}
-          GROUP BY u.id, period
-        ) dp
-        WHERE dp.cumulative_deliveries > 1
-        GROUP BY dp.period
+        WHERE u.enabled = 'Y' AND u.role_id = 5
+          AND db_current.creation_date BETWEEN ? AND ?
+          ${query_conditions.replace(/u\./g, 'db_current.')}
+          ${query_locations.replace(/u\./g, 'db_current.')}
+          AND EXISTS (
+            SELECT 1
+            FROM delivery_beneficiary db_previous
+            WHERE db_previous.receiving_user_id = db_current.receiving_user_id
+              AND db_previous.creation_date < db_current.creation_date
+          )
+        GROUP BY period
       `;
 
       // Parámetros para la consulta de usuarios recurrentes
@@ -7593,10 +7606,9 @@ function getWeekNumber(d) {
   return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
 }
 
-
 router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
+  if (['admin', 'client', 'director', 'auditor'].includes(cabecera.role)) {
     try {
       const filters = req.body;
       let from_date = filters.from_date || null;
@@ -7606,6 +7618,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       const product_types = filters.product_types || [];
       const interval = filters.interval || 'month';
 
+      // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
         from_date = new Date(filters.from_date).toISOString().slice(0, 10);
       }
@@ -7613,6 +7626,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         to_date = new Date(filters.to_date).toISOString().slice(0, 10);
       }
 
+      // Obtener rango de fechas si no se proporcionan
       if (!from_date || !to_date) {
         const [dateRange] = await mysqlConnection.promise().query(
           `SELECT 
@@ -7625,41 +7639,44 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         if (!to_date) to_date = dateRange[0].max_date.toISOString().slice(0, 10);
       }
 
-      let dateFormatString;
+      // Definir expresiones de período y intervalos de adición
       let dateAddInterval;
+      let periodExpression;
       switch (interval) {
         case 'day':
-          dateFormatString = '%Y-%m-%d';
           dateAddInterval = '1 DAY';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y-%m-%d')";
           break;
         case 'week':
-          dateFormatString = '%x-W%v';
           dateAddInterval = '1 WEEK';
+          periodExpression = "DATE_FORMAT(dt.date, '%x-W%v')";
           break;
         case 'month':
-          dateFormatString = '%Y-%m';
           dateAddInterval = '1 MONTH';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y-%m')";
           break;
         case 'quarter':
-          dateFormatString = '%Y-Q%q';
+          // Para trimestres, usamos CONCAT para incluir el número del trimestre
           dateAddInterval = '1 QUARTER';
+          periodExpression = "CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date))";
           break;
         case 'year':
-          dateFormatString = '%Y';
           dateAddInterval = '1 YEAR';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y')";
           break;
         default:
-          dateFormatString = '%Y-%m';
           dateAddInterval = '1 MONTH';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y-%m')";
           break;
       }
 
+      // Construir condiciones y parámetros de la consulta
       let query_from_date = '';
       let query_to_date = '';
       let query_locations = '';
       let query_providers = '';
       let query_product_types = '';
-      const params = [from_date, from_date, to_date];
+      const params = [];
 
       if (from_date) {
         query_from_date = 'AND dt.date >= ?';
@@ -7682,40 +7699,94 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         params.push(...product_types);
       }
       if (cabecera.role === 'client') {
+        query_product_types += ' AND cl.client_id = ?';
         params.push(cabecera.client_id);
       }
 
-      const query = `
-        WITH RECURSIVE date_ranges AS (
-          SELECT DATE_FORMAT(?, '${dateFormatString}') AS period, ? AS date
-          UNION ALL
-          SELECT DATE_FORMAT(DATE_ADD(date, INTERVAL ${dateAddInterval}), '${dateFormatString}'), DATE_ADD(date, INTERVAL ${dateAddInterval})
+      // Construir la consulta SQL con el CTE
+      let query;
+      let cteParams;
+      if (interval === 'quarter') {
+        // Para 'quarter', necesitamos cuatro parámetros en el CTE
+        cteParams = [from_date, from_date, from_date, to_date];
+        query = `
+          WITH RECURSIVE date_ranges AS (
+            SELECT 
+              CONCAT(YEAR(?), '-Q', QUARTER(?)) AS period, 
+              ? AS date
+            UNION ALL
+            SELECT 
+              CONCAT(YEAR(DATE_ADD(date, INTERVAL ${dateAddInterval})), '-Q', QUARTER(DATE_ADD(date, INTERVAL ${dateAddInterval}))) AS period,
+              DATE_ADD(date, INTERVAL ${dateAddInterval}) 
+            FROM date_ranges
+            WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
+          )
+          SELECT 
+            pr.name AS name,
+            COALESCE(SUM(pdt.quantity), 0) AS data,
+            date_ranges.period AS period
           FROM date_ranges
-          WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
-        )
-        SELECT 
-          pr.name AS name,
-          COALESCE(SUM(pdt.quantity), 0) AS data,
-          date_ranges.period AS period
-        FROM date_ranges
-        LEFT JOIN donation_ticket as dt ON DATE_FORMAT(dt.date, '${dateFormatString}') = date_ranges.period
-        LEFT JOIN provider as pr ON dt.provider_id = pr.id
-        LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-        LEFT JOIN product as p ON pdt.product_id = p.id
-        LEFT JOIN product_type as pt ON p.product_type_id = pt.id
-        ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-        WHERE dt.enabled = 'Y'
-        ${query_from_date}
-        ${query_to_date}
-        ${query_locations}
-        ${query_providers}
-        ${query_product_types}
-        ${cabecera.role === 'client' ? 'AND cl.client_id = ?' : ''}
-        GROUP BY name, period
-        ORDER BY period ASC
-      `;
+          LEFT JOIN donation_ticket as dt ON 
+            CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date)) = date_ranges.period
+          LEFT JOIN provider as pr ON dt.provider_id = pr.id
+          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          LEFT JOIN product as p ON pdt.product_id = p.id
+          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+          WHERE dt.enabled = 'Y'
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
+          GROUP BY name, period
+        `;
+      } else {
+        // Para otros intervalos, necesitamos tres parámetros en el CTE
+        cteParams = [from_date, from_date, to_date];
+        const formatString = interval === 'day' ? '%Y-%m-%d' :
+                             interval === 'week' ? '%x-W%v' :
+                             interval === 'month' ? '%Y-%m' :
+                             interval === 'year' ? '%Y' : '%Y-%m';
 
-      const [rows] = await mysqlConnection.promise().query(query, params);
+        query = `
+          WITH RECURSIVE date_ranges AS (
+            SELECT 
+              DATE_FORMAT(?, '${formatString}') AS period, 
+              ? AS date
+            UNION ALL
+            SELECT 
+              DATE_FORMAT(DATE_ADD(date, INTERVAL ${dateAddInterval}), '${formatString}') AS period,
+              DATE_ADD(date, INTERVAL ${dateAddInterval}) 
+            FROM date_ranges
+            WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
+          )
+          SELECT 
+            pr.name AS name,
+            COALESCE(SUM(pdt.quantity), 0) AS data,
+            date_ranges.period AS period
+          FROM date_ranges
+          LEFT JOIN donation_ticket as dt ON 
+            DATE_FORMAT(dt.date, '${formatString}') = date_ranges.period
+          LEFT JOIN provider as pr ON dt.provider_id = pr.id
+          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          LEFT JOIN product as p ON pdt.product_id = p.id
+          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+          WHERE dt.enabled = 'Y'
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
+          GROUP BY name, period
+        `;
+      }
+
+      // Combinar los parámetros del CTE con los demás parámetros
+      const finalParams = cteParams.concat(params);
+
+      const [rows] = await mysqlConnection.promise().query(query, finalParams);
 
       // Transformar las filas al formato deseado
       const categories = [...new Set(rows.map(row => row.period))].sort((a, b) => {
@@ -7748,7 +7819,9 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       // Rellenar providersMap con datos reales
       rows.forEach(row => {
         const index = categories.indexOf(row.period);
-        providersMap.get(row.name)[index] = row.data;
+        if (index !== -1) {
+          providersMap.get(row.name)[index] = row.data;
+        }
       });
 
       const series = Array.from(providersMap, ([name, data]) => ({ name, data }));
@@ -7768,6 +7841,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
     res.status(403).send('Forbidden');
   }
 });
+
 
 
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
