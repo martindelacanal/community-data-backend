@@ -306,6 +306,10 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
 
         let from_date = previousSaturday.format("YYYY-MM-DD");
         let to_date = lastSaturday.format("YYYY-MM-DD");
+
+        // Formatear las fechas para el mensaje
+        let formatted_from_date = previousSaturday.format("MM-DD-YYYY");
+        let formatted_to_date = lastSaturday.format("MM-DD-YYYY");
         // un cliente puede tener varios emails
         // recorrer los emails de un cliente, guardarlos en variable emails y enviar el correo
         const emails = [];
@@ -319,7 +323,7 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
         let date = today.format("MM-DD-YYYY");
 
         // add to message that it is a zip file and need to be unzipped with password
-        message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+        message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
 
         for (let i = 0; i < rows_emails.length; i++) {
             if (i === 0) {
@@ -327,7 +331,7 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
                 client_id.push(rows_emails[i].client_id);
                 subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
                 csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                if (csvRawData && csvRawData.split('\n').length > 1) {
+                if (csvRawData && csvRawData.split('\n').length > 2) { // tiene 2 saltos de linea el csv vacio
                     csvNewRegistrations = await getNewRegistrations(csvRawData);
                     csvSummary = await getSummary(from_date, to_date, csvRawData);
                 } else {
@@ -345,7 +349,7 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
                 client_id.push(rows_emails[i].client_id);
                 subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
                 csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                if (csvRawData && csvRawData.split('\n').length > 1) {
+                if (csvRawData && csvRawData.split('\n').length > 2) { // tiene 2 saltos de linea el csv vacio
                     csvNewRegistrations = await getNewRegistrations(csvRawData);
                     csvSummary = await getSummary(from_date, to_date, csvRawData);
                 } else {
