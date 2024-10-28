@@ -1375,9 +1375,18 @@ router.get('/new/client/:id', verifyToken, async (req, res) => {
         `,
         [id]
       );
+      const [rows_emails] = await mysqlConnection.promise().query(
+        `select email
+        from client_email
+        where client_id = ?
+        `,
+        [id]
+      );
+
       if (rows.length > 0) {
         // Convert location_ids from string to array of integers
         rows[0].location_ids = rows[0].location_ids ? rows[0].location_ids.split(',').map(Number) : [];
+        rows[0].emails_for_reporting = rows_emails;
         res.json(rows[0]);
       } else {
         res.status(404).json('Client not found');
@@ -1403,6 +1412,7 @@ router.post('/new/client', verifyToken, async (req, res) => {
       const address = formulario.address || null;
       const webpage = formulario.webpage || null;
       const location_ids = formulario.location_ids || [];
+      const emails_for_reporting = formulario.emails_for_reporting || [];
 
       const [rows] = await mysqlConnection.promise().query(
         'insert into client (name, short_name, email, phone, address, webpage) values(?,?,?,?,?,?)',
@@ -1416,6 +1426,14 @@ router.post('/new/client', verifyToken, async (req, res) => {
             await mysqlConnection.promise().query(
               'insert into client_location(client_id, location_id) values(?,?)',
               [client_id, location_ids[i]]
+            );
+          }
+        }
+        if (emails_for_reporting.length > 0) {
+          for (let i = 0; i < emails_for_reporting.length; i++) {
+            await mysqlConnection.promise().query(
+              'insert into client_email(client_id, email) values(?,?)',
+              [client_id, emails_for_reporting[i].email]
             );
           }
         }
@@ -1448,6 +1466,7 @@ router.put('/new/client/:id', verifyToken, async (req, res) => {
       const address = formulario.address || null;
       const webpage = formulario.webpage || null;
       const location_ids = formulario.location_ids || [];
+      const emails_for_reporting = formulario.emails_for_reporting || [];
 
       const [rows] = await mysqlConnection.promise().query(
         'update client set name = ?, short_name = ?, email = ?, phone = ?, address = ?, webpage = ? where id = ?',
@@ -1466,6 +1485,30 @@ router.put('/new/client/:id', verifyToken, async (req, res) => {
             await mysqlConnection.promise().query(
               'insert into client_location(client_id, location_id) values(?,?)',
               [id, location_ids[i]]
+            );
+          }
+        }
+        // get all emails for reporting
+        const [rows_emails] = await mysqlConnection.promise().query(
+          'select email from client_email where client_id = ?',
+          [id]
+        );
+        // compare emails for reporting and delete the ones that are not in the new list
+        for (let i = 0; i < rows_emails.length; i++) {
+          if (!emails_for_reporting.map(e => e.email).includes(rows_emails[i].email)) {
+            await mysqlConnection.promise().query(
+              'delete from client_email where client_id = ? and email = ?',
+              [id, rows_emails[i].email]
+            );
+          }
+        }
+        // insert new emails that don't exist in the database
+        for (let i = 0; i < emails_for_reporting.length; i++) {
+          // compare emails for reporting with rows_emails and insert the ones that are not in the database
+          if (!rows_emails.map(e => e.email).includes(emails_for_reporting[i].email)) {
+            await mysqlConnection.promise().query(
+              'insert into client_email(client_id, email) values(?,?)',
+              [id, emails_for_reporting[i].email]
             );
           }
         }
@@ -5681,7 +5724,7 @@ campos: id, community_city
 tabla: user
 campos: id, creation_date
 */
-router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, async (req, res) => {
+router.post('/table/delivered/beneficiary-summary/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
@@ -5891,6 +5934,8 @@ router.get('/table/delivered/beneficiary-summary/download-csv', verifyToken, asy
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -10060,6 +10105,13 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
         WHERE c.id = ?`,
         [idClient]
       );
+      const [rows_emails] = await mysqlConnection.promise().query(
+        `select email
+        from client_email
+        where client_id = ?
+        `,
+        [idClient]
+      );
 
       if (rows.length > 0) {
 
@@ -10085,6 +10137,8 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
         }
 
         client["locations"] = locations;
+
+        client["emails_for_reporting"] = rows_emails;
 
         res.json(client);
       } else {
