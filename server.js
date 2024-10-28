@@ -286,9 +286,9 @@ async function getSummary(from_date, to_date, csvRawData) {
     return csvData;
 }
 
-// schedule.scheduleJob('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
+schedule.scheduleJob('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
 // schedule.scheduleJob('* * * * *', async () => { // Se ejecuta cada minuto
-schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a medianoche
+// schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a medianoche
 
     const password = 'bienestarcommunity';
     const [rows_emails] = await mysqlConnection.promise().query(
