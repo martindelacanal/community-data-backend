@@ -4191,6 +4191,146 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
   }
 });
 
+router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  const filters = req.body;
+  let from_date = filters.from_date || '1970-01-01';
+  let to_date = filters.to_date || '2100-01-01';
+  const locations = filters.locations || [];
+  const providers = filters.providers || [];
+  const product_types = filters.product_types || [];
+
+  // Convertir a formato ISO y obtener solo la fecha
+  if (filters.from_date) {
+    from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+  }
+  if (filters.to_date) {
+    to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+  }
+
+  var query_from_date = '';
+  if (filters.from_date) {
+    query_from_date = 'AND dt.date >= \'' + from_date + '\'';
+  }
+  var query_to_date = '';
+  if (filters.to_date) {
+    query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+  }
+  var query_locations = '';
+  if (locations.length > 0) {
+    query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+  }
+  var query_providers = '';
+  if (providers.length > 0) {
+    query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+  }
+  var query_product_types = '';
+  if (product_types.length > 0) {
+    query_product_types = `AND dt.id IN (
+      SELECT pdt.donation_ticket_id
+      FROM product_donation_ticket as pdt
+      INNER JOIN product as p ON pdt.product_id = p.id
+      WHERE p.product_type_id IN (${product_types.join()})
+    )`;
+  }
+
+  const language = req.query.language || 'en';
+  const { tabSelected } = req.params;
+  let name = '';
+  var rows = [];
+  var series = [];
+  var isTabSelectedCorrect = false;
+
+  if (cabecera.role === 'admin' || cabecera.role === 'director') {
+    try {
+
+      switch (tabSelected) {
+        case 'pounds-filters':
+          name = 'Pounds delivered';
+          if (language === 'es') {
+            name = 'Libras entregadas';
+          }
+          [rows] = await mysqlConnection.promise().query(
+            `SELECT
+                SUM(dt.total_weight) AS value,
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+              FROM donation_ticket as dt
+              WHERE dt.enabled = 'Y'
+              ${query_from_date}
+              ${query_to_date}
+              ${query_locations}
+              ${query_providers}
+              ${query_product_types}
+              GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
+              ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`
+          );
+          isTabSelectedCorrect = true;
+          break;
+        default:
+          res.status(400).json('Bad request');
+          break;
+      }
+      console.log(rows);
+      if (isTabSelectedCorrect && rows.length > 0) {
+        series = rows.map(row => ({
+          value: row.value,
+          name: row.name
+        }));
+      }
+      res.json({ name, series });
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    if (cabecera.role === 'client') {
+      try {
+        switch (tabSelected) {
+          case 'pounds-filters':
+            name = 'Pounds delivered';
+            if (language === 'es') {
+              name = 'Libras entregadas';
+            }
+            [rows] = await mysqlConnection.promise().query(
+              `SELECT
+                  SUM(dt.total_weight) AS value,
+                  DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                FROM donation_ticket as dt
+                INNER JOIN client_location as cl ON dt.location_id = cl.location_id
+                WHERE cl.client_id = ? AND dt.enabled = 'Y'
+                ${query_from_date}
+                ${query_to_date}
+                ${query_locations}
+                ${query_providers}
+                ${query_product_types}
+                GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
+                ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`,
+              [cabecera.client_id]
+            );
+            isTabSelectedCorrect = true;
+            break;
+          default:
+            res.status(400).json('Bad request');
+            break;
+        }
+        if (isTabSelectedCorrect && rows.length > 0) {
+          series = rows.map(row => ({
+            value: row.value,
+            name: row.name
+          }));
+        }
+        res.json({ name, series });
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  }
+});
+
 router.post('/message', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
@@ -6293,7 +6433,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         if (conditions.length > 0) {
           whereClauses.push(conditions.join(' AND '));
         }
-      }      
+      }
 
       // Filtro específico para clientes
       if (cabecera.role === 'client') {
@@ -7902,9 +8042,9 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         // Para otros intervalos, necesitamos tres parámetros en el CTE
         cteParams = [from_date, from_date, to_date];
         const formatString = interval === 'day' ? '%Y-%m-%d' :
-                             interval === 'week' ? '%x-W%v' :
-                             interval === 'month' ? '%Y-%m' :
-                             interval === 'year' ? '%Y' : '%Y-%m';
+          interval === 'week' ? '%x-W%v' :
+            interval === 'month' ? '%Y-%m' :
+              interval === 'year' ? '%Y' : '%Y-%m';
 
         query = `
           WITH RECURSIVE date_ranges AS (
