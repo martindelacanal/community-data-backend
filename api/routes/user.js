@@ -7364,7 +7364,6 @@ router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
       let to_date = filters.to_date || '2100-01-01';
       from_date = from_date.split('T')[0];
       to_date = to_date.split('T')[0];
-      console.log("filters", filters);
       const locations = filters.locations || [];
       const workers = filters.workers || [];
 
@@ -7386,9 +7385,10 @@ router.post('/view/worker/scannedQR/:idUser', verifyToken, async (req, res) => {
       if (workers.length > 0) {
         query_workers = 'AND delivering_user_id IN (' + workers.join() + ')';
       } else {
-        query_workers = 'AND delivering_user_id = ' + idUser;
+        if (idUser != '0') {
+          query_workers = 'AND delivering_user_id = ' + idUser;
+        }
       }
-
       // Consulta para "New"
       const [newRows] = await mysqlConnection.promise().query(
         `SELECT 
@@ -7473,9 +7473,10 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
       if (workers.length > 0) {
         query_workers = 'AND delivering_user_id IN (' + workers.join() + ')';
       } else {
-        query_workers = 'AND delivering_user_id = ' + idUser;
+        if (idUser != '0') {
+          query_workers = 'AND delivering_user_id = ' + idUser;
+        }
       }
-
       // Consulta para "New" agrupada por día
       const [newRows] = await mysqlConnection.promise().query(
         `SELECT 
