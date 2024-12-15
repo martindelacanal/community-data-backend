@@ -6,6 +6,7 @@ const moment = require('moment-timezone');
 
 // Registrar el formato zip-encrypted
 archiver.registerFormat('zip-encrypted', archiverZipEncrypted);
+const { parse } = require('csv-parse/sync');
 
 // Configuración del transporte de nodemailer
 let transporter = nodemailer.createTransport({
@@ -16,7 +17,7 @@ let transporter = nodemailer.createTransport({
   }
 });
 
-async function createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSummary, password) {
+async function createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password) {
   return new Promise((resolve, reject) => {
     const archive = archiver.create('zip-encrypted', {
       zlib: { level: 9 },
@@ -31,19 +32,23 @@ async function createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSu
 
     archive.append(csvRawData, { name: 'raw-data.csv' });
     archive.append(csvNewRegistrations, { name: 'new-registrations-without-health-insurance.csv' });
+    archive.append(csvAllNewRegistrations, { name: 'new-registrations.csv' });
     archive.append(csvSummary, { name: 'summary.csv' });
     archive.finalize();
   });
 }
 
-async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, password, emails) {
+async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails) {
   return new Promise(async (resolve) => {
     try {
 
       // Crear el archivo ZIP protegido con contraseña en memoria
-      const zipContent = await createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSummary, password);
+      const zipContent = await createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password);
       // obtener fecha actual en formato mm/dd/yyyy y convertido de UTC a California
       let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
+
+      // Append formatted summary to the message
+      message += '\n\nSummary:\n';
 
       // Opciones del correo
       let mailOptions = {
@@ -51,6 +56,8 @@ async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegis
         to: emails.join(', '),
         subject: subject,
         text: message,
+        // If you want to send HTML content
+        html: message.replace(/\n/g, '<br>') + '<br>' + generateHtmlTable(csvSummary),
         attachments: [
           {
             filename: `community-data-${date}.zip`,
@@ -75,6 +82,32 @@ async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegis
       resolve({ error: error, status: 500 });
     }
   });
+}
+
+// Optional: Function to generate an HTML table from csvSummary
+function generateHtmlTable(csvSummary) {
+  const records = parse(csvSummary, {
+    columns: true,
+    skip_empty_lines: true,
+    delimiter: ';'
+  });
+
+  if (records.length === 0) {
+    return '';
+  }
+
+  let html = '<table border="1" cellspacing="0" cellpadding="5">';
+  html += '<tr>';
+  for (let key in records[0]) {
+    html += `<th>${key}</th>`;
+  }
+  html += '</tr><tr>';
+  for (let key in records[0]) {
+    html += `<td>${records[0][key]}</td>`;
+  }
+  html += '</tr></table>';
+
+  return html;
 }
 
 module.exports.sendEmailWithAttachment = sendEmailWithAttachment;

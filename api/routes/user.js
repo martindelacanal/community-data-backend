@@ -315,8 +315,6 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           // Formatear la fecha en el formato deseado (YYYY-MM-DD)
           date = fecha.toISOString().slice(0, 10);
         }
-        console.log("date: " + date);
-        console.log(formulario);
         if (!Number.isInteger(provider)) {
           const [rows] = await mysqlConnection.promise().query(
             'insert into provider(name) values(?)',
@@ -460,8 +458,6 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
             }
           }
 
-          console.log("files PARA ELIMINAR: ", filesParaEliminar);
-
           // Agregar todos los archivos a params.Delete.Objects
           for (let file of filesParaEliminar) {
             params.Delete.Objects.push({
@@ -520,8 +516,6 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
         // Formatear la fecha en el formato deseado (YYYY-MM-DD)
         date = fecha.toISOString().slice(0, 10);
       }
-      console.log("date: " + date);
-      console.log(formulario);
       if (!Number.isInteger(provider)) {
         const [rows_insert_provider] = await mysqlConnection.promise().query(
           'insert into provider(name) values(?)',
@@ -4271,7 +4265,6 @@ router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res
           res.status(400).json('Bad request');
           break;
       }
-      console.log(rows);
       if (isTabSelectedCorrect && rows.length > 0) {
         series = rows.map(row => ({
           value: row.value,

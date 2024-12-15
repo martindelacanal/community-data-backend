@@ -185,7 +185,7 @@ async function getRawData(from_date, to_date, client_id) {
     return csvData;
 }
 
-async function getNewRegistrations(csvRawData) {
+async function getNewRegistrations(csvRawData, from_date, to_date) {
     // Parsear el CSV recibido
     const records = parse(csvRawData, {
         columns: true,
@@ -197,9 +197,49 @@ async function getNewRegistrations(csvRawData) {
         return '';
     }
 
-    // Filtrar las filas según la condición especificada
+    // Convertir from_date y to_date a objetos de fecha
+    const fromDate = moment(from_date, "YYYY-MM-DD");
+    const toDate = moment(to_date, "YYYY-MM-DD");
+
+    // Filtrar las filas según registration_date dentro del rango
     const filteredRecords = records.filter(record => {
-        return record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '';
+        const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
+        return registrationDate.isBetween(fromDate, toDate, null, '[]'); // Inclusivo en ambos extremos
+    });
+
+    // Generar un nuevo CSV con las filas filtradas
+    const csvStringifier = createCsvStringifier({
+        header: Object.keys(records[0]).map(key => ({ id: key, title: key })),
+        fieldDelimiter: ';'
+    });
+
+    let csvData = csvStringifier.getHeaderString();
+    csvData += csvStringifier.stringifyRecords(filteredRecords);
+
+    return csvData;
+}
+
+async function getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date) {
+    // Parsear el CSV recibido
+    const records = parse(csvRawData, {
+        columns: true,
+        skip_empty_lines: true,
+        delimiter: ';'
+    });
+
+    if (records.length === 0) {
+        return '';
+    }
+
+    // Convertir from_date y to_date a objetos de fecha
+    const fromDate = moment(from_date, "YYYY-MM-DD");
+    const toDate = moment(to_date, "YYYY-MM-DD");
+
+    // Filtrar las filas sin seguro de salud y con registration_date dentro del rango
+    const filteredRecords = records.filter(record => {
+        const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
+        return registrationDate.isBetween(fromDate, toDate, null, '[]') &&
+            (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '');
     });
 
     // Generar un nuevo CSV con las filas filtradas
@@ -316,6 +356,7 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
         const client_id = [];
         var csvRawData = null;
         var csvNewRegistrations = null;
+        var csvAllNewRegistrations = null;
         var csvSummary = null;
         var subject = '';
         var message = '';
@@ -332,7 +373,8 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
                 subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
                 csvRawData = await getRawData(from_date, to_date, client_id[0]);
                 if (csvRawData && csvRawData.split('\n').length > 2) { // tiene 2 saltos de linea el csv vacio
-                    csvNewRegistrations = await getNewRegistrations(csvRawData);
+                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
+                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
                     csvSummary = await getSummary(from_date, to_date, csvRawData);
                 } else {
                     csvRawData = null;
@@ -341,7 +383,7 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
                 emails.push(rows_emails[i].email);
             } else {
                 if (csvRawData) {
-                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, password, emails);
+                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
                 }
                 emails.length = 0;
                 emails.push(rows_emails[i].email);
@@ -350,7 +392,8 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
                 subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
                 csvRawData = await getRawData(from_date, to_date, client_id[0]);
                 if (csvRawData && csvRawData.split('\n').length > 2) { // tiene 2 saltos de linea el csv vacio
-                    csvNewRegistrations = await getNewRegistrations(csvRawData);
+                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
+                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
                     csvSummary = await getSummary(from_date, to_date, csvRawData);
                 } else {
                     csvRawData = null;
@@ -358,7 +401,7 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
             }
         }
         if (csvRawData) {
-            await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, password, emails);
+            await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
         }
     }
 });
