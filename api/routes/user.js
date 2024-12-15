@@ -4007,6 +4007,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
       var rows = [];
       var series = [];
       var isTabSelectedCorrect = false;
+
       switch (tabSelected) {
         case 'pounds':
           name = 'Pounds delivered';
@@ -4016,11 +4017,11 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           [rows] = await mysqlConnection.promise().query(
             `SELECT
                 SUM(total_weight) AS value,
-                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                DATE_FORMAT(date, '%m/%Y') AS name
               FROM donation_ticket
               WHERE enabled = 'Y'
-              GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
+              GROUP BY YEAR(date), MONTH(date)
+              ORDER BY date`
           );
           isTabSelectedCorrect = true;
           break;
@@ -4032,7 +4033,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           [rows] = await mysqlConnection.promise().query(
             `SELECT
                 COUNT(DISTINCT DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), location_id) AS value,
-                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
               FROM delivery_beneficiary
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
@@ -4047,7 +4048,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           [rows] = await mysqlConnection.promise().query(
             `SELECT
                 COUNT(DISTINCT DAY(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))) AS value,
-                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
               FROM delivery_beneficiary
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
               ORDER BY CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')`
@@ -4062,7 +4063,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           [rows] = await mysqlConnection.promise().query(
             `SELECT
                 COUNT(DISTINCT user.id) AS value,
-                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
               FROM user
               WHERE user.role_id = 5
               GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
@@ -4103,7 +4104,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             [rows] = await mysqlConnection.promise().query(
               `SELECT
                   SUM(dt.total_weight) AS value,
-                  DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                  DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
                 FROM donation_ticket as dt
                 INNER JOIN client_location as cl ON dt.location_id = cl.location_id
                 WHERE cl.client_id = ? AND dt.enabled = 'Y'
@@ -4121,7 +4122,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             [rows] = await mysqlConnection.promise().query(
               `SELECT
                   COUNT(DISTINCT DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), location_id) AS value,
-                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
                 FROM delivery_beneficiary
                 WHERE client_id = ?
                 GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
@@ -4138,7 +4139,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             [rows] = await mysqlConnection.promise().query(
               `SELECT
                   COUNT(DISTINCT DAY(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))) AS value,
-                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
                 FROM delivery_beneficiary
                 WHERE client_id = ?
                 GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
@@ -4155,7 +4156,7 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             [rows] = await mysqlConnection.promise().query(
               `SELECT
                   COUNT(DISTINCT delivery_beneficiary.receiving_user_id) AS value,
-                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
+                  DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
                 FROM delivery_beneficiary
                 WHERE client_id = ?
                 GROUP BY YEAR(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'))
@@ -4185,17 +4186,83 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
   }
 });
 
+function formatPeriod(period, interval) {
+  switch (interval) {
+    case 'day':
+      // period viene como 'YYYY-MM-DD'
+      // Convertir a mm/dd/yyyy
+      {
+        const [year, month, day] = period.split('-');
+        return `${month}/${day}/${year}`;
+      }
+
+    case 'month':
+      // period viene como 'YYYY-MM'
+      // Convertir a mm/yyyy
+      {
+        const [year, month] = period.split('-');
+        return `${month}/${year}`;
+      }
+
+    case 'quarter':
+      // period viene como 'YYYY-QX'
+      // Convertir a QX/YYYY
+      // Ej: "2024-Q1" -> "Q1/2024"
+      {
+        const [yearQuarter, q] = period.split('-Q');
+        return `Q${q}/${yearQuarter}`;
+      }
+
+    case 'year':
+      // period viene como 'YYYY'
+      // Se queda igual 'YYYY'
+      return period;
+
+    case 'week':
+      // period viene como 'YYYY-Wxx'
+      // Debemos calcular el inicio de la semana. La semana ISO empieza el lunes.
+      // year = YYYY, week = Wxx (xx = número de semana ISO)
+      {
+        const [yearPart, weekPart] = period.split('-W');
+        const year = parseInt(yearPart, 10);
+        const week = parseInt(weekPart, 10);
+        // Calcular fecha del lunes de esa semana ISO
+        // La semana ISO 1 es la que contiene el primer jueves de enero.
+        // Para simplificar, usaremos la lógica existente: se creará una fecha a partir de year y (week-1)*7 días.
+        const firstMonday = new Date(year, 0, (week - 1) * 7 + 1);
+        // Ajuste al lunes: ISO week asume que el primer día es lunes. 
+        // Según ISO, el jueves de la primera semana del año es entre 1 y 7 de enero.
+        // Para mayor exactitud, calcularemos el lunes usando una técnica más elaborada:
+        // Sin embargo, el código original que ordenaba semanas usaba algo similar. 
+        // Tomaremos la misma aproximación usada en el código original de sort:
+        // original: const dateA = new Date(year, 0, (weekA - 1) * 7);
+        // Eso colocaría el domingo de la primera semana. Para lunes sumamos 1 día:
+        // Hecho arriba ( +1 ).
+
+        const mm = String(firstMonday.getMonth() + 1).padStart(2, '0');
+        const dd = String(firstMonday.getDate()).padStart(2, '0');
+        const yyyy = firstMonday.getFullYear();
+        return `${mm}/${dd}/${yyyy}`;
+      }
+
+    default:
+      return period;
+  }
+}
+
+
 router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
   const filters = req.body;
-  let from_date = filters.from_date || '1970-01-01';
-  let to_date = filters.to_date || '2100-01-01';
+  let from_date = filters.from_date || null;
+  let to_date = filters.to_date || null;
   const locations = filters.locations || [];
   const providers = filters.providers || [];
   const product_types = filters.product_types || [];
+  const interval = filters.interval || 'month';
 
-  // Convertir a formato ISO y obtener solo la fecha
+  // Convertir a formato ISO (fecha sin hora)
   if (filters.from_date) {
     from_date = new Date(filters.from_date).toISOString().slice(0, 10);
   }
@@ -4203,126 +4270,207 @@ router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res
     to_date = new Date(filters.to_date).toISOString().slice(0, 10);
   }
 
-  var query_from_date = '';
-  if (filters.from_date) {
-    query_from_date = 'AND dt.date >= \'' + from_date + '\'';
+  // Obtener rango de fechas si no se proporcionan
+  if (!from_date || !to_date) {
+    const [dateRange] = await mysqlConnection.promise().query(
+      `SELECT 
+        MIN(date) AS min_date, 
+        MAX(date) AS max_date 
+      FROM donation_ticket 
+      WHERE enabled = 'Y'`
+    );
+    if (!from_date) from_date = dateRange[0].min_date.toISOString().slice(0, 10);
+    if (!to_date) to_date = dateRange[0].max_date.toISOString().slice(0, 10);
   }
-  var query_to_date = '';
-  if (filters.to_date) {
-    query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+
+  // Definir expresiones de período y intervalos de adición
+  let dateAddInterval;
+  let formatString;
+  switch (interval) {
+    case 'day':
+      dateAddInterval = '1 DAY';
+      formatString = '%Y-%m-%d';
+      break;
+    case 'week':
+      dateAddInterval = '1 WEEK';
+      formatString = '%x-W%v';
+      break;
+    case 'month':
+      dateAddInterval = '1 MONTH';
+      formatString = '%Y-%m';
+      break;
+    case 'quarter':
+      // Para trimestres, usaremos un formato especial con YEAR- Q
+      dateAddInterval = '1 QUARTER';
+      // Notar: La generación del período para quarters se hará en el CTE
+      break;
+    case 'year':
+      dateAddInterval = '1 YEAR';
+      formatString = '%Y';
+      break;
+    default:
+      dateAddInterval = '1 MONTH';
+      formatString = '%Y-%m';
+      break;
   }
-  var query_locations = '';
+
+  // Construir condiciones dinámicamente
+  let query_from_date = '';
+  let query_to_date = '';
+  let query_locations = '';
+  let query_providers = '';
+  let query_product_types = '';
+  const params = [];
+
+  if (from_date) {
+    query_from_date = 'AND dt.date >= ?';
+    params.push(from_date);
+  }
+  if (to_date) {
+    query_to_date = 'AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)';
+    params.push(to_date);
+  }
   if (locations.length > 0) {
-    query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+    query_locations = 'AND dt.location_id IN (' + locations.map(() => '?').join(',') + ')';
+    params.push(...locations);
   }
-  var query_providers = '';
   if (providers.length > 0) {
-    query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+    query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
+    params.push(...providers);
   }
-  var query_product_types = '';
   if (product_types.length > 0) {
-    query_product_types = `AND dt.id IN (
-      SELECT pdt.donation_ticket_id
-      FROM product_donation_ticket as pdt
-      INNER JOIN product as p ON pdt.product_id = p.id
-      WHERE p.product_type_id IN (${product_types.join()})
-    )`;
+    // Se filtra por product_types a través de product_donation_ticket y product
+    // Al igual que en el código original
+    query_product_types = `
+      AND dt.id IN (
+        SELECT pdt.donation_ticket_id
+        FROM product_donation_ticket as pdt
+        INNER JOIN product as p ON pdt.product_id = p.id
+        WHERE p.product_type_id IN (${product_types.map(() => '?').join(',')})
+      )`;
+    params.push(...product_types);
+  }
+
+  if (cabecera.role === 'client') {
+    // Filtrado adicional para client
+    query_product_types += `
+      AND dt.location_id IN (
+        SELECT location_id 
+        FROM client_location 
+        WHERE client_id = ?
+      )
+    `;
+    params.push(cabecera.client_id);
   }
 
   const language = req.query.language || 'en';
   const { tabSelected } = req.params;
   let name = '';
-  var rows = [];
-  var series = [];
-  var isTabSelectedCorrect = false;
+  let rows = [];
+  let series = [];
+  let isTabSelectedCorrect = false;
 
-  if (cabecera.role === 'admin' || cabecera.role === 'director') {
+  if ((cabecera.role === 'admin' || cabecera.role === 'director') || (cabecera.role === 'client')) {
     try {
-
       switch (tabSelected) {
         case 'pounds-filters':
-          name = 'Pounds delivered';
-          if (language === 'es') {
-            name = 'Libras entregadas';
-          }
-          [rows] = await mysqlConnection.promise().query(
-            `SELECT
-                SUM(dt.total_weight) AS value,
-                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
-              FROM donation_ticket as dt
+          name = (language === 'es') ? 'Libras entregadas' : 'Pounds delivered';
+
+          // Construimos el CTE según el intervalo
+          let query;
+          let cteParams;
+          if (interval === 'quarter') {
+            // Para quarters necesitamos un CTE similar al del primer endpoint
+            cteParams = [from_date, from_date, from_date, to_date];
+            query = `
+              WITH RECURSIVE date_ranges AS (
+                SELECT 
+                  CONCAT(YEAR(?), '-Q', QUARTER(?)) AS period, 
+                  ? AS date
+                UNION ALL
+                SELECT 
+                  CONCAT(YEAR(DATE_ADD(date, INTERVAL ${dateAddInterval})), '-Q', QUARTER(DATE_ADD(date, INTERVAL ${dateAddInterval}))) AS period,
+                  DATE_ADD(date, INTERVAL ${dateAddInterval}) 
+                FROM date_ranges
+                WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
+              )
+              SELECT 
+                COALESCE(SUM(dt.total_weight), 0) AS value,
+                date_ranges.period AS name
+              FROM date_ranges
+              LEFT JOIN donation_ticket as dt ON 
+                CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date)) = date_ranges.period
               WHERE dt.enabled = 'Y'
               ${query_from_date}
               ${query_to_date}
               ${query_locations}
               ${query_providers}
               ${query_product_types}
-              GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
-              ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`
-          );
+              GROUP BY date_ranges.period
+              ORDER BY date_ranges.period
+            `;
+          } else {
+            // Para day, week, month, year se usa el formatString
+            cteParams = [from_date, from_date, to_date];
+            query = `
+              WITH RECURSIVE date_ranges AS (
+                SELECT 
+                  DATE_FORMAT(?, '${formatString}') AS period, 
+                  ? AS date
+                UNION ALL
+                SELECT 
+                  DATE_FORMAT(DATE_ADD(date, INTERVAL ${dateAddInterval}), '${formatString}') AS period,
+                  DATE_ADD(date, INTERVAL ${dateAddInterval}) 
+                FROM date_ranges
+                WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
+              )
+              SELECT 
+                COALESCE(SUM(dt.total_weight), 0) AS value,
+                date_ranges.period AS name
+              FROM date_ranges
+              LEFT JOIN donation_ticket as dt ON 
+                DATE_FORMAT(dt.date, '${formatString}') = date_ranges.period
+              WHERE dt.enabled = 'Y'
+              ${query_from_date}
+              ${query_to_date}
+              ${query_locations}
+              ${query_providers}
+              ${query_product_types}
+              GROUP BY date_ranges.period
+              ORDER BY date_ranges.period
+            `;
+          }
+
+          const finalParams = cteParams.concat(params);
+          [rows] = await mysqlConnection.promise().query(query, finalParams);
           isTabSelectedCorrect = true;
           break;
+
         default:
-          res.status(400).json('Bad request');
-          break;
+          return res.status(400).json('Bad request');
       }
+
       if (isTabSelectedCorrect && rows.length > 0) {
+        // Mapeamos las filas a la misma estructura que antes
         series = rows.map(row => ({
           value: row.value,
-          name: row.name
+          name: formatPeriod(row.name, interval) // formatear aquí directamente
         }));
       }
+
       res.json({ name, series });
+
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+
   } else {
-    if (cabecera.role === 'client') {
-      try {
-        switch (tabSelected) {
-          case 'pounds-filters':
-            name = 'Pounds delivered';
-            if (language === 'es') {
-              name = 'Libras entregadas';
-            }
-            [rows] = await mysqlConnection.promise().query(
-              `SELECT
-                  SUM(dt.total_weight) AS value,
-                  DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%dT%TZ') AS name
-                FROM donation_ticket as dt
-                INNER JOIN client_location as cl ON dt.location_id = cl.location_id
-                WHERE cl.client_id = ? AND dt.enabled = 'Y'
-                ${query_from_date}
-                ${query_to_date}
-                ${query_locations}
-                ${query_providers}
-                ${query_product_types}
-                GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
-                ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`,
-              [cabecera.client_id]
-            );
-            isTabSelectedCorrect = true;
-            break;
-          default:
-            res.status(400).json('Bad request');
-            break;
-        }
-        if (isTabSelectedCorrect && rows.length > 0) {
-          series = rows.map(row => ({
-            value: row.value,
-            name: row.name
-          }));
-        }
-        res.json({ name, series });
-      } catch (err) {
-        console.log(err);
-        res.status(500).json('Internal server error');
-      }
-    } else {
-      res.status(401).json('Unauthorized');
-    }
+    // Si el rol no es admin/director/cliente
+    res.status(401).json('Unauthorized');
   }
 });
+
 
 router.post('/message', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -7824,6 +7972,9 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         recurringUsersData.push(data.recurring_users);
       });
 
+      // Aquí formateamos las categorías
+      const formattedCategories = categories.map(c => formatPeriod(c, interval));
+
       const series = [
         { name: language === 'en' ? 'New' : 'Nuevos', data: newUsersData },
         { name: language === 'en' ? 'Recurring' : 'Recurrentes', data: recurringUsersData },
@@ -7831,7 +7982,7 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
 
       const result = {
         series,
-        categories,
+        categories: formattedCategories // usar las categorías formateadas
       };
 
       res.json(result);
@@ -8098,6 +8249,9 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         }
       });
 
+      // Después del sort, formatear las categorías
+      const formattedCategories = categories.map(c => formatPeriod(c, interval));
+
       const providersMap = new Map();
 
       // Inicializar providersMap con todos los proveedores y todos los periodos con datos en 0
@@ -8119,7 +8273,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
 
       const result = {
         series,
-        categories
+        categories: formattedCategories // usar las categorías formateadas
       };
 
       res.json(result);
@@ -8132,8 +8286,6 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
     res.status(403).send('Forbidden');
   }
 });
-
-
 
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
