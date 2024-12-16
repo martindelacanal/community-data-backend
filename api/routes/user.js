@@ -1988,6 +1988,23 @@ router.get('/locations', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/delivered-by', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        'select id, name from delivered_by where enabled = "Y" order by name'
+      );
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/register/locations', async (req, res) => {
 
   try {
@@ -6375,7 +6392,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 p.name as provider,
                 loc.community_city as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
-                dt.delivered_by,
+                db.name as delivered_by,
                 as1.name as audit_status,
                 u.id as created_by_id,
                 u.username as created_by_username,
@@ -6386,6 +6403,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 pt.name as product_type,
                 pdt.quantity as quantity
         FROM donation_ticket as dt
+        LEFT JOIN delivered_by as db ON dt.delivered_by = db.id
         LEFT JOIN provider as p ON dt.provider_id = p.id
         LEFT JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         LEFT JOIN location as loc ON dt.location_id = loc.id
@@ -9008,7 +9026,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      queryBuscar = ` AND (dt.id like '${buscar}' or dt.donation_id like '${buscar}' or dt.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(dt.date, '%m/%d/%Y') like '${buscar}' or dt.delivered_by like '${buscar}' or DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = ` AND (dt.id like '${buscar}' or dt.donation_id like '${buscar}' or dt.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(dt.date, '%m/%d/%Y') like '${buscar}' or db.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
 
     try {
@@ -9019,11 +9037,12 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       provider.name as provider,
       location.community_city as location,
       DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
-      dt.delivered_by,
+      db.name as delivered_by,
       ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
       COUNT(DISTINCT pdt.product_id) AS products,
       DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket as dt
+      INNER JOIN delivered_by as db ON dt.delivered_by = db.id
       INNER JOIN provider ON dt.provider_id = provider.id
       INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
       INNER JOIN location ON dt.location_id = location.id
@@ -10870,7 +10889,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 p.name as provider,
                 loc.community_city as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
-                dt.delivered_by,
+                db.name as delivered_by,
                 ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
                 u.id as created_by_id,
                 u.username as created_by_username,
@@ -10879,6 +10898,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 product.name as product,
                 pdt.quantity as quantity
         FROM donation_ticket as dt
+        INNER JOIN delivered_by as db ON dt.delivered_by = db.id
         INNER JOIN provider as p ON dt.provider_id = p.id
         INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         INNER JOIN location as loc ON dt.location_id = loc.id
