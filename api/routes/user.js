@@ -2036,6 +2036,23 @@ router.get('/providers', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/stocker-upload', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        'select DISTINCT u.id, u.username as name from user as u inner join stocker_log as sl on u.id = sl.user_id where sl.operation_id = 5 order by u.username',
+      );
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/products', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
@@ -6359,6 +6376,8 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
+      const delivered_by = filters.delivered_by || [];
+      const stocker_upload = filters.stocker_upload || [];
       const language = req.query.language || 'en';
 
       // Convertir a formato ISO y obtener solo la fecha
@@ -6384,6 +6403,15 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       if (providers.length > 0) {
         query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
       }
+      var query_delivered_by = '';
+      if (delivered_by.length > 0) {
+        query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.join() + ')';
+      }
+      var query_stocker_upload = '';
+      if (stocker_upload.length > 0) {
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      }
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT dt.id,
                 dt.donation_id,
@@ -6403,6 +6431,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 pt.name as product_type,
                 pdt.quantity as quantity
         FROM donation_ticket as dt
+        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         LEFT JOIN delivered_by as db ON dt.delivered_by = db.id
         LEFT JOIN provider as p ON dt.provider_id = p.id
         LEFT JOIN audit_status as as1 ON dt.audit_status_id = as1.id
@@ -6418,6 +6447,8 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ${query_to_date}
         ${query_locations}
         ${query_providers}
+        ${query_delivered_by}
+        ${query_stocker_upload}
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         ORDER BY dt.date, dt.id`,
         [from_date, to_date, cabecera.client_id]
@@ -8978,6 +9009,8 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     let to_date = filters.to_date || '2100-01-01';
     const locations = filters.locations || [];
     const providers = filters.providers || [];
+    const delivered_by = filters.delivered_by || [];
+    const stocker_upload = filters.stocker_upload || [];
     const language = req.query.language || 'en';
 
     // Convertir a formato ISO y obtener solo la fecha
@@ -9002,6 +9035,14 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     var query_providers = '';
     if (providers.length > 0) {
       query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+    }
+    var query_delivered_by = '';
+    if (delivered_by.length > 0) {
+      query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.join() + ')';
+    }
+    var query_stocker_upload = '';
+    if (stocker_upload.length > 0) {
+      query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
     }
 
     let buscar = req.query.search;
@@ -9042,6 +9083,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       COUNT(DISTINCT pdt.product_id) AS products,
       DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket as dt
+      INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
       INNER JOIN delivered_by as db ON dt.delivered_by = db.id
       INNER JOIN provider ON dt.provider_id = provider.id
       INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
@@ -9056,6 +9098,8 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       ${query_to_date}
       ${query_locations}
       ${query_providers}
+      ${query_delivered_by}
+      ${query_stocker_upload}
       GROUP BY dt.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
@@ -9067,6 +9111,8 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         const [countRows] = await mysqlConnection.promise().query(`
         SELECT COUNT(DISTINCT dt.id) as count
         FROM donation_ticket as dt
+        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+        INNER JOIN delivered_by as db ON dt.delivered_by = db.id
         INNER JOIN provider ON dt.provider_id = provider.id
         INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         INNER JOIN location ON dt.location_id = location.id
@@ -9080,6 +9126,8 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         ${query_to_date}
         ${query_locations}
         ${query_providers}
+        ${query_delivered_by}
+        ${query_stocker_upload}
       `);
 
         const numOfResults = countRows[0].count;
