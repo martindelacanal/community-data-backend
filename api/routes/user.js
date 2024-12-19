@@ -1095,6 +1095,88 @@ router.put('/new/product-type/:id', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/new/delivered-by/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name
+        from delivered_by as db
+        where db.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Delivered by not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/delivered-by', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into delivered_by (name) values(?)',
+        [name]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Delivered by created successfully');
+      } else {
+        res.status(500).json('Could not create delivered by');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/delivered-by/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update delivered_by set name = ? where id = ?',
+        [name, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Delivered by updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update delivered by');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/new/gender/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -2711,6 +2793,30 @@ router.get('/product-type/exists/search', verifyToken, async (req, res) => {
     if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
       if (name) {
         const [rows] = await mysqlConnection.promise().query('select name from product_type where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/delivered-by/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const name = req.query.name || null;
+  try {
+    if (cabecera.role === 'admin') {
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from delivered_by where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
         if (rows.length > 0) {
           res.json(true);
         } else {
@@ -5778,6 +5884,75 @@ router.post('/table/gender/download-csv', verifyToken, async (req, res) => {
       csvData += csvStringifier.stringifyRecords(rows);
 
       res.setHeader('Content-disposition', 'attachment; filename=genders-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
+router.post('/table/delivered-by/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT db.id,
+                db.name,
+                db.enabled,
+        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(db.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(db.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM delivered_by as db
+        WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ORDER BY db.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'enabled', title: 'Enabled' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=delivered-by-table.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -9633,6 +9808,97 @@ router.post('/table/worker', verifyToken, async (req, res) => {
   }
 });
 
+router.post('/table/delivered-by', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+
+    try {
+      const query = `
+      SELECT
+        id,
+        name,
+        enabled,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM delivered_by as db
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM delivered_by as db
+          WHERE 1=1 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
 router.post('/table/gender', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -10798,6 +11064,63 @@ router.get('/view/product-type/:idProductType', verifyToken, async (req, res) =>
         res.json(product_type);
       } else {
         res.status(404).json('Product type no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
+router.get('/view/delivered-by/:idDeliveredBy', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idDeliveredBy } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT db.id,
+          db.name,
+          DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(db.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          t.id as ticket_id,
+          t.donation_id,
+          DATE_FORMAT(t.date, '%m/%d/%Y') as date,
+          DATE_FORMAT(CONVERT_TZ(t.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS ticket_creation_date
+        FROM delivered_by as db
+        LEFT JOIN donation_ticket as t ON db.id = t.delivered_by
+        WHERE db.id = ?
+        ORDER BY t.date DESC`,
+        [idDeliveredBy]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with delivered by data and field 'tickets' with array of tickets
+        var delivered_by = {};
+        var tickets = [];
+
+        delivered_by["id"] = rows[0].id;
+        delivered_by["name"] = rows[0].name;
+        delivered_by["name_es"] = rows[0].name_es;
+        delivered_by["creation_date"] = rows[0].creation_date;
+        delivered_by["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].ticket_id) {
+            tickets.push({ ticket_id: rows[i].ticket_id, donation_id: rows[i].donation_id, date: rows[i].date, creation_date: rows[i].ticket_creation_date });
+          }
+        }
+
+        delivered_by["tickets"] = tickets;
+
+        res.json(delivered_by);
+      } else {
+        res.status(404).json('Delivered by no encontrado');
       }
 
     } catch (err) {
