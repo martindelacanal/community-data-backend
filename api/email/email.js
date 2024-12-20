@@ -110,4 +110,50 @@ function generateHtmlTable(csvSummary) {
   return html;
 }
 
+async function sendTicketEmail(formData, products, images, emails) {
+  try {
+    // Construct the email message with form data
+    let message = '';
+    for (let key in formData) {
+      message += `${key}: ${formData[key]}\n`;
+    }
+
+    // Generate HTML table for products
+    let productTable = '<table border="1"><tr><th>Product</th><th>Product Type</th><th>Quantity</th></tr>';
+    products.forEach(product => {
+      productTable += `<tr><td>${product.productName}</td><td>${product.productType}</td><td>${product.quantity}</td></tr>`;
+    });
+    productTable += '</table>';
+
+    // Prepare image attachments
+    let attachments = images.map(image => ({
+      filename: image.originalname,
+      content: image.buffer,
+    }));
+
+    // Mail options
+    let mailOptions = {
+      from: 'bienestarcommunity@gmail.com',
+      to: emails.join(', '),
+      subject: 'New Donation Ticket Uploaded',
+      text: message,
+      html: message.replace(/\n/g, '<br>') + '<br>' + productTable,
+      attachments: attachments,
+    };
+
+    // Send the email
+    transporter.sendMail(mailOptions, (err, info) => {
+      if (err) {
+        console.log(`Error sending email: `, err);
+      } else {
+        console.log(`Email sent: ` + info.response);
+      }
+    });
+  } catch (error) {
+    console.log(`Error in sendTicketEmail: `, error);
+  }
+}
+
+module.exports.sendTicketEmail = sendTicketEmail;
+
 module.exports.sendEmailWithAttachment = sendEmailWithAttachment;

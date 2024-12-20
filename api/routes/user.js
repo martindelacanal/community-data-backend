@@ -7,6 +7,7 @@ const axios = require('axios');
 const logger = require('../utils/logger.js');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const JSZip = require('jszip');
+const { sendTicketEmail } = require('../email/email');
 
 // S3 INICIO
 const S3Client = require("@aws-sdk/client-s3").S3Client;
@@ -413,6 +414,77 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           res.status(500).json('Not ticket inserted');
         }
         res.status(200).json('Data inserted successfully');
+
+        const [rows_emails] = await mysqlConnection.promise().query(
+          `select email
+          from user_email_report
+          where user_id = ?
+          `,
+          [cabecera.id]
+        );
+
+        // enviar correo de notificacion con los datos del ticket
+        // Collect form data
+        const formData = {
+          'Donation ID': donation_id,
+          'Total Weight': total_weight,
+          'Provider': provider,
+          'Destination': destination,
+          'Audit Status': audit_status || '',
+          'Notes': notes || '',
+          'Date': date ? moment(date).format('MM/DD/YYYY') : '',
+          'Creation Date': new Date().toLocaleDateString('en-US'),
+        };
+
+        // Fetch provider and destination names if necessary
+        if (provider) {
+          const [providerRows] = await mysqlConnection.promise().query(
+            'SELECT name FROM provider WHERE id = ?',
+            [provider]
+          );
+          formData['Provider'] = providerRows[0]?.name || provider;
+        }
+
+        if (destination) {
+          const [destinationRows] = await mysqlConnection.promise().query(
+            'SELECT community_city FROM location WHERE id = ?',
+            [destination]
+          );
+          formData['Destination'] = destinationRows[0]?.community_city || destination;
+        }
+
+        if (delivered_by) {
+          const [deliveredByRows] = await mysqlConnection.promise().query(
+            'SELECT name FROM delivered_by WHERE id = ?',
+            [delivered_by]
+          );
+          formData['Delivered By'] = deliveredByRows[0]?.name || delivered_by;
+        }
+
+        // Get products with names
+        let productsWithNames = [];
+        for (let product of products) {
+          const [productRows] = await mysqlConnection.promise().query(
+            'SELECT name, product_type_id FROM product WHERE id = ?',
+            [product.product]
+          );
+          const [productTypeRows] = await mysqlConnection.promise().query(
+            'SELECT name FROM product_type WHERE id = ?',
+            [productRows[0]?.product_type_id]
+          );
+          productsWithNames.push({
+            productName: productRows[0]?.name || '',
+            productType: productTypeRows[0]?.name || '',
+            quantity: product.quantity,
+          });
+        }
+
+        // Extract email addresses
+        const emails = rows_emails.map(row => row.email);
+
+        // Send the email
+        sendTicketEmail(formData, productsWithNames, req.files, emails);
+        return;
       } else {
         res.status(400).json('Donation ticket image is required');
       }
@@ -1623,7 +1695,15 @@ router.get('/new/user/:id', verifyToken, async (req, res) => {
         where u.id = ?`,
         [id]
       );
+      const [rows_emails] = await mysqlConnection.promise().query(
+        `select email
+        from user_email_report
+        where user_id = ?
+        `,
+        [id]
+      );
       if (rows.length > 0) {
+        rows[0].emails_for_reporting = rows_emails;
         res.json(rows[0]);
       } else {
         res.status(404).json('User not found');
@@ -1652,6 +1732,7 @@ router.post('/new/user', verifyToken, async (req, res) => {
       const role_id = formulario.role_id || null;
       const phone = formulario.phone || null;
       const client_id = formulario.client_id || null;
+      const emails_for_reporting = formulario.emails_for_reporting || [];
 
       // const newPassword = Math.random().toString(36).slice(-8);
       var newPassword = 'communitydata';
@@ -1666,6 +1747,15 @@ router.post('/new/user', verifyToken, async (req, res) => {
       );
 
       if (rows2.affectedRows > 0) {
+        const user_id = rows2.insertId;
+        if (emails_for_reporting.length > 0) {
+          for (let i = 0; i < emails_for_reporting.length; i++) {
+            await mysqlConnection.promise().query(
+              'insert into user_email_report(user_id, email) values(?,?)',
+              [user_id, emails_for_reporting[i].email]
+            );
+          }
+        }
         res.json({ password: newPassword });
       } else {
         res.status(500).json('Could not create user');
@@ -1695,6 +1785,7 @@ router.put('/new/user/:id', verifyToken, async (req, res) => {
       const gender_id = formulario.gender_id || null;
       const phone = formulario.phone || null;
       const client_id = formulario.client_id || null;
+      const emails_for_reporting = formulario.emails_for_reporting || [];
 
       const [rows] = await mysqlConnection.promise().query(
         'update user set username = ?, email = ?, firstname = ?, lastname = ?, date_of_birth = ?, gender_id = ?, phone = ?, client_id = ? where id = ?',
@@ -1702,6 +1793,31 @@ router.put('/new/user/:id', verifyToken, async (req, res) => {
       );
 
       if (rows.affectedRows > 0) {
+        // get all emails for reporting
+        const [rows_emails] = await mysqlConnection.promise().query(
+          'select email from user_email_report where user_id = ?',
+          [id]
+        );
+        // compare emails for reporting and delete the ones that are not in the new list
+        for (let i = 0; i < rows_emails.length; i++) {
+          if (!emails_for_reporting.map(e => e.email).includes(rows_emails[i].email)) {
+            await mysqlConnection.promise().query(
+              'delete from user_email_report where user_id = ? and email = ?',
+              [id, rows_emails[i].email]
+            );
+          }
+        }
+        // insert new emails that don't exist in the database
+        for (let i = 0; i < emails_for_reporting.length; i++) {
+          // compare emails for reporting with rows_emails and insert the ones that are not in the database
+          if (!rows_emails.map(e => e.email).includes(emails_for_reporting[i].email)) {
+            await mysqlConnection.promise().query(
+              'insert into user_email_report(user_id, email) values(?,?)',
+              [id, emails_for_reporting[i].email]
+            );
+          }
+        }
+
         res.json('User updated successfully');
       }
       else {
@@ -10408,7 +10524,6 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
       const { idUser } = req.params;
       const language = req.query.language || 'en';
 
-
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
             u.id,
@@ -10441,6 +10556,13 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
           ${cabecera.role === 'client' ? ' AND (cu.client_id = ? or u.client_id = ?)' : ''}`,
         [idUser, cabecera.client_id, cabecera.client_id]
       );
+      const [rows_emails] = await mysqlConnection.promise().query(
+        `select email
+        from user_email_report
+        where user_id = ?
+        `,
+        [idUser]
+      );
 
       if (rows.length > 0) {
         var user = {};
@@ -10464,6 +10586,8 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
         user["phone"] = rows[0].phone;
         user["zipcode"] = rows[0].zipcode;
         user["household_size"] = rows[0].household_size;
+        user["emails_for_reporting"] = rows_emails;
+
 
         switch (user["role_name"]) {
 
