@@ -2239,7 +2239,7 @@ router.get('/stocker-upload', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select DISTINCT u.id, u.username as name from user as u inner join stocker_log as sl on u.id = sl.user_id where sl.operation_id = 5 order by u.username',
+        'select DISTINCT u.id, u.username as name from user as u inner join stocker_log as sl on u.id = sl.user_id where sl.operation_id = 5 and u.enabled = "Y" order by u.username',
       );
       res.json(rows);
     } catch (err) {
