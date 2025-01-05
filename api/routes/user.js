@@ -6816,7 +6816,6 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         LEFT JOIN location as loc ON dt.location_id = loc.id
         ${cabecera.role === 'client' ? 'LEFT JOIN client_location cl ON dt.location_id = cl.location_id' : ''}
-        LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
