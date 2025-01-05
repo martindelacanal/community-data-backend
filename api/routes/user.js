@@ -8,6 +8,9 @@ const logger = require('../utils/logger.js');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const JSZip = require('jszip');
 const { sendTicketEmail } = require('../email/email');
+const { sendVolunteerConfirmation } = require('../email/email');
+const multer = require('multer');
+const storage = multer.memoryStorage();
 
 // S3 INICIO
 const S3Client = require("@aws-sdk/client-s3").S3Client;
@@ -286,12 +289,6 @@ router.put('/admin/reset-password', verifyToken, async (req, res) => {
     res.status(401).send();
   }
 });
-
-const multer = require('multer');
-const path = require('path');
-const uuid = require('uuid');
-
-const storage = multer.memoryStorage();
 
 // Modificar el middleware upload para aceptar un array de archivos
 const upload = multer({ storage: storage }).array('ticket[]');
@@ -763,6 +760,97 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
     }
   } else {
     res.status(401).json('Unauthorized');
+  }
+});
+
+const upload_signature = multer({ storage: storage }).array('signature[]');
+router.post('/signup/volunteer', upload_signature, async (req, res) => {
+  let connection;
+  try {
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+
+    if (req.files && req.files.length > 0) {
+      formulario = JSON.parse(req.body.form);
+      
+      const firstname = formulario.firstName || null;
+      const lastname = formulario.lastName || null;
+      const email = formulario.email || null;
+      const phone = formulario.phone.toString() || null;
+      const zipcode = formulario.zipcode.toString() || null;
+      const location_id = formulario.destination || null;
+      const dateOfBirth = formulario.dateOfBirth || null;
+      const gender = formulario.gender || null;
+      const date = formulario.date || null;
+
+      const [rows] = await connection.query('insert into volunteer(firstname, \
+                                          lastname, \
+                                          email, \
+                                          phone, \
+                                          zipcode, \
+                                          location_id, \
+                                          date_of_birth, \
+                                          gender_id, \
+                                          date) \
+                                          values(?,?,?,?,?,?,?,?,?)',
+        [firstname, lastname, email, phone, zipcode, location_id, dateOfBirth, gender, date]);
+        
+      if (rows.affectedRows > 0) {
+        const volunteer_id = rows.insertId;
+        
+        for (let i = 0; i < req.files.length; i++) {
+          req.files[i].filename = randomImageName();
+          const paramsLogo = {
+            Bucket: bucketName,
+            Key: req.files[i].filename,
+            Body: req.files[i].buffer,
+            ContentType: req.files[i].mimetype,
+          };
+          const commandLogo = new PutObjectCommand(paramsLogo);
+          await s3.send(commandLogo);
+          
+          await connection.query(
+            'insert into volunteer_signature(volunteer_id, file) values(?,?)',
+            [volunteer_id, req.files[i].filename]
+          );
+        }
+
+        // Get location details
+        const [locationRows] = await connection.query(
+          'SELECT community_city FROM location WHERE id = ?',
+          [location_id]
+        );
+        
+        await connection.commit();
+        res.status(200).json('Data inserted successfully');
+
+        // Send confirmation email
+        if (locationRows.length > 0) {
+          await sendVolunteerConfirmation(email, locationRows[0].community_city);
+        }
+      } else {
+        throw new Error('Could not create volunteer');
+      }
+    } else {
+      throw new Error('Volunteer signature is required');
+    }
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    
+    if (err.message === 'Volunteer signature is required') {
+      res.status(400).json(err.message);
+    } else if (err.message === 'Could not create volunteer') {
+      res.status(500).json(err.message);
+    } else {
+      res.status(500).json('Internal server error');
+    }
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 });
 

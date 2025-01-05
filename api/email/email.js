@@ -154,6 +154,82 @@ async function sendTicketEmail(formData, products, images, emails) {
   }
 }
 
+async function sendVolunteerConfirmation(volunteerEmail, locationCity) {
+  try {
+    const htmlMessage = `<b>Location chosen:</b> ${locationCity}<br><br>
+                        <b>2025 Volunteer Liability Waiver, Terms and conditions:</b><br>
+                        I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
+                        I further understand that Bienestar is Well-being provides no compensation for my services and 
+                        that I am not entitled to any benefits from the Organization, including but not limited to 
+                        workers' compensation benefits.<br>
+                        <b>Assumption of Risk:</b><br>
+                        I understand that there are risks of injury, death and damage to property from performing the Volunteer Activity for the Organization. 
+                        I attest and verify that I possess the physical fitness and ability to perform the Activity and that I have no physical limitations 
+                        that would affect my performance of the Activity. If I do not feel that I am capable of performing the Activity, I assume the responsibility 
+                        of informing whomever is designated as the on-site Supervisor or Team Lead. In consideration for being allowed to participate in the Activity, 
+                        I hereby assume the risk of, and responsibility for, any such injury, death or damage which I may sustain arising out of or in any way 
+                        connected with performance of the Activity, including injury, death or damage resulting from any acts or omissions, whether negligent or not, 
+                        or any property or equipment owned or supplied by or on behalf of the Organization, its officials, officers, employees, agents, volunteers, 
+                        and any other promoters, operators or co-sponsors of the Activity.<br>
+                        <b>Release and Indemnification:</b><br>
+                        In consideration for being allowed to participate in the Activity, I hereby release, waive and discharge the Organization, its officials, 
+                        officers, employees, agents, volunteers, and any other promoters, operators or co-sponsors of the Activity, from any and all liability, claims, 
+                        or causes of action arising out of or in any way connected with my performance of the Activity, or upon its acts or omissions, whether 
+                        negligent or not (“Waiver”). I agree to this Waiver on behalf of myself, my heirs, executors, administrators and assigns.<br>
+                        As further consideration for being allowed to participate in the Activity, I hereby agree, on behalf of myself, my heirs, executors, 
+                        administrators and assigns, to indemnify and hold harmless the Organization, its officials, officers, employees, agents, volunteers, 
+                        and any other promoters, operators or co-sponsors of the Activity, from any and all claims for compensation, personal injury, property 
+                        damage or wrongful death caused by my negligence or willful misconduct, in the performance of the Activity.<br>
+                        <b>Knowing and Voluntary Execution:</b><br>
+                        I have carefully read this Waiver and Release Form and fully understand its contents. I understand that I am giving up valuable legal rights. 
+                        I knowingly and voluntarily give up these rights of my own free will.<br>
+                        `;
+
+    const textMessage = `Location chosen: ${locationCity}\n\n
+                        2025 Volunteer Liability Waiver, Terms and conditions:\n
+                        I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
+                        I further understand that Bienestar is Well-being provides no compensation for my services and 
+                        that I am not entitled to any benefits from the Organization, including but not limited to 
+                        workers' compensation benefits.\n
+                        Assumption of Risk:\n
+                        I understand that there are risks of injury, death and damage to property from performing the Volunteer Activity for the Organization.
+                        I attest and verify that I possess the physical fitness and ability to perform the Activity and that I have no physical limitations
+                        that would affect my performance of the Activity. If I do not feel that I am capable of performing the Activity, I assume the responsibility
+                        of informing whomever is designated as the on-site Supervisor or Team Lead. In consideration for being allowed to participate in the Activity,
+                        I hereby assume the risk of, and responsibility for, any such injury, death or damage which I may sustain arising out of or in any way
+                        connected with performance of the Activity, including injury, death or damage resulting from any acts or omissions, whether negligent or not,
+                        or any property or equipment owned or supplied by or on behalf of the Organization, its officials, officers, employees, agents, volunteers,
+                        and any other promoters, operators or co-sponsors of the Activity.\n
+                        Release and Indemnification:\n
+                        In consideration for being allowed to participate in the Activity, I hereby release, waive and discharge the Organization, its officials,
+                        officers, employees, agents, volunteers, and any other promoters, operators or co-sponsors of the Activity, from any and all liability, claims,
+                        or causes of action arising out of or in any way connected with my performance of the Activity, or upon its acts or omissions, whether
+                        negligent or not (“Waiver”). I agree to this Waiver on behalf of myself, my heirs, executors, administrators and assigns.\n
+                        As further consideration for being allowed to participate in the Activity, I hereby agree, on behalf of myself, my heirs, executors,
+                        administrators and assigns, to indemnify and hold harmless the Organization, its officials, officers, employees, agents, volunteers,
+                        and any other promoters, operators or co-sponsors of the Activity, from any and all claims for compensation, personal injury, property
+                        damage or wrongful death caused by my negligence or willful misconduct, in the performance of the Activity.\n
+                        Knowing and Voluntary Execution:\n
+                        I have carefully read this Waiver and Release Form and fully understand its contents. I understand that I am giving up valuable legal rights.
+                        I knowingly and voluntarily give up these rights of my own free will.\n
+                        `;
+
+    const mailOptions = {
+      from: 'bienestarcommunity@gmail.com',
+      to: volunteerEmail,
+      subject: 'Terms and conditions signed',
+      text: textMessage,
+      html: htmlMessage
+    };
+
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.log('Error sending volunteer confirmation email:', error);
+  }
+}
+
+module.exports.sendVolunteerConfirmation = sendVolunteerConfirmation;
+
 module.exports.sendTicketEmail = sendTicketEmail;
 
 module.exports.sendEmailWithAttachment = sendEmailWithAttachment;

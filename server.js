@@ -204,7 +204,7 @@ async function getNewRegistrations(csvRawData, from_date, to_date) {
     // Filtrar las filas según registration_date dentro del rango
     const filteredRecords = records.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, null, '[]'); // Inclusivo en ambos extremos
+        return registrationDate.isBetween(fromDate, toDate, 'day', '[)'); // Include start, exclude end
     });
 
     // Generar un nuevo CSV con las filas filtradas
@@ -238,7 +238,7 @@ async function getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, 
     // Filtrar las filas sin seguro de salud y con registration_date dentro del rango
     const filteredRecords = records.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, null, '[]') &&
+        return registrationDate.isBetween(fromDate, toDate, 'day', '[)') && // Include start, exclude end
             (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '');
     });
 
@@ -279,8 +279,8 @@ async function getSummary(from_date, to_date, csvRawData) {
     // Calcular las sumas correspondientes
     records.forEach(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        const isNew = registrationDate.isBetween(fromDate, toDate, null, '[]'); // Inclusivo en ambos extremos
-
+        const isNew = registrationDate.isBetween(fromDate, toDate, 'day', '[)'); // Include start, exclude end
+        
         if (isNew) {
             newCount++;
             if (record['Health Insurance?'] === 'Yes') {
@@ -345,11 +345,12 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
         let previousSaturday = lastSaturday.clone().subtract(1, 'weeks'); // sábado anterior al último sábado
 
         let from_date = previousSaturday.format("YYYY-MM-DD");
-        let to_date = lastSaturday.format("YYYY-MM-DD");
+        // Subtract one day from lastSaturday to exclude it
+        let to_date = lastSaturday.clone().subtract(1, 'day').format("YYYY-MM-DD");
 
         // Formatear las fechas para el mensaje
         let formatted_from_date = previousSaturday.format("MM-DD-YYYY");
-        let formatted_to_date = lastSaturday.format("MM-DD-YYYY");
+        let formatted_to_date = lastSaturday.clone().subtract(1, 'day').format("MM-DD-YYYY");
         // un cliente puede tener varios emails
         // recorrer los emails de un cliente, guardarlos en variable emails y enviar el correo
         const emails = [];
