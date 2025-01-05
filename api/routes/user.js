@@ -10657,6 +10657,7 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
 
         user["id"] = rows[0].id;
         user["username"] = rows[0].username;
+        user["email"] = rows[0].email;
         user["firstname"] = rows[0].firstname;
         user["lastname"] = rows[0].lastname;
         user["client_name"] = rows[0].client_name;
