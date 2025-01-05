@@ -826,7 +826,7 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
 
         // Send confirmation email
         if (locationRows.length > 0) {
-          await sendVolunteerConfirmation(email, locationRows[0].community_city);
+          await sendVolunteerConfirmation(email, locationRows[0].community_city, date);
         }
       } else {
         throw new Error('Could not create volunteer');

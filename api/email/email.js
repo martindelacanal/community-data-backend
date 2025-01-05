@@ -154,9 +154,10 @@ async function sendTicketEmail(formData, products, images, emails) {
   }
 }
 
-async function sendVolunteerConfirmation(volunteerEmail, locationCity) {
+async function sendVolunteerConfirmation(volunteerEmail, locationCity, date) {
   try {
-    const htmlMessage = `<b>Location chosen:</b> ${locationCity}<br><br>
+    const htmlMessage = `<b>Location chosen:</b> ${locationCity}<br>
+                        <b>Date:</b> ${date}<br><br>
                         <b>2025 Volunteer Liability Waiver, Terms and conditions:</b><br>
                         I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
                         I further understand that Bienestar is Well-being provides no compensation for my services and 
@@ -185,7 +186,8 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity) {
                         I knowingly and voluntarily give up these rights of my own free will.<br>
                         `;
 
-    const textMessage = `Location chosen: ${locationCity}\n\n
+    const textMessage = `Location chosen: ${locationCity}\n
+                        Date: ${date}\n\n
                         2025 Volunteer Liability Waiver, Terms and conditions:\n
                         I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
                         I further understand that Bienestar is Well-being provides no compensation for my services and 
