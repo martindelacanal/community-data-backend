@@ -8714,6 +8714,257 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
   }
 });
 
+router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (['admin', 'client', 'director', 'auditor'].includes(cabecera.role)) {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || null;
+      let to_date = filters.to_date || null;
+      const locations = filters.locations || [];
+      const providers = filters.providers || [];
+      const product_types = filters.product_types || [];
+      const stocker_upload = filters.stocker_upload || [];
+      const interval = filters.interval || 'month';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      // Obtener rango de fechas si no se proporcionan
+      if (!from_date || !to_date) {
+        const [dateRange] = await mysqlConnection.promise().query(
+          `SELECT 
+            MIN(date) AS min_date, 
+            MAX(date) AS max_date 
+          FROM donation_ticket 
+          WHERE enabled = 'Y'`
+        );
+        if (!from_date) from_date = dateRange[0].min_date.toISOString().slice(0, 10);
+        if (!to_date) to_date = dateRange[0].max_date.toISOString().slice(0, 10);
+      }
+
+      // Definir expresiones de período y intervalos de adición
+      let dateAddInterval;
+      let periodExpression;
+      switch (interval) {
+        case 'day':
+          dateAddInterval = '1 DAY';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y-%m-%d')";
+          break;
+        case 'week':
+          dateAddInterval = '1 WEEK';
+          periodExpression = "DATE_FORMAT(dt.date, '%x-W%v')";
+          break;
+        case 'month':
+          dateAddInterval = '1 MONTH';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y-%m')";
+          break;
+        case 'quarter':
+          // Para trimestres, usamos CONCAT para incluir el número del trimestre
+          dateAddInterval = '1 QUARTER';
+          periodExpression = "CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date))";
+          break;
+        case 'year':
+          dateAddInterval = '1 YEAR';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y')";
+          break;
+        default:
+          dateAddInterval = '1 MONTH';
+          periodExpression = "DATE_FORMAT(dt.date, '%Y-%m')";
+          break;
+      }
+
+      // Construir condiciones y parámetros de la consulta
+      let query_from_date = '';
+      let query_to_date = '';
+      let query_locations = '';
+      let query_providers = '';
+      let query_product_types = '';
+      const params = [];
+
+      if (from_date) {
+        query_from_date = 'AND dt.date >= ?';
+        params.push(from_date);
+      }
+      if (to_date) {
+        query_to_date = 'AND dt.date < DATE_ADD(?, INTERVAL 1 DAY)';
+        params.push(to_date);
+      }
+      if (locations.length > 0) {
+        query_locations = 'AND dt.location_id IN (' + locations.map(() => '?').join(',') + ')';
+        params.push(...locations);
+      }
+      if (providers.length > 0) {
+        query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
+        params.push(...providers);
+      }
+      if (product_types.length > 0) {
+        query_product_types = 'AND p.product_type_id IN (' + product_types.map(() => '?').join(',') + ')';
+        params.push(...product_types);
+      }
+      if (cabecera.role === 'client') {
+        query_product_types += ' AND cl.client_id = ?';
+        params.push(cabecera.client_id);
+      }
+      var query_stocker_upload = '';
+      if (stocker_upload.length > 0) {
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      }
+  
+
+      // Construir la consulta SQL con el CTE
+      let query;
+      let cteParams;
+      if (interval === 'quarter') {
+        // Para 'quarter', necesitamos cuatro parámetros en el CTE
+        cteParams = [from_date, from_date, from_date, to_date];
+        query = `
+          WITH RECURSIVE date_ranges AS (
+            SELECT 
+              CONCAT(YEAR(?), '-Q', QUARTER(?)) AS period, 
+              ? AS date
+            UNION ALL
+            SELECT 
+              CONCAT(YEAR(DATE_ADD(date, INTERVAL ${dateAddInterval})), '-Q', QUARTER(DATE_ADD(date, INTERVAL ${dateAddInterval}))) AS period,
+              DATE_ADD(date, INTERVAL ${dateAddInterval}) 
+            FROM date_ranges
+            WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
+          )
+          SELECT 
+            u.username AS name,
+            COALESCE(COUNT(DISTINCT dt.id), 0) AS data,
+            date_ranges.period AS period
+          FROM date_ranges
+          LEFT JOIN donation_ticket as dt ON 
+            CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date)) = date_ranges.period
+          LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+          LEFT JOIN user as u ON sl.user_id = u.id
+          LEFT JOIN provider as pr ON dt.provider_id = pr.id
+          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          LEFT JOIN product as p ON pdt.product_id = p.id
+          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+          WHERE dt.enabled = 'Y'
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
+          ${query_stocker_upload}
+          GROUP BY name, period
+        `;
+      } else {
+        // Para otros intervalos, necesitamos tres parámetros en el CTE
+        cteParams = [from_date, from_date, to_date];
+        const formatString = interval === 'day' ? '%Y-%m-%d' :
+          interval === 'week' ? '%x-W%v' :
+            interval === 'month' ? '%Y-%m' :
+              interval === 'year' ? '%Y' : '%Y-%m';
+
+        query = `
+          WITH RECURSIVE date_ranges AS (
+            SELECT 
+              DATE_FORMAT(?, '${formatString}') AS period, 
+              ? AS date
+            UNION ALL
+            SELECT 
+              DATE_FORMAT(DATE_ADD(date, INTERVAL ${dateAddInterval}), '${formatString}') AS period,
+              DATE_ADD(date, INTERVAL ${dateAddInterval}) 
+            FROM date_ranges
+            WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
+          )
+          SELECT 
+            u.username AS name,
+            COALESCE(COUNT(DISTINCT dt.id), 0) AS data,
+            date_ranges.period AS period
+          FROM date_ranges
+          LEFT JOIN donation_ticket as dt ON 
+            DATE_FORMAT(dt.date, '${formatString}') = date_ranges.period
+          LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
+          LEFT JOIN user as u ON sl.user_id = u.id
+          LEFT JOIN provider as pr ON dt.provider_id = pr.id
+          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          LEFT JOIN product as p ON pdt.product_id = p.id
+          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+          ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+          WHERE dt.enabled = 'Y'
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
+          ${query_stocker_upload}
+          GROUP BY name, period
+        `;
+      }
+
+      // Combinar los parámetros del CTE con los demás parámetros
+      const finalParams = cteParams.concat(params);
+
+      const [rows] = await mysqlConnection.promise().query(query, finalParams);
+
+      // Transformar las filas al formato deseado
+      const categories = [...new Set(rows.map(row => row.period))].sort((a, b) => {
+        if (interval === 'week') {
+          const [yearA, weekA] = a.split('-W').map(Number);
+          const [yearB, weekB] = b.split('-W').map(Number);
+          const dateA = new Date(yearA, 0, (weekA - 1) * 7);
+          const dateB = new Date(yearB, 0, (weekB - 1) * 7);
+          return dateA - dateB;
+        } else if (interval === 'quarter') {
+          const [yearA, quarterA] = a.split('-Q').map(Number);
+          const [yearB, quarterB] = b.split('-Q').map(Number);
+          const dateA = new Date(yearA, (quarterA - 1) * 3);
+          const dateB = new Date(yearB, (quarterB - 1) * 3);
+          return dateA - dateB;
+        } else {
+          return new Date(a) - new Date(b);
+        }
+      });
+
+      // Después del sort, formatear las categorías
+      const formattedCategories = categories.map(c => formatPeriod(c, interval));
+
+      const providersMap = new Map();
+
+      // Inicializar providersMap con todos los proveedores y todos los periodos con datos en 0
+      rows.forEach(row => {
+        if (!providersMap.has(row.name)) {
+          providersMap.set(row.name, Array(categories.length).fill(0));
+        }
+      });
+
+      // Rellenar providersMap con datos reales
+      rows.forEach(row => {
+        const index = categories.indexOf(row.period);
+        if (index !== -1) {
+          providersMap.get(row.name)[index] = row.data;
+        }
+      });
+
+      const series = Array.from(providersMap, ([name, data]) => ({ name, data }));
+
+      const result = {
+        series,
+        categories: formattedCategories // usar las categorías formateadas
+      };
+
+      res.json(result);
+
+    } catch (error) {
+      console.log(error);
+      res.status(500).send(error.message);
+    }
+  } else {
+    res.status(403).send('Forbidden');
+  }
+});
+
 router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
