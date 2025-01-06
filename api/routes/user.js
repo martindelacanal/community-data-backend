@@ -781,7 +781,8 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
       const location_id = formulario.destination || null;
       const dateOfBirth = formulario.dateOfBirth || null;
       const gender = formulario.gender || null;
-      const date = formulario.date || null;
+      // const date = formulario.date || null;
+      const language = formulario.language || 'en';
 
       const [rows] = await connection.query('insert into volunteer(firstname, \
                                           lastname, \
@@ -790,10 +791,9 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
                                           zipcode, \
                                           location_id, \
                                           date_of_birth, \
-                                          gender_id, \
-                                          date) \
-                                          values(?,?,?,?,?,?,?,?,?)',
-        [firstname, lastname, email, phone, zipcode, location_id, dateOfBirth, gender, date]);
+                                          gender_id) \
+                                          values(?,?,?,?,?,?,?,?)',
+        [firstname, lastname, email, phone, zipcode, location_id, dateOfBirth, gender]);
         
       if (rows.affectedRows > 0) {
         const volunteer_id = rows.insertId;
@@ -826,7 +826,7 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
 
         // Send confirmation email
         if (locationRows.length > 0) {
-          await sendVolunteerConfirmation(email, locationRows[0].community_city, date);
+          await sendVolunteerConfirmation(email, locationRows[0].community_city, language);
         }
       } else {
         throw new Error('Could not create volunteer');
@@ -8849,7 +8849,7 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
           LEFT JOIN product as p ON pdt.product_id = p.id
           LEFT JOIN product_type as pt ON p.product_type_id = pt.id
           ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE dt.enabled = 'Y'
+          WHERE dt.enabled = 'Y' and u.enabled = 'Y'
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
@@ -8892,7 +8892,7 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
           LEFT JOIN product as p ON pdt.product_id = p.id
           LEFT JOIN product_type as pt ON p.product_type_id = pt.id
           ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE dt.enabled = 'Y'
+          WHERE dt.enabled = 'Y' and u.enabled = 'Y'
           ${query_from_date}
           ${query_to_date}
           ${query_locations}

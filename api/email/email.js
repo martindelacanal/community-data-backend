@@ -154,9 +154,15 @@ async function sendTicketEmail(formData, products, images, emails) {
   }
 }
 
-async function sendVolunteerConfirmation(volunteerEmail, locationCity, date) {
+async function sendVolunteerConfirmation(volunteerEmail, locationCity, language) {
   try {
-    const htmlMessage = `<b>Location chosen:</b> ${locationCity}<br>
+    let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
+    let htmlMessage = '';
+    let textMessage = '';
+    let subjectMessage = '';
+    if (language === 'en') {
+      subjectMessage = 'Terms and conditions signed';
+      htmlMessage = `<b>Location chosen:</b> ${locationCity}<br>
                         <b>Date:</b> ${date}<br><br>
                         <b>2025 Volunteer Liability Waiver, Terms and conditions:</b><br>
                         I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
@@ -186,7 +192,7 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, date) {
                         I knowingly and voluntarily give up these rights of my own free will.<br>
                         `;
 
-    const textMessage = `Location chosen: ${locationCity}\n
+      textMessage = `Location chosen: ${locationCity}\n
                         Date: ${date}\n\n
                         2025 Volunteer Liability Waiver, Terms and conditions:\n
                         I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
@@ -215,11 +221,73 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, date) {
                         I have carefully read this Waiver and Release Form and fully understand its contents. I understand that I am giving up valuable legal rights.
                         I knowingly and voluntarily give up these rights of my own free will.\n
                         `;
+    } else {
+      subjectMessage = 'Términos y condiciones firmados';
+      htmlMessage = `<b>Locación elegida:</b> ${locationCity}<br>
+                        <b>Fecha:</b> ${date}<br><br>
+                        <b>2025 Exención de responsabilidad voluntaria, términos y condiciones:</b><br>
+                        Acepto ofrecer mis servicios como voluntario (“Actividad”) para Bienestar is Well-being (“Organización”). 
+                        Además, entiendo que Bienestar is Well-being no proporciona compensación por mis servicios y que no tengo derecho 
+                        a ningún beneficio de la Organización, incluidos, entre otros, los beneficios de compensación laboral.<br>
+                        <b>Asunción de Riesgo:</b><br>
+                        Entiendo que existen riesgos de lesiones, muerte y daños a la propiedad al realizar la actividad de voluntariado para la Organización. 
+                        Doy fe y verifico que poseo la aptitud física y la capacidad para realizar la Actividad y que no tengo limitaciones físicas que puedan 
+                        afectar mi desempeño de la Actividad. Si no me siento capaz de realizar la Actividad, asumo la responsabilidad de informar a quien esté 
+                        designado como Supervisor en el sitio o Líder del equipo. En consideración a que se me permita participar en la Actividad, por la presente 
+                        asumo el riesgo y la responsabilidad por cualquier lesión, muerte o daño que pueda sufrir como resultado de o de alguna manera relacionado 
+                        con la realización de la Actividad, incluidas lesiones, muerte o daño resultante de cualquier acto u omisión, ya sea negligente o no, o 
+                        cualquier propiedad o equipo de propiedad o suministrado por o en nombre de la Organización, sus funcionarios, funcionarios, empleados, 
+                        agentes, voluntarios y cualquier otro promotor, operador o co -patrocinadores de la Actividad.<br>
+                        <b>Liberación e Indemnización:</b><br>
+                        En consideración por permitirme participar en la Actividad, por la presente libero, renuncio y descargo a la Organización, sus funcionarios, 
+                        funcionarios, empleados, agentes, voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad. de toda responsabilidad, 
+                        reclamo o causa de acción que surja de o esté relacionado de alguna manera con mi desempeño de la Actividad, o por sus actos u omisiones, 
+                        ya sean negligentes o no (“Renuncia”). Acepto esta Renuncia en mi nombre, el de mis herederos, albaceas, administradores y cesionarios.<br>
+                        Como consideración adicional para poder participar en la Actividad, por la presente acepto, en mi nombre y el de mis herederos, ejecutores, 
+                        administradores y cesionarios, indemnizar y eximir de responsabilidad a la Organización, sus funcionarios, funcionarios, empleados, agentes, 
+                        voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad, de todos y cada uno de los reclamos de compensación, 
+                        lesiones personales, daños a la propiedad o muerte por negligencia causados por mi negligencia o mala conducta intencional, en el desempeño 
+                        de la Actividad.<br>
+                        <b>Conocimiento y ejecución voluntaria:</b><br>
+                        He leído atentamente este Formulario de exención y liberación y comprendo plenamente su contenido. Entiendo que estoy renunciando a 
+                        valiosos derechos legales. Renuncio consciente y voluntariamente a estos derechos por mi propia voluntad.<br>
+                        `;
+
+      textMessage = `Locación elegida: ${locationCity}\n
+                        Fecha: ${date}\n\n
+                        2025 Exención de responsabilidad voluntaria, términos y condiciones:\n
+                        Acepto ofrecer mis servicios como voluntario (“Actividad”) para Bienestar is Well-being (“Organización”). 
+                        Además, entiendo que Bienestar is Well-being no proporciona compensación por mis servicios y que no tengo derecho 
+                        a ningún beneficio de la Organización, incluidos, entre otros, los beneficios de compensación laboral.\n
+                        Asunción de Riesgo:\n
+                        Entiendo que existen riesgos de lesiones, muerte y daños a la propiedad al realizar la actividad de voluntariado para la Organización. 
+                        Doy fe y verifico que poseo la aptitud física y la capacidad para realizar la Actividad y que no tengo limitaciones físicas que puedan 
+                        afectar mi desempeño de la Actividad. Si no me siento capaz de realizar la Actividad, asumo la responsabilidad de informar a quien esté 
+                        designado como Supervisor en el sitio o Líder del equipo. En consideración a que se me permita participar en la Actividad, por la presente 
+                        asumo el riesgo y la responsabilidad por cualquier lesión, muerte o daño que pueda sufrir como resultado de o de alguna manera relacionado 
+                        con la realización de la Actividad, incluidas lesiones, muerte o daño resultante de cualquier acto u omisión, ya sea negligente o no, o 
+                        cualquier propiedad o equipo de propiedad o suministrado por o en nombre de la Organización, sus funcionarios, funcionarios, empleados, 
+                        agentes, voluntarios y cualquier otro promotor, operador o co -patrocinadores de la Actividad.\n
+                        Liberación e Indemnización:\n
+                        En consideración por permitirme participar en la Actividad, por la presente libero, renuncio y descargo a la Organización, sus funcionarios, 
+                        funcionarios, empleados, agentes, voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad. de toda responsabilidad, 
+                        reclamo o causa de acción que surja de o esté relacionado de alguna manera con mi desempeño de la Actividad, o por sus actos u omisiones, 
+                        ya sean negligentes o no (“Renuncia”). Acepto esta Renuncia en mi nombre, el de mis herederos, albaceas, administradores y cesionarios.\n
+                        Como consideración adicional para poder participar en la Actividad, por la presente acepto, en mi nombre y el de mis herederos, ejecutores, 
+                        administradores y cesionarios, indemnizar y eximir de responsabilidad a la Organización, sus funcionarios, funcionarios, empleados, agentes, 
+                        voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad, de todos y cada uno de los reclamos de compensación, 
+                        lesiones personales, daños a la propiedad o muerte por negligencia causados por mi negligencia o mala conducta intencional, en el desempeño 
+                        de la Actividad.\n
+                        Conocimiento y ejecución voluntaria:\n
+                        He leído atentamente este Formulario de exención y liberación y comprendo plenamente su contenido. Entiendo que estoy renunciando a 
+                        valiosos derechos legales. Renuncio consciente y voluntariamente a estos derechos por mi propia voluntad.\n
+                        `;
+    }
 
     const mailOptions = {
       from: 'bienestarcommunity@gmail.com',
       to: volunteerEmail,
-      subject: 'Terms and conditions signed',
+      subject: subjectMessage,
       text: textMessage,
       html: htmlMessage
     };
