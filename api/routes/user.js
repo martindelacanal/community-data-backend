@@ -302,6 +302,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         const donation_id = formulario.donation_id || null;
         const total_weight = formulario.total_weight || null;
         var provider = formulario.provider || null;
+        var transported_by = formulario.transported_by || null;
         const destination = formulario.destination || null;
         const audit_status = formulario.audit_status || null;
         const notes = formulario.notes || null;
@@ -325,6 +326,18 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             [cabecera.id, 5, provider]
           );
         }
+        if (!Number.isInteger(transported_by)) {
+          const [rows] = await mysqlConnection.promise().query(
+            'insert into transported_by(name) values(?)',
+            [transported_by]
+          );
+          transported_by = rows.insertId;
+          // insertar en stocker_log la operation 5 (create), el transported_by insertado y el id del usuario logueado
+          const [rows2] = await mysqlConnection.promise().query(
+            'insert into stocker_log(user_id, operation_id, transported_by_id) values(?,?,?)',
+            [cabecera.id, 5, transported_by]
+          );
+        }
         // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
         for (let i = 0; i < products.length; i++) {
           if (!Number.isInteger(products[i].product)) {
@@ -340,9 +353,9 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             );
           }
         }
-        let query = 'INSERT INTO donation_ticket(donation_id, total_weight, provider_id, location_id, date, delivered_by';
-        let values = 'VALUES(?,?,?,?,?,?';
-        let parametros_insert_donation_ticket = [donation_id, total_weight, provider, destination, date, delivered_by];
+        let query = 'INSERT INTO donation_ticket(donation_id, total_weight, provider_id, transported_by_id, location_id, date, delivered_by';
+        let values = 'VALUES(?,?,?,?,?,?,?';
+        let parametros_insert_donation_ticket = [donation_id, total_weight, provider, transported_by, destination, date, delivered_by];
 
         if (audit_status !== null) {
           query += ', audit_status_id';
@@ -426,6 +439,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           'Donation ID': donation_id,
           'Total Weight': total_weight,
           'Provider': provider,
+          'Transported By': transported_by,
           'Destination': destination,
           'Audit Status': audit_status || '',
           'Notes': notes || '',
@@ -440,6 +454,14 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             [provider]
           );
           formData['Provider'] = providerRows[0]?.name || provider;
+        }
+
+        if (transported_by) {
+          const [transportedByRows] = await mysqlConnection.promise().query(
+            'SELECT name FROM transported_by WHERE id = ?',
+            [transported_by]
+          );
+          formData['Transported By'] = transportedByRows[0]?.name || transported_by;
         }
 
         if (destination) {
@@ -574,6 +596,7 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
       const donation_id = formulario.donation_id || null;
       const total_weight = formulario.total_weight || null;
       var provider = formulario.provider || null;
+      var transported_by = formulario.transported_by || null;
       const destination = formulario.destination || null;
       const audit_status = formulario.audit_status || null;
       const notes = formulario.notes || null;
@@ -595,6 +618,18 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
         const [rows2] = await mysqlConnection.promise().query(
           'insert into stocker_log(user_id, operation_id, provider_id) values(?,?,?)',
           [cabecera.id, 5, provider]
+        );
+      }
+      if (!Number.isInteger(transported_by)) {
+        const [rows_insert_transported_by] = await mysqlConnection.promise().query(
+          'insert into transported_by(name) values(?)',
+          [transported_by]
+        );
+        transported_by = rows_insert_transported_by.insertId;
+        // insertar en stocker_log la operation 5 (create), el transported_by insertado y el id del usuario logueado
+        const [rows2] = await mysqlConnection.promise().query(
+          'insert into stocker_log(user_id, operation_id, transported_by_id) values(?,?,?)',
+          [cabecera.id, 5, transported_by]
         );
       }
       // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
@@ -619,8 +654,8 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
           [id, cabecera.id, notes]
         );
       }
-      let query = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, location_id = ?, date = ?, delivered_by = ?';
-      let parametros_update_donation_ticket = [donation_id, total_weight, provider, destination, date, delivered_by];
+      let query = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, transported_by_id = ?, location_id = ?, date = ?, delivered_by = ?';
+      let parametros_update_donation_ticket = [donation_id, total_weight, provider, transported_by, destination, date, delivered_by];
 
       if (audit_status !== null) {
         query += ', audit_status_id = ?';
@@ -684,6 +719,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
         `SELECT t.donation_id,
                 t.total_weight,
                 prov.name as provider,
+                tb.name as transported_by,
                 t.location_id as destination,
                 t.date,
                 t.delivered_by,
@@ -695,6 +731,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 FROM donation_ticket as t
                 INNER JOIN donation_ticket_image as dti ON t.id = dti.donation_ticket_id
                 INNER JOIN provider as prov ON t.provider_id = prov.id
+                INNER JOIN transported_by as tb ON t.transported_by_id = tb.id
                 INNER join product_donation_ticket as pdt on t.id = pdt.donation_ticket_id
                 INNER join product as p on pdt.product_id = p.id
                 INNER join product_type as pt on p.product_type_id = pt.id
@@ -707,6 +744,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
           donation_id: rows[0].donation_id,
           total_weight: rows[0].total_weight,
           provider: rows[0].provider,
+          transported_by: rows[0].transported_by,
           destination: rows[0].destination,
           date: rows[0].date,
           delivered_by: rows[0].delivered_by,
@@ -1327,6 +1365,88 @@ router.put('/new/delivered-by/:id', verifyToken, async (req, res) => {
       }
       else {
         res.status(500).json('Could not update delivered by');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/new/transported-by/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      const [rows] = await mysqlConnection.promise().query(
+        `select id,
+        name
+        from transported_by as tb
+        where tb.id = ?`,
+        [id]
+      );
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Transported by not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.post('/new/transported-by', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      formulario = req.body;
+      const name = formulario.name || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'insert into transported_by (name) values(?)',
+        [name]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Transported by created successfully');
+      } else {
+        res.status(500).json('Could not create transported by');
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.put('/new/transported-by/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const id = req.params.id || null;
+      formulario = req.body;
+      const name = formulario.name || null;
+
+      const [rows] = await mysqlConnection.promise().query(
+        'update transported_by set name = ? where id = ?',
+        [name, id]
+      );
+
+      if (rows.affectedRows > 0) {
+        res.json('Transported by updated successfully');
+      }
+      else {
+        res.status(500).json('Could not update transported by');
       }
     } catch (err) {
       console.log(err);
@@ -2291,6 +2411,23 @@ router.get('/delivered-by', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/transported-by', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+    try {
+      const [rows] = await mysqlConnection.promise().query(
+        'select id, name from transported_by where enabled = "Y" order by name'
+      );
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/register/locations', async (req, res) => {
 
   try {
@@ -3021,6 +3158,30 @@ router.get('/delivered-by/exists/search', verifyToken, async (req, res) => {
     if (cabecera.role === 'admin') {
       if (name) {
         const [rows] = await mysqlConnection.promise().query('select name from delivered_by where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
+        if (rows.length > 0) {
+          res.json(true);
+        } else {
+          res.json(false);
+        }
+      } else {
+        res.json(false);
+      }
+    } else {
+      res.status(401).json('Unauthorized');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/transported-by/exists/search', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const name = req.query.name || null;
+  try {
+    if (cabecera.role === 'admin') {
+      if (name) {
+        const [rows] = await mysqlConnection.promise().query('select name from transported_by where REPLACE(LOWER(name), " ", "") = REPLACE(LOWER(?), " ", "")', [name]);
         if (rows.length > 0) {
           res.json(true);
         } else {
@@ -6168,6 +6329,75 @@ router.post('/table/delivered-by/download-csv', verifyToken, async (req, res) =>
 }
 );
 
+router.post('/table/transported-by/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(tb.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(tb.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT tb.id,
+                tb.name,
+                tb.enabled,
+        DATE_FORMAT(CONVERT_TZ(tb.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(tb.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+        DATE_FORMAT(CONVERT_TZ(tb.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
+                        DATE_FORMAT(CONVERT_TZ(tb.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+        FROM transported_by as tb
+        WHERE CONVERT_TZ(tb.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(tb.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ORDER BY tb.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'name', title: 'Name' },
+        { id: 'enabled', title: 'Enabled' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+        { id: 'modification_date', title: 'Modification date' },
+        { id: 'modification_time', title: 'Modification time' }
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=transported-by-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 router.post('/table/location/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager') {
@@ -6756,6 +6986,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const delivered_by = filters.delivered_by || [];
+      const transported_by = filters.transported_by || [];
       const stocker_upload = filters.stocker_upload || [];
       const language = req.query.language || 'en';
 
@@ -6786,6 +7017,10 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       if (delivered_by.length > 0) {
         query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.join() + ')';
       }
+      var query_transported_by = '';
+      if (transported_by.length > 0) {
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      }
       var query_stocker_upload = '';
       if (stocker_upload.length > 0) {
         query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
@@ -6800,6 +7035,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 loc.community_city as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 db.name as delivered_by,
+                tb.name as transported_by,
                 as1.name as audit_status,
                 u.id as created_by_id,
                 u.username as created_by_username,
@@ -6812,6 +7048,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         FROM donation_ticket as dt
         LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         LEFT JOIN delivered_by as db ON dt.delivered_by = db.id
+        LEFT JOIN transported_by as tb ON dt.transported_by_id = tb.id
         LEFT JOIN provider as p ON dt.provider_id = p.id
         LEFT JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         LEFT JOIN location as loc ON dt.location_id = loc.id
@@ -6826,6 +7063,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ${query_locations}
         ${query_providers}
         ${query_delivered_by}
+        ${query_transported_by}
         ${query_stocker_upload}
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         ORDER BY dt.date, dt.id`,
@@ -6841,6 +7079,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         { id: 'location', title: 'Location' },
         { id: 'date', title: 'Date' },
         { id: 'delivered_by', title: 'Delivered by' },
+        { id: 'transported_by', title: 'Transported by' },
         { id: 'audit_status', title: 'Audit status' },
         { id: 'created_by_id', title: 'Created by ID' },
         { id: 'created_by_username', title: 'Created by username' },
@@ -8725,6 +8964,7 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
       const stocker_upload = filters.stocker_upload || [];
+      const transported_by = filters.transported_by || [];
       const interval = filters.interval || 'month';
 
       // Convertir a formato ISO y obtener solo la fecha
@@ -8815,6 +9055,10 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
       if (stocker_upload.length > 0) {
         query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
       }
+      var query_transported_by = '';
+      if (transported_by.length > 0) {
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      }
   
 
       // Construir la consulta SQL con el CTE
@@ -8836,26 +9080,27 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
             WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
           )
           SELECT 
-            u.username AS name,
+            tb.name AS name,
             COALESCE(COUNT(DISTINCT dt.id), 0) AS data,
             date_ranges.period AS period
           FROM date_ranges
           LEFT JOIN donation_ticket as dt ON 
             CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date)) = date_ranges.period
           LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
-          LEFT JOIN user as u ON sl.user_id = u.id
+          LEFT JOIN transported_by as tb ON dt.transported_by_id = tb.id
           LEFT JOIN provider as pr ON dt.provider_id = pr.id
           LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           LEFT JOIN product as p ON pdt.product_id = p.id
           LEFT JOIN product_type as pt ON p.product_type_id = pt.id
           ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE dt.enabled = 'Y' and u.enabled = 'Y'
+          WHERE dt.enabled = 'Y' and tb.enabled = 'Y' and sl.operation_id = 5
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
           ${query_providers}
           ${query_product_types}
           ${query_stocker_upload}
+          ${query_transported_by}
           GROUP BY name, period
         `;
       } else {
@@ -8879,26 +9124,27 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
             WHERE DATE_ADD(date, INTERVAL ${dateAddInterval}) <= ?
           )
           SELECT 
-            u.username AS name,
+            tb.name AS name,
             COALESCE(COUNT(DISTINCT dt.id), 0) AS data,
             date_ranges.period AS period
           FROM date_ranges
           LEFT JOIN donation_ticket as dt ON 
             DATE_FORMAT(dt.date, '${formatString}') = date_ranges.period
           LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id
-          LEFT JOIN user as u ON sl.user_id = u.id
+          LEFT JOIN transported_by as tb ON dt.transported_by_id = tb.id
           LEFT JOIN provider as pr ON dt.provider_id = pr.id
           LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           LEFT JOIN product as p ON pdt.product_id = p.id
           LEFT JOIN product_type as pt ON p.product_type_id = pt.id
           ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE dt.enabled = 'Y' and u.enabled = 'Y'
+          WHERE dt.enabled = 'Y' and tb.enabled = 'Y' and sl.operation_id = 5
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
           ${query_providers}
           ${query_product_types}
           ${query_stocker_upload}
+          ${query_transported_by}
           GROUP BY name, period
         `;
       }
@@ -9639,6 +9885,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     const locations = filters.locations || [];
     const providers = filters.providers || [];
     const delivered_by = filters.delivered_by || [];
+    const transported_by = filters.transported_by || [];
     const stocker_upload = filters.stocker_upload || [];
     const language = req.query.language || 'en';
 
@@ -9668,6 +9915,10 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     var query_delivered_by = '';
     if (delivered_by.length > 0) {
       query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.join() + ')';
+    }
+    var query_transported_by = '';
+    if (transported_by.length > 0) {
+      query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
     }
     var query_stocker_upload = '';
     if (stocker_upload.length > 0) {
@@ -9708,12 +9959,14 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       location.community_city as location,
       DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
       db.name as delivered_by,
+      tb.name as transported_by,
       ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
       COUNT(DISTINCT pdt.product_id) AS products,
       DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket as dt
       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
       INNER JOIN delivered_by as db ON dt.delivered_by = db.id
+      INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id
       INNER JOIN provider ON dt.provider_id = provider.id
       INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
       INNER JOIN location ON dt.location_id = location.id
@@ -9728,6 +9981,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       ${query_locations}
       ${query_providers}
       ${query_delivered_by}
+      ${query_transported_by}
       ${query_stocker_upload}
       GROUP BY dt.id
       ORDER BY ${queryOrderBy}
@@ -9742,6 +9996,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         FROM donation_ticket as dt
         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         INNER JOIN delivered_by as db ON dt.delivered_by = db.id
+        INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id
         INNER JOIN provider ON dt.provider_id = provider.id
         INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         INNER JOIN location ON dt.location_id = location.id
@@ -9756,6 +10011,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         ${query_locations}
         ${query_providers}
         ${query_delivered_by}
+        ${query_transported_by}
         ${query_stocker_upload}
       `);
 
@@ -10329,6 +10585,97 @@ router.post('/table/delivered-by', verifyToken, async (req, res) => {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
           FROM delivered_by as db
+          WHERE 1=1 
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.post('/table/transported-by', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(tb.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(tb.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+
+    try {
+      const query = `
+      SELECT
+        id,
+        name,
+        enabled,
+        DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+        DATE_FORMAT(CONVERT_TZ(modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as modification_date
+      FROM transported_by as tb
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`;
+
+      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM transported_by as tb
           WHERE 1=1 
           ${queryBuscar}
           ${query_from_date}
@@ -11596,6 +11943,63 @@ router.get('/view/delivered-by/:idDeliveredBy', verifyToken, async (req, res) =>
 }
 );
 
+router.get('/view/transported-by/:idTransportedBy', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idTransportedBy } = req.params;
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT tb.id,
+          tb.name,
+          DATE_FORMAT(CONVERT_TZ(tb.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          DATE_FORMAT(CONVERT_TZ(tb.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
+          t.id as ticket_id,
+          t.donation_id,
+          DATE_FORMAT(t.date, '%m/%d/%Y') as date,
+          DATE_FORMAT(CONVERT_TZ(t.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS ticket_creation_date
+        FROM transported_by as tb
+        LEFT JOIN donation_ticket as t ON tb.id = t.transported_by_id
+        WHERE tb.id = ?
+        ORDER BY t.date DESC`,
+        [idTransportedBy]
+      );
+
+      if (rows.length > 0) {
+
+        // create object with transported by data and field 'tickets' with array of tickets
+        var transported_by = {};
+        var tickets = [];
+
+        transported_by["id"] = rows[0].id;
+        transported_by["name"] = rows[0].name;
+        transported_by["name_es"] = rows[0].name_es;
+        transported_by["creation_date"] = rows[0].creation_date;
+        transported_by["modification_date"] = rows[0].modification_date;
+
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].ticket_id) {
+            tickets.push({ ticket_id: rows[i].ticket_id, donation_id: rows[i].donation_id, date: rows[i].date, creation_date: rows[i].ticket_creation_date });
+          }
+        }
+
+        transported_by["tickets"] = tickets;
+
+        res.json(transported_by);
+      } else {
+        res.status(404).json('Transported by no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
 router.get('/view/gender/:idGender', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
@@ -11724,6 +12128,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 loc.community_city as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 db.name as delivered_by,
+                tb.name as transported_by,
                 ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
                 u.id as created_by_id,
                 u.username as created_by_username,
@@ -11733,6 +12138,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 pdt.quantity as quantity
         FROM donation_ticket as dt
         INNER JOIN delivered_by as db ON dt.delivered_by = db.id
+        INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id
         INNER JOIN provider as p ON dt.provider_id = p.id
         INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         INNER JOIN location as loc ON dt.location_id = loc.id
@@ -11758,6 +12164,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         ticket["location"] = rows[0].location;
         ticket["date"] = rows[0].date;
         ticket["delivered_by"] = rows[0].delivered_by;
+        ticket["transported_by"] = rows[0].transported_by;
         ticket["audit_status"] = rows[0].audit_status;
         ticket["created_by_id"] = rows[0].created_by_id;
         ticket["created_by_username"] = rows[0].created_by_username;
