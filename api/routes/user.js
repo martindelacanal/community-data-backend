@@ -306,7 +306,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         const destination = formulario.destination || null;
         const audit_status = formulario.audit_status || null;
         const notes = formulario.notes || null;
-        const delivered_by = formulario.delivered_by || null;
+        var delivered_by = formulario.delivered_by || null;
         var products = formulario.products || [];
         var date = null;
         if (formulario.date) {
@@ -338,6 +338,19 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             [cabecera.id, 5, transported_by]
           );
         }
+        if (!Number.isInteger(delivered_by)) {
+          const [rows] = await mysqlConnection.promise().query(
+            'insert into delivered_by(name) values(?)',
+            [delivered_by]
+          );
+          delivered_by = rows.insertId;
+          // insertar en stocker_log la operation 5 (create), el delivered_by insertado y el id del usuario logueado
+          const [rows2] = await mysqlConnection.promise().query(
+            'insert into stocker_log(user_id, operation_id, delivered_by_id) values(?,?,?)',
+            [cabecera.id, 5, delivered_by]
+          );
+        }
+
         // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
         for (let i = 0; i < products.length; i++) {
           if (!Number.isInteger(products[i].product)) {
@@ -440,6 +453,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           'Total Weight': total_weight,
           'Provider': provider,
           'Transported By': transported_by,
+          'Received By': delivered_by,
           'Destination': destination,
           'Audit Status': audit_status || '',
           'Notes': notes || '',
@@ -462,6 +476,14 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
             [transported_by]
           );
           formData['Transported By'] = transportedByRows[0]?.name || transported_by;
+        }
+
+        if (delivered_by) {
+          const [deliveredByRows] = await mysqlConnection.promise().query(
+            'SELECT name FROM delivered_by WHERE id = ?',
+            [delivered_by]
+          );
+          formData['Delivered By'] = deliveredByRows[0]?.name || delivered_by;
         }
 
         if (destination) {
@@ -600,7 +622,7 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
       const destination = formulario.destination || null;
       const audit_status = formulario.audit_status || null;
       const notes = formulario.notes || null;
-      const delivered_by = formulario.delivered_by || null;
+      var delivered_by = formulario.delivered_by || null;
       var products = formulario.products || [];
       var date = null;
       if (formulario.date) {
@@ -632,6 +654,19 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
           [cabecera.id, 5, transported_by]
         );
       }
+      if (!Number.isInteger(delivered_by)) {
+        const [rows_insert_delivered_by] = await mysqlConnection.promise().query(
+          'insert into delivered_by(name) values(?)',
+          [delivered_by]
+        );
+        delivered_by = rows_insert_delivered_by.insertId;
+        // insertar en stocker_log la operation 5 (create), el delivered_by insertado y el id del usuario logueado
+        const [rows2] = await mysqlConnection.promise().query(
+          'insert into stocker_log(user_id, operation_id, delivered_by_id) values(?,?,?)',
+          [cabecera.id, 5, delivered_by]
+        );
+      }
+
       // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
       for (let i = 0; i < products.length; i++) {
         if (!Number.isInteger(products[i].product)) {
@@ -722,7 +757,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 tb.name as transported_by,
                 t.location_id as destination,
                 t.date,
-                t.delivered_by,
+                db.name as delivered_by,
                 t.audit_status_id as audit_status,
                 p.name as product,
                 p.product_type_id as product_type,
@@ -732,6 +767,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 INNER JOIN donation_ticket_image as dti ON t.id = dti.donation_ticket_id
                 INNER JOIN provider as prov ON t.provider_id = prov.id
                 INNER JOIN transported_by as tb ON t.transported_by_id = tb.id
+                INNER JOIN delivered_by as db ON t.delivered_by = db.id
                 INNER join product_donation_ticket as pdt on t.id = pdt.donation_ticket_id
                 INNER join product as p on pdt.product_id = p.id
                 INNER join product_type as pt on p.product_type_id = pt.id
