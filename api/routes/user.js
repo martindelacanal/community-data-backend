@@ -38,6 +38,19 @@ const s3 = new S3Client({
 });
 // S3 FIN
 
+// Mailchimp incio
+const mailchimp = require('@mailchimp/mailchimp_marketing');
+
+const mailchimpKey = process.env.MAILCHIMP_KEY;
+const mailchimpServerPrefix = process.env.MAILCHIMP_SERVER_PREFIX;
+const mailchimpAudienceId = process.env.MAILCHIMP_AUDIENCE_ID;
+// Configure Mailchimp
+mailchimp.setConfig({
+  apiKey: mailchimpKey,
+  server: mailchimpServerPrefix,
+});
+// Mailchimp fin
+
 router.get('/ping', (req, res) => {
   res.status(200).send();
 });
@@ -148,6 +161,44 @@ router.get('/refresh-token', verifyToken, (req, res) => {
   }
 });
 
+function formatDateForMailchimp(dateString) {
+  if (!dateString) return '';
+  
+  // Asumiendo el string viene en formato YYYY-MM-DD
+  const [year, month, day] = dateString.split('-');
+  return `${month.padStart(2, '0')}/${day.padStart(2, '0')}`;
+}
+
+async function addSubscriberToMailchimp(userData) {
+  try {
+    const response = await mailchimp.lists.addListMember(mailchimpAudienceId, {
+      email_address: userData.email || '',
+      status: "subscribed",
+      merge_fields: {
+      FNAME: userData.firstname || '',
+      LNAME: userData.lastname || '',
+      PHONE: userData.phone || '',
+      SMSPHONE: userData.phone ? '+1' + userData.phone : '',
+      ADDRESS: {
+        addr1: ',',
+        addr2: '',
+        city: ',',
+        state: 'CA',
+        zip: userData.zipcode || '',
+        country: 'USA'
+      },
+      BIRTHDAY: formatDateForMailchimp(userData.dateOfBirth),
+      MMERGE8: userData.gender || '',
+      MMERGE9: userData.ethnicity || '',
+      MMERGE10: userData.otherEthnicity || ''
+      }
+    });
+    return response;
+  } catch (err) {
+    throw err;
+  }
+}
+
 router.post('/signup', async (req, res) => {
   // const cabecera = JSON.parse(req.data.data);
   console.log(req.body);
@@ -253,7 +304,35 @@ router.post('/signup', async (req, res) => {
           }
         }
       }
+
       res.status(200).json('Data inserted successfully');
+
+      // After successful user creation, add to Mailchimp
+      try {
+        // get gender name and ethnicity name from their ids
+        const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', gender);
+        const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', ethnicity);
+
+        const gender_name = rowsGender && rowsGender[0]?.name || '';
+        const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
+          
+        await addSubscriberToMailchimp({
+          email: email,
+          firstname: firstname,
+          lastname: lastname,
+          phone: phone,
+          zipcode: zipcode,
+          dateOfBirth: dateOfBirth,
+          gender: gender_name,
+          ethnicity: ethnicity_name,
+          otherEthnicity: otherEthnicity
+        });
+
+      } catch (mailchimpError) {
+        // Update user to set mailchimp_error to 'Y'
+        await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
+      
+      }
     } else {
       res.status(500).json('Could not create user');
     }
@@ -846,7 +925,7 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
 
     if (req.files && req.files.length > 0) {
       formulario = JSON.parse(req.body.form);
-      
+
       const firstname = formulario.firstName || null;
       const lastname = formulario.lastName || null;
       const email = formulario.email || null;
@@ -868,10 +947,10 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
                                           gender_id) \
                                           values(?,?,?,?,?,?,?,?)',
         [firstname, lastname, email, phone, zipcode, location_id, dateOfBirth, gender]);
-        
+
       if (rows.affectedRows > 0) {
         const volunteer_id = rows.insertId;
-        
+
         for (let i = 0; i < req.files.length; i++) {
           req.files[i].filename = randomImageName();
           const paramsLogo = {
@@ -882,7 +961,7 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
           };
           const commandLogo = new PutObjectCommand(paramsLogo);
           await s3.send(commandLogo);
-          
+
           await connection.query(
             'insert into volunteer_signature(volunteer_id, file) values(?,?)',
             [volunteer_id, req.files[i].filename]
@@ -894,7 +973,7 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
           'SELECT community_city FROM location WHERE id = ?',
           [location_id]
         );
-        
+
         await connection.commit();
         res.status(200).json('Data inserted successfully');
 
@@ -913,7 +992,7 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
       await connection.rollback();
     }
     console.log(err);
-    
+
     if (err.message === 'Volunteer signature is required') {
       res.status(400).json(err.message);
     } else if (err.message === 'Could not create volunteer') {
@@ -7181,6 +7260,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
 );
 // TO-DO que hacer con las preguntas que no son multiple choice
 const moment = require('moment-timezone');
+const e = require('express');
 
 router.post('/metrics/health/questions', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -9095,7 +9175,7 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
       if (transported_by.length > 0) {
         query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
       }
-  
+
 
       // Construir la consulta SQL con el CTE
       let query;
