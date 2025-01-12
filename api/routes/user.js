@@ -9818,6 +9818,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
       u.lastname,
       role.name as role,
       u.enabled,
+      u.mailchimp_error,
       DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM user as u
       INNER JOIN role ON u.role_id = role.id
@@ -12363,6 +12364,36 @@ router.put('/enable-disable/:id', verifyToken, async (req, res) => {
       try {
         const [rows] = await mysqlConnection.promise().query(
           `update ${table} set enabled = ? where id = ?`,
+          [enabled, id]
+        );
+        if (rows.affectedRows > 0) {
+          res.json('Registro actualizado correctamente');
+        } else {
+          res.status(500).json('No se pudo actualizar el registro');
+        }
+      } catch (err) {
+        console.log(err);
+        res.status(500).json('Internal server error');
+      }
+    } else {
+      res.status(400).json('Faltan datos');
+    }
+  } else {
+    res.status(401).send();
+  }
+});
+
+router.put('/mailchimp/error/enable-disable/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    const { id } = req.params;
+    const { enabled } = req.body;
+
+    if (id && enabled) {
+      try {
+        const [rows] = await mysqlConnection.promise().query(
+          `update user set mailchimp_error = ? where id = ?`,
           [enabled, id]
         );
         if (rows.affectedRows > 0) {
