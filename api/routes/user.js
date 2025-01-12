@@ -4880,6 +4880,8 @@ router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res
   const locations = filters.locations || [];
   const providers = filters.providers || [];
   const product_types = filters.product_types || [];
+  const stocker_upload = filters.stocker_upload || [];
+  const transported_by = filters.transported_by || [];
   const interval = filters.interval || 'month';
 
   // Convertir a formato ISO (fecha sin hora)
@@ -4958,6 +4960,14 @@ router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res
     query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
     params.push(...providers);
   }
+  var query_stocker_upload = '';
+  if (stocker_upload.length > 0) {
+    query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+  }
+  var query_transported_by = '';
+  if (transported_by.length > 0) {
+    query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+  }
   if (product_types.length > 0) {
     // Se filtra por product_types a través de product_donation_ticket y product
     // Al igual que en el código original
@@ -5020,12 +5030,15 @@ router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res
               FROM date_ranges
               LEFT JOIN donation_ticket as dt ON 
                 CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date)) = date_ranges.period
+              LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
               WHERE dt.enabled = 'Y'
               ${query_from_date}
               ${query_to_date}
               ${query_locations}
               ${query_providers}
               ${query_product_types}
+              ${query_stocker_upload}
+              ${query_transported_by}
               GROUP BY date_ranges.period
               ORDER BY date_ranges.period
             `;
@@ -5050,12 +5063,15 @@ router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res
               FROM date_ranges
               LEFT JOIN donation_ticket as dt ON 
                 DATE_FORMAT(dt.date, '${formatString}') = date_ranges.period
+              LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
               WHERE dt.enabled = 'Y'
               ${query_from_date}
               ${query_to_date}
               ${query_locations}
               ${query_providers}
               ${query_product_types}
+              ${query_stocker_upload}
+              ${query_transported_by}
               GROUP BY date_ranges.period
               ORDER BY date_ranges.period
             `;
@@ -8190,6 +8206,8 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
       let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
       const providers = filters.providers || [];
+      const stocker_upload = filters.stocker_upload || [];
+      const transported_by = filters.transported_by || [];
       const product_types = filters.product_types || [];
 
       // Convertir a formato ISO y obtener solo la fecha
@@ -8228,6 +8246,14 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
       if (product_types.length > 0) {
         query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
       }
+      var query_stocker_upload = '';
+      if (stocker_upload.length > 0) {
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      }
+      var query_transported_by = '';
+      if (transported_by.length > 0) {
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      }
 
       const [rows_reach] = await mysqlConnection.promise().query(
         `SELECT 
@@ -8250,6 +8276,7 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
         `SELECT 
           SUM(pdt.quantity) AS poundsDelivered
           FROM donation_ticket as dt
+          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
           INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           INNER JOIN product as p ON pdt.product_id = p.id
           ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
@@ -8259,6 +8286,8 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
           ${query_locations_product}
           ${query_providers}
           ${query_product_types}
+          ${query_stocker_upload}
+          ${query_transported_by}
           ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
           `,
         [cabecera.client_id]
@@ -8840,6 +8869,8 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+      const stocker_upload = filters.stocker_upload || [];
+      const transported_by = filters.transported_by || [];
       const interval = filters.interval || 'month';
 
       // Convertir a formato ISO y obtener solo la fecha
@@ -8926,6 +8957,14 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         query_product_types += ' AND cl.client_id = ?';
         params.push(cabecera.client_id);
       }
+      var query_stocker_upload = '';
+      if (stocker_upload.length > 0) {
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      }
+      var query_transported_by = '';
+      if (transported_by.length > 0) {
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      }
 
       // Construir la consulta SQL con el CTE
       let query;
@@ -8952,6 +8991,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
           FROM date_ranges
           LEFT JOIN donation_ticket as dt ON 
             CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date)) = date_ranges.period
+          LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
           LEFT JOIN provider as pr ON dt.provider_id = pr.id
           LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           LEFT JOIN product as p ON pdt.product_id = p.id
@@ -8963,6 +9003,8 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
           ${query_locations}
           ${query_providers}
           ${query_product_types}
+          ${query_stocker_upload}
+          ${query_transported_by}
           GROUP BY name, period
         `;
       } else {
@@ -8992,6 +9034,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
           FROM date_ranges
           LEFT JOIN donation_ticket as dt ON 
             DATE_FORMAT(dt.date, '${formatString}') = date_ranges.period
+          LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
           LEFT JOIN provider as pr ON dt.provider_id = pr.id
           LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           LEFT JOIN product as p ON pdt.product_id = p.id
@@ -9003,6 +9046,8 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
           ${query_locations}
           ${query_providers}
           ${query_product_types}
+          ${query_stocker_upload}
+          ${query_transported_by}
           GROUP BY name, period
         `;
       }
@@ -9337,6 +9382,8 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+      const stocker_upload = filters.stocker_upload || [];
+      const transported_by = filters.transported_by || [];
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -9368,6 +9415,14 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
       if (product_types.length > 0) {
         query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
       }
+      var query_stocker_upload = '';
+      if (stocker_upload.length > 0) {
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      }
+      var query_transported_by = '';
+      if (transported_by.length > 0) {
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      }
 
 
       const [rows] = await mysqlConnection.promise().query(
@@ -9375,6 +9430,7 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
           ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS name,
           SUM(pdt.quantity) AS total
           FROM donation_ticket as dt
+          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
           INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
           INNER JOIN product as p ON pdt.product_id = p.id
           INNER JOIN product_type as pt ON p.product_type_id = pt.id
@@ -9385,6 +9441,8 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
           ${query_locations}
           ${query_providers}
           ${query_product_types}
+          ${query_stocker_upload}
+          ${query_transported_by}
           ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
           GROUP BY name`,
         [cabecera.client_id]
@@ -9409,6 +9467,8 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+      const stocker_upload = filters.stocker_upload || [];
+      const transported_by = filters.transported_by || [];
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -9440,12 +9500,21 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
       if (product_types.length > 0) {
         query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
       }
+      var query_stocker_upload = '';
+      if (stocker_upload.length > 0) {
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      }
+      var query_transported_by = '';
+      if (transported_by.length > 0) {
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         l.community_city AS name,
         SUM(pdt.quantity) AS total
         FROM donation_ticket as dt
+        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as p ON pdt.product_id = p.id
         INNER JOIN location as l ON dt.location_id = l.id
@@ -9456,6 +9525,8 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         ${query_locations}
         ${query_providers}
         ${query_product_types}
+        ${query_stocker_upload}
+        ${query_transported_by}
         GROUP BY l.id
         ORDER BY total desc`,
         [cabecera.client_id]
@@ -9516,6 +9587,8 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
       const locations = filters.locations || [];
       const providers = filters.providers || [];
       const product_types = filters.product_types || [];
+      const stocker_upload = filters.stocker_upload || [];
+      const transported_by = filters.transported_by || [];
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -9547,12 +9620,21 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
       if (product_types.length > 0) {
         query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
       }
+      var query_stocker_upload = '';
+      if (stocker_upload.length > 0) {
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      }
+      var query_transported_by = '';
+      if (transported_by.length > 0) {
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
         p.name AS name,
         SUM(pdt.quantity) AS total
         FROM donation_ticket as dt
+        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         INNER JOIN product as p ON pdt.product_id = p.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
@@ -9562,6 +9644,8 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
         ${query_locations}
         ${query_providers}
         ${query_product_types}
+        ${query_stocker_upload}
+        ${query_transported_by}
         ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
         GROUP BY name
         ORDER BY total DESC`,
