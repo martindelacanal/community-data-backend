@@ -171,30 +171,57 @@ function formatDateForMailchimp(dateString) {
 
 async function addSubscriberToMailchimp(userData) {
   try {
+    // (1) Prepara el número de teléfono en formato E.164
+    //     en caso de que lo quieras normalizar. Por ejemplo:
+    const cleanPhone = userData.phone
+      ? `+1${userData.phone.replace(/\D/g, '')}`
+      : '';
+
+    // (2) Llama a la API de Mailchimp agregando 'sms_phone_number'
+    //     y 'sms_subscription_status' en el body principal
     const response = await mailchimp.lists.addListMember(mailchimpAudienceId, {
-      email_address: userData.email || '',
-      status: "subscribed",
+      email_address: userData.email || `no-email-${Date.now()}@placeholder.com`,
+      status: userData.email ? 'subscribed' : 'unsubscribed',
+
+      // Aquí agregas el número al campo nativo de SMS
+      sms_phone_number: cleanPhone, 
+      sms_subscription_status: cleanPhone ? 'subscribed' : '',
+
+      // merge_fields para otros datos (nombre, apellido, etc.)
       merge_fields: {
-      FNAME: userData.firstname || '',
-      LNAME: userData.lastname || '',
-      PHONE: userData.phone || '',
-      SMSPHONE: userData.phone ? '+1' + userData.phone : '',
-      ADDRESS: {
-        addr1: ',',
-        addr2: '',
-        city: ',',
-        state: 'CA',
-        zip: userData.zipcode || '',
-        country: 'USA'
+        FNAME: userData.firstname || '',
+        LNAME: userData.lastname || '',
+        PHONE: userData.phone || '', // Este es tu merge field de “PHONE”
+        // SMSPHONE ya no tiene utilidad si queremos usar el nativo sms_phone_number.
+        ADDRESS: {
+          addr1: ',',
+          addr2: '',
+          city: ',',
+          state: 'CA',
+          zip: userData.zipcode || '',
+          country: 'USA'
+        },
+        BIRTHDAY: formatDateForMailchimp(userData.dateOfBirth),
+        MMERGE8: userData.gender || '',
+        MMERGE9: userData.ethnicity || '',
+        MMERGE10: userData.otherEthnicity || '',
+        EMAIL_CONSENT: userData.email ? 'yes' : 'no'
       },
-      BIRTHDAY: formatDateForMailchimp(userData.dateOfBirth),
-      MMERGE8: userData.gender || '',
-      MMERGE9: userData.ethnicity || '',
-      MMERGE10: userData.otherEthnicity || ''
-      }
+
+      // Si lo deseas, puedes omitir sms_marketing_permission o dejarlo
+      // para forzar el “opt-in”. Depende de si tu cuenta de Mailchimp
+      // requiere un “double opt-in” específico para SMS.
+      // sms_marketing_permission: {
+      //   enabled: true,
+      //   company: "MAHI International, Inc.",
+      //   prefix: "+1"
+      // }
     });
+
+    console.log("response", response);
     return response;
   } catch (err) {
+    console.log(err);
     throw err;
   }
 }
@@ -308,31 +335,32 @@ router.post('/signup', async (req, res) => {
       res.status(200).json('Data inserted successfully');
 
       // After successful user creation, add to Mailchimp
-      try {
-        // get gender name and ethnicity name from their ids
-        const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', gender);
-        const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', ethnicity);
+      // try {
+      //   // get gender name and ethnicity name from their ids
+      //   const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', gender);
+      //   const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', ethnicity);
 
-        const gender_name = rowsGender && rowsGender[0]?.name || '';
-        const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
+      //   const gender_name = rowsGender && rowsGender[0]?.name || '';
+      //   const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
           
-        await addSubscriberToMailchimp({
-          email: email,
-          firstname: firstname,
-          lastname: lastname,
-          phone: phone,
-          zipcode: zipcode,
-          dateOfBirth: dateOfBirth,
-          gender: gender_name,
-          ethnicity: ethnicity_name,
-          otherEthnicity: otherEthnicity
-        });
+      //   await addSubscriberToMailchimp({
+      //     email: email,
+      //     firstname: firstname,
+      //     lastname: lastname,
+      //     phone: phone,
+      //     zipcode: zipcode,
+      //     dateOfBirth: dateOfBirth,
+      //     gender: gender_name,
+      //     ethnicity: ethnicity_name,
+      //     otherEthnicity: otherEthnicity
+      //   });
 
-      } catch (mailchimpError) {
-        // Update user to set mailchimp_error to 'Y'
-        await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
-      
-      }
+      // } catch (mailchimpError) {
+      //   // Update user to set mailchimp_error to 'Y'
+      //   await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
+        
+      // }
+      await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
     } else {
       res.status(500).json('Could not create user');
     }
