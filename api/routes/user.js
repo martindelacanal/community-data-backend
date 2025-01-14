@@ -180,8 +180,10 @@ async function addSubscriberToMailchimp(userData) {
     // (2) Llama a la API de Mailchimp agregando 'sms_phone_number'
     //     y 'sms_subscription_status' en el body principal
     const response = await mailchimp.lists.addListMember(mailchimpAudienceId, {
-      email_address: userData.email || `no-email-${Date.now()}@placeholder.com`,
-      status: userData.email ? 'subscribed' : 'unsubscribed',
+      // email_address: userData.email || `no-email-${Date.now()}@placeholder.com`,
+      email_address: userData.email || ``,
+      // status: userData.email ? 'subscribed' : 'unsubscribed',
+      status: userData.email ? 'subscribed' : '',
 
       // Aquí agregas el número al campo nativo de SMS
       sms_phone_number: cleanPhone, 
@@ -192,6 +194,7 @@ async function addSubscriberToMailchimp(userData) {
         FNAME: userData.firstname || '',
         LNAME: userData.lastname || '',
         PHONE: userData.phone || '', // Este es tu merge field de “PHONE”
+        SMSPHONE: cleanPhone,
         // SMSPHONE ya no tiene utilidad si queremos usar el nativo sms_phone_number.
         ADDRESS: {
           addr1: ',',
@@ -218,10 +221,10 @@ async function addSubscriberToMailchimp(userData) {
       // }
     });
 
-    console.log("response", response);
+    // console.log("response", response);
     return response;
   } catch (err) {
-    console.log(err);
+    // console.log(err);
     throw err;
   }
 }
@@ -335,31 +338,31 @@ router.post('/signup', async (req, res) => {
       res.status(200).json('Data inserted successfully');
 
       // After successful user creation, add to Mailchimp
-      // try {
-      //   // get gender name and ethnicity name from their ids
-      //   const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', gender);
-      //   const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', ethnicity);
+      try {
+        // get gender name and ethnicity name from their ids
+        const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', gender);
+        const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', ethnicity);
 
-      //   const gender_name = rowsGender && rowsGender[0]?.name || '';
-      //   const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
+        const gender_name = rowsGender && rowsGender[0]?.name || '';
+        const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
           
-      //   await addSubscriberToMailchimp({
-      //     email: email,
-      //     firstname: firstname,
-      //     lastname: lastname,
-      //     phone: phone,
-      //     zipcode: zipcode,
-      //     dateOfBirth: dateOfBirth,
-      //     gender: gender_name,
-      //     ethnicity: ethnicity_name,
-      //     otherEthnicity: otherEthnicity
-      //   });
+        await addSubscriberToMailchimp({
+          email: email,
+          firstname: firstname,
+          lastname: lastname,
+          phone: phone,
+          zipcode: zipcode,
+          dateOfBirth: dateOfBirth,
+          gender: gender_name,
+          ethnicity: ethnicity_name,
+          otherEthnicity: otherEthnicity
+        });
 
-      // } catch (mailchimpError) {
-      //   // Update user to set mailchimp_error to 'Y'
-      //   await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
+      } catch (mailchimpError) {
+        // Update user to set mailchimp_error to 'Y'
+        await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
         
-      // }
+      }
       await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
     } else {
       res.status(500).json('Could not create user');
