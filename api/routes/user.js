@@ -965,6 +965,8 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
       const location_id = formulario.destination || null;
       const dateOfBirth = formulario.dateOfBirth || null;
       const gender = formulario.gender || null;
+      const ethnicity = formulario.ethnicity || null;
+      const otherEthnicity = formulario.otherEthnicity || null;
       // const date = formulario.date || null;
       const language = formulario.language || 'en';
 
@@ -975,9 +977,11 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
                                           zipcode, \
                                           location_id, \
                                           date_of_birth, \
-                                          gender_id) \
-                                          values(?,?,?,?,?,?,?,?)',
-        [firstname, lastname, email, phone, zipcode, location_id, dateOfBirth, gender]);
+                                          gender_id, \
+                                          ethnicity_id, \
+                                          other_ethnicity) \
+                                          values(?,?,?,?,?,?,?,?,?,?)',
+        [firstname, lastname, email, phone, zipcode, location_id, dateOfBirth, gender, ethnicity, otherEthnicity]);
 
       if (rows.affectedRows > 0) {
         const volunteer_id = rows.insertId;
