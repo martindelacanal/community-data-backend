@@ -12737,6 +12737,80 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   }
 })
 
+router.get('/view/volunteer/:idVolunteer', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { idVolunteer } = req.params;
+      const language = req.query.language || 'en';
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT v.id,
+          v.email,
+          v.firstname,
+          v.lastname,
+          DATE_FORMAT(v.date_of_birth, '%m/%d/%Y') AS date_of_birth,
+          v.phone,
+          v.zipcode,
+          l.community_city,
+          ${language === 'en' ? 'g.name' : 'g.name_es'} AS gender,
+          ${language === 'en' ? 'e.name' : 'e.name_es'} AS ethnicity,
+          v.other_ethnicity,
+          DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
+        FROM volunteer as v
+        INNER JOIN location as l ON v.location_id = l.id
+        INNER JOIN gender as g ON v.gender_id = g.id
+        INNER JOIN ethnicity as e ON v.ethnicity_id = e.id
+        WHERE v.id = ?`,
+        [idVolunteer]
+      );
+
+      if (rows.length > 0) {
+        res.json(rows[0]);
+      } else {
+        res.status(404).json('Gender no encontrado');
+      }
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+}
+);
+
+router.get('/view/volunteer/images/:idVolunteer', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const { idVolunteer } = req.params;
+
+  if (cabecera.role === 'admin') {
+
+    const [rows] = await mysqlConnection.promise().query(`
+                          select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
+                          from volunteer_signature \
+                          where volunteer_id = ?`, [idVolunteer]);
+
+    if (rows.length > 0) {
+      for (let i = 0; i < rows.length; i++) {
+        getObjectParams = {
+          Bucket: bucketName,
+          Key: rows[i].file
+        };
+        command = new GetObjectCommand(getObjectParams);
+        url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+        rows[i].file = url;
+      }
+    }
+
+    res.json(rows);
+
+  } else {
+    res.status(401).json('No autorizado');
+  }
+})
+
 router.put('/enable-disable/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
