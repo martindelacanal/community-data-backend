@@ -10003,6 +10003,269 @@ router.post('/table/user', verifyToken, async (req, res) => {
     res.status(401).json('No autorizado');
   }
 });
+router.post('/table/volunteer', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'admin') {
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const locations = filters.locations || [];
+    const genders = filters.genders || [];
+    const ethnicities = filters.ethnicities || [];
+    const min_age = filters.min_age || 0;
+    const max_age = filters.max_age || 150;
+    const zipcode = filters.zipcode || null;
+    const language = req.query.language || 'en';
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND v.location_id IN (' + locations.join() + ')';
+    }
+    var query_genders = '';
+    if (genders.length > 0) {
+      query_genders = 'AND v.gender_id IN (' + genders.join() + ')';
+    }
+    var query_ethnicities = '';
+    if (ethnicities.length > 0) {
+      query_ethnicities = 'AND v.ethnicity_id IN (' + ethnicities.join() + ')';
+    }
+    var query_min_age = '';
+    if (filters.min_age) {
+      query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+    }
+    var query_max_age = '';
+    if (filters.max_age) {
+      query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+    }
+    var query_zipcode = '';
+    if (filters.zipcode) {
+      query_zipcode = 'AND v.zipcode = ' + zipcode;
+    }
+
+    let buscar = req.query.search;
+    let queryBuscar = '';
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      queryBuscar = `AND (v.id like '${buscar}' or v.email like '${buscar}' or v.firstname like '${buscar}' or v.lastname like '${buscar}' or l.community_city like '${buscar}' or g.name like '${buscar}' or e.name like '${buscar}' or g.name_es like '${buscar}' or e.name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+    }
+   
+    try {
+      const query = `SELECT
+      v.id,
+      v.email,
+      v.firstname,
+      v.lastname,
+      l.community_city as location,
+      ${language === 'en' ? 'g.name' : 'g.name_es'} as gender,
+      ${language === 'en' ? 'e.name' : 'e.name_es'} as ethnicity,
+      DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+      FROM volunteer as v
+      INNER JOIN location as l ON v.location_id = l.id
+      INNER JOIN gender as g ON v.gender_id = g.id
+      INNER JOIN ethnicity as e ON v.ethnicity_id = e.id
+      WHERE 1=1 
+      ${queryBuscar}
+      ${query_from_date}
+      ${query_to_date}
+      ${query_locations}
+      ${query_genders}
+      ${query_ethnicities}
+      ${query_min_age}
+      ${query_max_age}
+      ${query_zipcode}
+      ORDER BY ${queryOrderBy}
+      LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+          SELECT COUNT(*) as count
+          FROM volunteer as v
+          INNER JOIN location as l ON v.location_id = l.id
+          INNER JOIN gender as g ON v.gender_id = g.id
+          INNER JOIN ethnicity as e ON v.ethnicity_id = e.id
+          WHERE 1=1
+          ${queryBuscar}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_genders}
+          ${query_ethnicities}
+          ${query_min_age}
+          ${query_max_age}
+          ${query_zipcode}
+        `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
+router.post('/table/volunteer/download-csv', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND (v.location_id IN (' + locations.join() + ') )';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND v.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND v.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND v.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT v.id,
+                v.firstname,
+                v.lastname,
+                DATE_FORMAT(v.date_of_birth, '%m/%d/%Y') AS date_of_birth,
+                v.email,
+                v.phone,
+                v.zipcode,
+                g.name as gender,
+                e.name as ethnicity,
+                v.other_ethnicity,
+                l.community_city as location,
+        DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+                        DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time
+        FROM volunteer as v
+        INNER JOIN ethnicity as e ON v.ethnicity_id = e.id
+        INNER JOIN gender as g ON v.gender_id = g.id
+        INNER JOIN location as l ON v.location_id = l.id
+        WHERE CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        ORDER BY v.id`,
+        [from_date, to_date]
+      );
+
+      var headers_array = [
+        { id: 'id', title: 'ID' },
+        { id: 'firstname', title: 'Firstname' },
+        { id: 'lastname', title: 'Lastname' },
+        { id: 'date_of_birth', title: 'Date of birth' },
+        { id: 'email', title: 'Email' },
+        { id: 'phone', title: 'Phone' },
+        { id: 'zipcode', title: 'Zipcode' },
+        { id: 'gender', title: 'Gender' },
+        { id: 'ethnicity', title: 'Ethnicity' },
+        { id: 'other_ethnicity', title: 'Other ethnicity' },
+        { id: 'location', title: 'Location' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' },
+      ];
+
+      const csvStringifier = createCsvStringifier({
+        header: headers_array,
+        fieldDelimiter: ';'
+      });
+
+      let csvData = csvStringifier.getHeaderString();
+      csvData += csvStringifier.stringifyRecords(rows);
+
+      res.setHeader('Content-disposition', 'attachment; filename=participants-table.csv');
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      res.send(csvData);
+
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  }
+}
+);
+
 
 router.post('/table/delivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -11953,7 +12216,7 @@ router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
         LEFT JOIN donation_ticket as t ON p.id = t.provider_id
         LEFT JOIN product_donation_ticket as pdt ON t.id = pdt.donation_ticket_id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON t.location_id = cl.location_id' : ''}
-        WHERE p.id = ?
+        WHERE p.id = ? and t.enabled = 'Y'
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         GROUP BY t.id
         ORDER BY t.donation_id DESC`,
@@ -12019,7 +12282,7 @@ router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
         LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
         LEFT JOIN donation_ticket as t ON pdt.donation_ticket_id = t.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON t.location_id = cl.location_id' : ''}
-        WHERE p.id = ?
+        WHERE p.id = ? and t.enabled = 'Y'
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         ORDER BY t.donation_id DESC`,
         [idProduct, cabecera.client_id]
@@ -12141,7 +12404,7 @@ router.get('/view/delivered-by/:idDeliveredBy', verifyToken, async (req, res) =>
           DATE_FORMAT(CONVERT_TZ(t.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS ticket_creation_date
         FROM delivered_by as db
         LEFT JOIN donation_ticket as t ON db.id = t.delivered_by
-        WHERE db.id = ?
+        WHERE db.id = ? and t.enabled = 'Y'
         ORDER BY t.date DESC`,
         [idDeliveredBy]
       );
@@ -12198,7 +12461,7 @@ router.get('/view/transported-by/:idTransportedBy', verifyToken, async (req, res
           DATE_FORMAT(CONVERT_TZ(t.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS ticket_creation_date
         FROM transported_by as tb
         LEFT JOIN donation_ticket as t ON tb.id = t.transported_by_id
-        WHERE tb.id = ?
+        WHERE tb.id = ? and t.enabled = 'Y'
         ORDER BY t.date DESC`,
         [idTransportedBy]
       );
