@@ -7632,6 +7632,8 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -7724,6 +7726,8 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -7841,6 +7845,8 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -7958,6 +7964,412 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+);
+
+router.post('/metrics/volunteer/gender', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND v.location_id IN (' + locations.join() + ')) ';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND v.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND v.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND v.zipcode = ' + zipcode;
+      }
+
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        ${language === 'en' ? 'g.name' : 'g.name_es'} AS name,
+        COUNT(DISTINCT(v.id)) AS total
+        FROM volunteer as v
+        INNER JOIN gender AS g ON v.gender_id = g.id
+        WHERE CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        GROUP BY g.name`,
+        [from_date, toDate]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+);
+
+router.post('/metrics/volunteer/ethnicity', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND v.location_id IN (' + locations.join() + ')) ';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND v.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND v.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND v.zipcode = ' + zipcode;
+      }
+
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        ${language === 'en' ? 'e.name' : 'e.name_es'} AS name,
+        COUNT(DISTINCT(v.id)) AS total
+        FROM volunteer as v
+        INNER JOIN ethnicity AS e ON v.ethnicity_id = e.id
+        WHERE CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        GROUP BY e.name`,
+        [from_date, toDate]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+);
+
+router.post('/metrics/volunteer/location', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND v.location_id IN (' + locations.join() + ')) ';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND v.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND v.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND v.zipcode = ' + zipcode;
+      }
+
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        l.community_city AS name,
+        COUNT(DISTINCT(v.id)) AS total
+        FROM volunteer AS v
+        INNER JOIN location AS l ON v.location_id = l.id
+        WHERE CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        GROUP BY l.community_city
+        ORDER BY l.community_city`,
+        [from_date, toDate]
+      );
+
+      // Calcular el promedio
+      let sum = 0;
+      let count = 0;
+      for (const row of rows) {
+        sum += row.name * row.total;
+        count += row.total;
+      }
+      const average = Number((sum / count).toFixed(2));
+
+      // Calcular la mediana
+      rows.sort((a, b) => a.name - b.name);
+      let median;
+      let accumulatedCount = 0;
+      for (const row of rows) {
+        accumulatedCount += row.total;
+        if (accumulatedCount >= count / 2) {
+          median = row.name;
+          break;
+        }
+      }
+
+      // Convertir los números a cadenas
+      for (const row of rows) {
+        row.name = String(row.name);
+      }
+      res.json({ average: average, median: median, total: count, data: rows });
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+);
+
+router.post('/metrics/volunteer/age', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(v.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND v.location_id IN (' + locations.join() + ')) ';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND v.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND v.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND v.zipcode = ' + zipcode;
+      }
+
+      let toDate = new Date(to_date);
+      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+        TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS name,
+        COUNT(DISTINCT(v.id)) AS total
+        FROM volunteer as v
+        WHERE CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_min_age}
+        ${query_max_age}
+        ${query_zipcode}
+        GROUP BY name
+        ORDER BY name`,
+        [from_date, toDate]
+      );
+
+      // Calcular el promedio
+      let sum = 0;
+      let count = 0;
+      for (const row of rows) {
+        sum += row.name * row.total;
+        count += row.total;
+      }
+      const average = Number((sum / count).toFixed(2));
+
+      // Calcular la mediana
+      let median;
+      let accumulatedCount = 0;
+      for (const row of rows) {
+        accumulatedCount += row.total;
+        if (accumulatedCount >= count / 2) {
+          median = row.name;
+          break;
+        }
+      }
+
+      // Convertir los números a cadenas
+      for (const row of rows) {
+        row.name = String(row.name);
+      }
+
+      res.json({ average: average, median: median, data: rows });
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -8075,6 +8487,8 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -8257,6 +8671,8 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
@@ -8366,6 +8782,8 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(403).json('Unauthorized');
   }
 }
 );
