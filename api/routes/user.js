@@ -4337,7 +4337,33 @@ router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res
   }
 });
 
-router.get('/total-beneficiaries-recurring-today', verifyToken, async (req, res) => {
+router.get('/total-beneficiaries-recurring-today-scanned', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+    try {
+      // beneficiarios que ya estaban registrados en una fecha distinta a la de hoy y que aparecieron en delivery_beneficiary en la fecha de hoy
+      const [rows] = await mysqlConnection.promise().query(
+        `select count(distinct user.id) as total
+          from user
+          inner join delivery_beneficiary as db on user.id = db.receiving_user_id
+          where user.role_id = 5 
+          and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
+          and date(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles'))
+          and db.approved = 'Y'
+          ${cabecera.role === 'client' ? 'and db.client_id = ?' : ''}`,
+        [cabecera.client_id]
+      );
+      res.json(rows[0].total);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/total-beneficiaries-recurring-today-not-scanned', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
@@ -4349,6 +4375,7 @@ router.get('/total-beneficiaries-recurring-today', verifyToken, async (req, res)
           where user.role_id = 5 
           and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
           and date(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
+          and db.approved = 'N'
           ${cabecera.role === 'client' ? 'and db.client_id = ?' : ''}`,
         [cabecera.client_id]
       );
