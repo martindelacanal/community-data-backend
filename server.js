@@ -341,16 +341,16 @@ schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a media
     if (rows_emails.length > 0) {
         // Calcular from_date y to_date
         let today = moment().tz("America/Los_Angeles");
-        let lastSaturday = today.clone().day(-1); // último sábado
-        let previousSaturday = lastSaturday.clone().subtract(1, 'weeks'); // sábado anterior al último sábado
-
-        let from_date = previousSaturday.format("YYYY-MM-DD");
-        // Subtract one day from lastSaturday to exclude it
-        let to_date = lastSaturday.clone().subtract(1, 'day').format("YYYY-MM-DD");
-
+        // If running on Monday, we want last Monday through last Sunday
+        let lastMonday = today.clone().subtract(7, 'days'); // Last Monday
+        let lastSunday = today.clone().subtract(1, 'days'); // Yesterday (Sunday)
+        
+        let from_date = lastMonday.format("YYYY-MM-DD");
+        let to_date = lastSunday.format("YYYY-MM-DD");  // Include the entire Sunday
+        
         // Formatear las fechas para el mensaje
-        let formatted_from_date = previousSaturday.format("MM-DD-YYYY");
-        let formatted_to_date = lastSaturday.clone().subtract(1, 'day').format("MM-DD-YYYY");
+        let formatted_from_date = lastMonday.format("MM-DD-YYYY");
+        let formatted_to_date = lastSunday.format("MM-DD-YYYY");
         // un cliente puede tener varios emails
         // recorrer los emails de un cliente, guardarlos en variable emails y enviar el correo
         const emails = [];
