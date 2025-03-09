@@ -5306,6 +5306,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
                 u.firstname,
                 u.lastname,
                 DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
+                TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS age,
                 u.phone,
                 u.zipcode,
                 u.household_size,
@@ -5399,6 +5400,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
           row_filtered["firstname"] = rows[i].firstname;
           row_filtered["lastname"] = rows[i].lastname;
           row_filtered["date_of_birth"] = rows[i].date_of_birth;
+          row_filtered["age"] = rows[i].age;
           row_filtered["phone"] = rows[i].phone;
           row_filtered["zipcode"] = rows[i].zipcode;
           row_filtered["household_size"] = rows[i].household_size;
@@ -5456,6 +5458,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         { id: 'firstname', title: 'Firstname' },
         { id: 'lastname', title: 'Lastname' },
         { id: 'date_of_birth', title: 'Date of birth' },
+        { id: 'age', title: 'Age' },
         { id: 'phone', title: 'Phone' },
         { id: 'zipcode', title: 'Zipcode' },
         { id: 'household_size', title: 'Household size' },
