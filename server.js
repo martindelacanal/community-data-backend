@@ -6,6 +6,7 @@ const port = process.env.PORT || 3000;
 const server = http.createServer(app);
 const mysqlConnection = require('./api/connection/connection.js');
 const schedule = require('node-schedule');
+const { RecurrenceRule } = require('node-schedule');
 
 const logger = require('./api/utils/logger.js');
 const email = require('./api/email/email.js');
@@ -328,15 +329,75 @@ async function getSummary(from_date, to_date, csvRawData) {
 
 // schedule.scheduleJob('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
 // schedule.scheduleJob('* * * * *', async () => { // Se ejecuta cada minuto
-schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a medianoche
+// schedule.scheduleJob('0 0 * * 1', async () => { // Se ejecuta cada lunes a medianoche
+// Create a rule for Mondays at midnight in Los Angeles time
+const rule = new RecurrenceRule();
+rule.dayOfWeek = 1; // Monday (0 is Sunday)
+rule.hour = 0;      // Midnight
+rule.minute = 0;    
+rule.tz = 'America/Los_Angeles';
 
+// New rule for Sunday at 6:00 PM for administration email
+const adminRule = new RecurrenceRule();
+adminRule.dayOfWeek = 0; // Sunday (0 is Sunday)
+adminRule.hour = 18;     // 6:00 PM
+adminRule.minute = 0;
+adminRule.tz = 'America/Los_Angeles';
+
+// Schedule for administration email (Sunday 6:00 PM)
+schedule.scheduleJob(adminRule, async () => {
+    const adminEmail = 'administration@bienestariswellbeing.org';
+    const password = 'bienestarcommunity';
+    
+    const [adminClient] = await mysqlConnection.promise().query(
+        `SELECT ce.client_id, c.name AS client_name
+         FROM client_email AS ce
+         INNER JOIN client AS c ON ce.client_id = c.id
+         WHERE ce.email = ? AND ce.enabled = 'Y'
+         LIMIT 1`,
+        [adminEmail]
+    );
+
+    if (adminClient.length > 0) {
+        // Calculate date range same as regular job
+        let today = moment().tz("America/Los_Angeles");
+        let lastMonday = today.clone().subtract(7, 'days');
+        let lastSunday = today.clone().subtract(1, 'days');
+        
+        let from_date = lastMonday.format("YYYY-MM-DD");
+        let to_date = lastSunday.format("YYYY-MM-DD");
+        
+        let formatted_from_date = lastMonday.format("MM-DD-YYYY");
+        let formatted_to_date = lastSunday.format("MM-DD-YYYY");
+        
+        let date = today.format("MM-DD-YYYY");
+        
+        // Message for email
+        const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+        const subject = `Bienestar Community report for ${adminClient[0].client_name} - ${date}`;
+        
+        // Generate reports
+        const csvRawData = await getRawData(from_date, to_date, adminClient[0].client_id);
+        
+        if (csvRawData && csvRawData.split('\n').length > 2) {
+            const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
+            const csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
+            const csvSummary = await getSummary(from_date, to_date, csvRawData);
+            
+            // Send admin email
+            await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
+        }
+    }
+});
+
+schedule.scheduleJob(rule, async () => {
     const password = 'bienestarcommunity';
     const [rows_emails] = await mysqlConnection.promise().query(
-        `select ce.email, ce.client_id, c.name as client_name
-        from client_email as ce
-        inner join client as c on ce.client_id = c.id
-        where ce.enabled = 'Y'
-        order by ce.client_id`
+        `SELECT ce.email, ce.client_id, c.name as client_name
+        FROM client_email AS ce
+        INNER JOIN client AS c ON ce.client_id = c.id
+        WHERE ce.enabled = 'Y' AND ce.email != 'administration@bienestariswellbeing.org'
+        ORDER BY ce.client_id`
     );
     if (rows_emails.length > 0) {
         // Calcular from_date y to_date
