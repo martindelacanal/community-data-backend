@@ -5272,7 +5272,8 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
+        // OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5535,7 +5536,8 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        query_locations = 'AND (u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        // u.location_id IN (' + locations.join() + ') OR 
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5801,7 +5803,8 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        query_locations = 'AND (u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+      // u.location_id IN (' + locations.join() + ') OR 
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5945,7 +5948,8 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        query_locations = 'AND ( u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+      // u.location_id IN (' + locations.join() + ') OR
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7382,7 +7386,8 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
 
       // Filtro de ubicaciones
       if (locations.length > 0) {
-        whereClauses.push(`(db.location_id IN (${locations.map(() => '?').join(',')}) OR u.location_id IN (${locations.map(() => '?').join(',')}))`);
+        whereClauses.push(`(db.location_id IN (${locations.map(() => '?').join(',')}) )`);
+        // OR u.location_id IN (${locations.map(() => '?').join(',')})
         params.push(...locations, ...locations);
       }
 
@@ -7581,7 +7586,8 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
+        // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7675,7 +7681,8 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
+        // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7769,7 +7776,8 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
+        // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7888,7 +7896,8 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
+        // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8411,7 +8420,8 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) ) ';
+        // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8530,7 +8540,8 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) ) ';
+        // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8621,7 +8632,8 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) ) ';
+        // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -9178,10 +9190,14 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         params.push(cabecera.client_id);
       }
 
+      // Modificación del filtro de ubicaciones para usar las entregas
       let query_locations = '';
+      let query_locations_recurring = '';
+      let locationParams = [];
       if (locations.length > 0) {
-        query_locations = ` AND u.location_id IN (${locations.map(() => '?').join(',')})`;
-        params.push(...locations);
+        query_locations = ` AND u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (${locations.map(() => '?').join(',')}))`;
+        query_locations_recurring = ` AND db_current.location_id IN (${locations.map(() => '?').join(',')})`;
+        locationParams = [...locations];
       }
 
       // Ajustar las fechas y agregar un día a to_date
@@ -9203,11 +9219,9 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       `;
 
       // Parámetros para la consulta de nuevos usuarios
-      const newUsersParams = [fromDateUTC, toDateUTC, ...params];
+      const newUsersParams = [fromDateUTC, toDateUTC, ...params, ...locationParams];
 
       // Consulta para usuarios recurrentes
-      // **Lógica Generalizada para Todos los Intervalos**
-      // Un usuario es recurrente si tiene al menos una entrega en el período actual y al menos una entrega en un período anterior.
       const recurringUsersQuery = `
         SELECT
           ${periodExpressionDelivery} AS period,
@@ -9217,8 +9231,8 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
           ${query_join_client_user}
         WHERE u.enabled = 'Y' AND u.role_id = 5
           AND db_current.creation_date BETWEEN ? AND ?
-          ${query_conditions.replace(/u\./g, 'db_current.')}
-          ${query_locations.replace(/u\./g, 'db_current.')}
+          ${query_conditions.replace(/u\./g, 'u.')}
+          ${query_locations_recurring}
           AND EXISTS (
             SELECT 1
             FROM delivery_beneficiary db_previous
@@ -9229,7 +9243,7 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       `;
 
       // Parámetros para la consulta de usuarios recurrentes
-      const recurringUsersParams = [fromDateUTC, toDateUTC, ...params];
+      const recurringUsersParams = [fromDateUTC, toDateUTC, ...params, ...locationParams];
 
       // Ejecutar la consulta de nuevos usuarios
       const [newUsersRows] = await mysqlConnection.promise().query(newUsersQuery, newUsersParams);
@@ -10327,13 +10341,15 @@ router.post('/table/user', verifyToken, async (req, res) => {
         case 'all':
           queryTableRole = 'AND (role.id != 2 AND role.id != 5)';
           if (locations.length > 0) {
-            query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+            query_locations = 'AND ( u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+            // u.location_id IN (' + locations.join() + ') OR
           }
           break;
         case 'beneficiary':
           queryTableRole = 'AND role.id = 5';
           if (locations.length > 0) {
-            query_locations = 'AND (u.location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+            query_locations = 'AND ( u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+          // u.location_id IN (' + locations.join() + ') OR
           }
           if (filters.register_form) {
             const conditions = [];
