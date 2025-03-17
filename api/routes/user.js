@@ -5272,7 +5272,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
         // OR u.location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
@@ -8420,7 +8420,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) ) ';
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
         // OR u.location_id IN (' + locations.join() + ')
       }
       var query_genders = '';
