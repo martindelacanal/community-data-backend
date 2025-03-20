@@ -280,13 +280,14 @@ router.post('/signup', async (req, res) => {
                                                           date_of_birth, \
                                                           phone, \
                                                           zipcode, \
+                                                          first_location_id, \
                                                           location_id, \
                                                           household_size, \
                                                           gender_id, \
                                                           ethnicity_id, \
                                                           other_ethnicity) \
-                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, householdSize, gender, ethnicity, otherEthnicity]);
+                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, location_id, householdSize, gender, ethnicity, otherEthnicity]);
     if (rows.affectedRows > 0) {
       // save inserted user id
       const user_id = rows.insertId;
