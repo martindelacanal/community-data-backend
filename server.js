@@ -349,17 +349,17 @@ schedule.scheduleJob(adminRule, async () => {
     const adminEmail = 'administration@bienestariswellbeing.org';
     const password = 'bienestarcommunity';
     
-    const [adminClient] = await mysqlConnection.promise().query(
+    const [adminClients] = await mysqlConnection.promise().query(
         `SELECT ce.client_id, c.name AS client_name
          FROM client_email AS ce
          INNER JOIN client AS c ON ce.client_id = c.id
          WHERE ce.email = ? AND ce.enabled = 'Y'
-         LIMIT 1`,
+         ORDER BY ce.client_id`,  // Removed LIMIT 1 to get all clients
         [adminEmail]
     );
 
-    if (adminClient.length > 0) {
-        // Calculate date range same as regular job
+    if (adminClients.length > 0) {
+        // Calculate date range
         let today = moment().tz("America/Los_Angeles");
         let lastMonday = today.clone().subtract(7, 'days');
         let lastSunday = today.clone().subtract(1, 'days');
@@ -370,22 +370,25 @@ schedule.scheduleJob(adminRule, async () => {
         let formatted_from_date = lastMonday.format("MM-DD-YYYY");
         let formatted_to_date = lastSunday.format("MM-DD-YYYY");
         
-        let date = today.format("MM-DD-YYYY");
-        
-        // Message for email
-        const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
-        const subject = `Bienestar Community report for ${adminClient[0].client_name} - ${date}`;
-        
-        // Generate reports
-        const csvRawData = await getRawData(from_date, to_date, adminClient[0].client_id);
-        
-        if (csvRawData && csvRawData.split('\n').length > 2) {
-            const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
-            const csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
-            const csvSummary = await getSummary(from_date, to_date, csvRawData);
+        // Send an email for EACH client
+        for (const client of adminClients) {
+            let date = today.format("MM-DD-YYYY");
             
-            // Send admin email
-            await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
+            // Message for email
+            const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+            const subject = `Bienestar Community report for ${client.client_name} - ${date}`;
+            
+            // Generate reports for this specific client
+            const csvRawData = await getRawData(from_date, to_date, client.client_id);
+            
+            if (csvRawData && csvRawData.split('\n').length > 2) {
+                const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
+                const csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
+                const csvSummary = await getSummary(from_date, to_date, csvRawData);
+                
+                // Send admin email for this client
+                await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
+            }
         }
     }
 });
