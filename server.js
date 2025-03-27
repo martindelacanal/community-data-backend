@@ -471,4 +471,164 @@ schedule.scheduleJob(rule, async () => {
     }
 });
 
+// Monthly client reports - Runs every Monday, checks if it's first Monday of month
+schedule.scheduleJob('0 0 * * 1', async () => {
+    const today = moment().tz("America/Los_Angeles");
+    const dayOfMonth = today.date();
+    
+    // Check if this is the first Monday of the month (days 1-7)
+    if (dayOfMonth <= 7) {
+        const password = 'bienestarcommunity';
+        const [rows_emails] = await mysqlConnection.promise().query(
+            `SELECT ce.email, ce.client_id, c.name as client_name
+            FROM client_email AS ce
+            INNER JOIN client AS c ON ce.client_id = c.id
+            WHERE ce.enabled = 'Y' AND ce.email != 'administration@bienestariswellbeing.org'
+            ORDER BY ce.client_id`
+        );
+        
+        if (rows_emails.length > 0) {
+            // Calculate previous month's date range (first Monday to last Sunday)
+            let prevMonth = today.clone().subtract(1, 'month');
+            
+            // Find the first Monday of the previous month
+            let firstMonday = prevMonth.clone().startOf('month');
+            while (firstMonday.day() !== 1) {
+                firstMonday.add(1, 'day');
+            }
+            
+            // Find the last Sunday of the previous month
+            let lastSunday = prevMonth.clone().endOf('month');
+            while (lastSunday.day() !== 0) {
+                lastSunday.subtract(1, 'day');
+            }
+            
+            let from_date = firstMonday.format("YYYY-MM-DD");
+            let to_date = lastSunday.format("YYYY-MM-DD");
+            
+            // Format dates for the message
+            let formatted_from_date = firstMonday.format("MM-DD-YYYY");
+            let formatted_to_date = lastSunday.format("MM-DD-YYYY");
+            
+            // Variables for email
+            const emails = [];
+            const client_id = [];
+            var csvRawData = null;
+            var csvNewRegistrations = null;
+            var csvAllNewRegistrations = null;
+            var csvSummary = null;
+            var subject = '';
+            var message = '';
+            
+            let monthName = prevMonth.format("MMMM");
+            let year = prevMonth.format("YYYY");
+            let date = today.format("MM-DD-YYYY");
+            
+            // Email message
+            message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+            
+            // Process each client's emails
+            for (let i = 0; i < rows_emails.length; i++) {
+                if (i === 0) {
+                    emails.push(rows_emails[i].email);
+                    client_id.push(rows_emails[i].client_id);
+                    subject = `Monthly Bienestar Community report for ${rows_emails[i].client_name} - ${monthName} ${year}`;
+                    csvRawData = await getRawData(from_date, to_date, client_id[0]);
+                    if (csvRawData && csvRawData.split('\n').length > 2) {
+                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
+                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
+                        csvSummary = await getSummary(from_date, to_date, csvRawData);
+                    } else {
+                        csvRawData = null;
+                    }
+                } else if (client_id.includes(rows_emails[i].client_id)) {
+                    emails.push(rows_emails[i].email);
+                } else {
+                    if (csvRawData) {
+                        await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
+                    }
+                    emails.length = 0;
+                    emails.push(rows_emails[i].email);
+                    client_id.length = 0;
+                    client_id.push(rows_emails[i].client_id);
+                    subject = `Monthly Bienestar Community report for ${rows_emails[i].client_name} - ${monthName} ${year}`;
+                    csvRawData = await getRawData(from_date, to_date, client_id[0]);
+                    if (csvRawData && csvRawData.split('\n').length > 2) {
+                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
+                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
+                        csvSummary = await getSummary(from_date, to_date, csvRawData);
+                    } else {
+                        csvRawData = null;
+                    }
+                }
+            }
+            
+            // Send final email if there's data
+            if (csvRawData) {
+                await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
+            }
+        }
+    }
+});
+
+// Monthly admin reports - Runs every Sunday, checks if it's last Sunday of month
+schedule.scheduleJob('0 18 * * 0', async () => {
+    const today = moment().tz("America/Los_Angeles");
+    const nextWeek = today.clone().add(7, 'days');
+    
+    // If next Sunday is in a different month, then this is the last Sunday
+    if (nextWeek.month() !== today.month()) {
+        const adminEmail = 'administration@bienestariswellbeing.org';
+        const password = 'bienestarcommunity';
+        
+        const [adminClients] = await mysqlConnection.promise().query(
+            `SELECT ce.client_id, c.name AS client_name
+             FROM client_email AS ce
+             INNER JOIN client AS c ON ce.client_id = c.id
+             WHERE ce.email = ? AND ce.enabled = 'Y'
+             ORDER BY ce.client_id`,
+            [adminEmail]
+        );
+        
+        if (adminClients.length > 0) {
+            // Calculate current month's date range (first Monday to last Sunday)
+            // First Monday of the month
+            let firstMonday = today.clone().startOf('month');
+            while (firstMonday.day() !== 1) {
+                firstMonday.add(1, 'day');
+            }
+            
+            // Last Sunday is today
+            let lastSunday = today.clone();
+            
+            let from_date = firstMonday.format("YYYY-MM-DD");
+            let to_date = lastSunday.format("YYYY-MM-DD");
+            
+            let formatted_from_date = firstMonday.format("MM-DD-YYYY");
+            let formatted_to_date = lastSunday.format("MM-DD-YYYY");
+            
+            let monthName = today.format("MMMM");
+            let year = today.format("YYYY");
+            
+            // Process each client for admin report
+            for (const client of adminClients) {
+                const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+                const subject = `Monthly Bienestar Community report for ${client.client_name} - ${monthName} ${year}`;
+                
+                // Generate reports for this specific client
+                const csvRawData = await getRawData(from_date, to_date, client.client_id);
+                
+                if (csvRawData && csvRawData.split('\n').length > 2) {
+                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
+                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
+                    const csvSummary = await getSummary(from_date, to_date, csvRawData);
+                    
+                    // Send admin email for this client
+                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
+                }
+            }
+        }
+    }
+});
+
 server.listen(port, () => logger.info(`Server running on port ${port}`));
