@@ -9012,7 +9012,6 @@ router.post('/view/worker/scanHistory/:idUser', verifyToken, async (req, res) =>
   }
 });
 
-
 router.post('/metrics/participant/register_history', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (
@@ -9284,6 +9283,257 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const result = {
         series,
         categories: formattedCategories // usar las categorías formateadas
+      };
+
+      res.json(result);
+    } catch (error) {
+      console.log(error);
+      res.status(500).send(error.message);
+    }
+  } else {
+    res.status(403).send('Forbidden');
+  }
+});
+
+router.post('/metrics/participant/location_new_recurring', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (
+    cabecera.role === 'admin' ||
+    cabecera.role === 'client' ||
+    cabecera.role === 'director' ||
+    cabecera.role === 'auditor'
+  ) {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || null;
+      let to_date = filters.to_date || null;
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+      const language = req.query.language || 'en';
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      } else {
+        // Si no se proporciona, obtener la fecha mínima de la base de datos
+        const [dateRange] = await mysqlConnection
+          .promise()
+          .query(
+            `SELECT 
+              MIN(creation_date) AS min_date
+            FROM (
+              SELECT creation_date FROM user WHERE enabled = 'Y'
+              UNION ALL
+              SELECT creation_date FROM delivery_beneficiary
+            ) AS combined_dates`
+          );
+        from_date = dateRange[0].min_date.toISOString().slice(0, 10);
+      }
+
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      } else {
+        // Si no se proporciona, obtener la fecha máxima de la base de datos
+        const [dateRange] = await mysqlConnection
+          .promise()
+          .query(
+            `SELECT 
+              MAX(creation_date) AS max_date
+            FROM (
+              SELECT creation_date FROM user WHERE enabled = 'Y'
+              UNION ALL
+              SELECT creation_date FROM delivery_beneficiary
+            ) AS combined_dates`
+          );
+        to_date = dateRange[0].max_date.toISOString().slice(0, 10);
+      }
+
+      // Validar las fechas para evitar inyección SQL
+      const isValidDate = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date);
+      if (!isValidDate(from_date) || !isValidDate(to_date)) {
+        return res.status(400).send('Invalid date format.');
+      }
+
+      // Construir consultas parametrizadas
+      const params = [];
+
+      let query_conditions = '';
+      let query_join_client_user = '';
+
+      if (genders.length > 0) {
+        query_conditions += ` AND u.gender_id IN (${genders.map(() => '?').join(',')})`;
+        params.push(...genders);
+      }
+      if (ethnicities.length > 0) {
+        query_conditions += ` AND u.ethnicity_id IN (${ethnicities.map(() => '?').join(',')})`;
+        params.push(...ethnicities);
+      }
+      if (filters.min_age) {
+        query_conditions += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ?`;
+        params.push(min_age);
+      }
+      if (filters.max_age) {
+        query_conditions += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ?`;
+        params.push(max_age);
+      }
+      if (filters.zipcode) {
+        query_conditions += ' AND u.zipcode = ?';
+        params.push(zipcode);
+      }
+      if (cabecera.role === 'client') {
+        query_join_client_user = 'INNER JOIN client_user cu ON u.id = cu.user_id';
+        query_conditions += ' AND cu.client_id = ?';
+        params.push(cabecera.client_id);
+      }
+
+      // Ajustar las fechas para las consultas
+      const fromDateUTC = from_date + ' 00:00:00';
+      const toDateUTC = to_date + ' 23:59:59';
+
+      // Primero, obtenemos todas las ubicaciones relevantes
+      let locationQuery = '';
+      let locationParams = [];
+
+      if (locations.length > 0) {
+        locationQuery = 'WHERE l.id IN (' + locations.map(() => '?').join(',') + ')';
+        locationParams = [...locations];
+      }
+
+      const [locationsRows] = await mysqlConnection.promise().query(
+        `SELECT l.id, l.community_city AS name 
+         FROM location l
+         ${locationQuery}
+         ORDER BY l.community_city`,
+        locationParams
+      );
+
+      if (locationsRows.length === 0) {
+        return res.json({
+          series: [],
+          categories: []
+        });
+      }
+
+      // Crear un mapa de ubicaciones para almacenar los resultados
+      const locationsMap = new Map();
+      locationsRows.forEach(location => {
+        locationsMap.set(location.id, { 
+          id: location.id, 
+          name: location.name, 
+          new_users: 0, 
+          recurring_users: 0 
+        });
+      });
+
+      // Obtenemos todos los usuarios que tienen más de una entrega por ubicación (recurrentes)
+      const [usersWithMultipleDeliveries] = await mysqlConnection.promise().query(
+        `SELECT 
+          receiving_user_id, 
+          location_id, 
+          COUNT(*) AS delivery_count
+        FROM delivery_beneficiary 
+        GROUP BY receiving_user_id, location_id
+        HAVING COUNT(*) > 1`
+      );
+
+      // Convertimos el resultado a un mapa para búsqueda rápida
+      const recurringUsersByLocation = new Map();
+      usersWithMultipleDeliveries.forEach(row => {
+        if (!recurringUsersByLocation.has(row.location_id)) {
+          recurringUsersByLocation.set(row.location_id, new Set());
+        }
+        recurringUsersByLocation.get(row.location_id).add(row.receiving_user_id);
+      });
+
+      // Consulta para usuarios que retiraron dentro del rango de fechas por ubicación
+      const usersQuery = `
+        SELECT
+          db.location_id,
+          db.receiving_user_id
+        FROM delivery_beneficiary db
+        JOIN user u ON u.id = db.receiving_user_id
+        ${query_join_client_user}
+        WHERE u.enabled = 'Y' AND u.role_id = 5
+          AND db.creation_date BETWEEN ? AND ?
+          ${query_conditions}
+          ${locations.length > 0 ? `AND db.location_id IN (${locations.map(() => '?').join(',')})` : ''}
+      `;
+
+      // Parámetros para la consulta
+      const usersParams = [
+        fromDateUTC, 
+        toDateUTC, 
+        ...params, 
+        ...(locations.length > 0 ? locations : [])
+      ];
+
+      // Ejecutar consulta
+      const [usersRows] = await mysqlConnection.promise().query(usersQuery, usersParams);
+
+      // Mapas para contar usuarios únicos por ubicación
+      const newUsersByLocation = new Map();
+      const recurringUsersByLocationInPeriod = new Map();
+
+      // Inicializar mapas
+      locationsRows.forEach(location => {
+        newUsersByLocation.set(location.id, new Set());
+        recurringUsersByLocationInPeriod.set(location.id, new Set());
+      });
+
+      // Clasificar usuarios como nuevos o recurrentes según la ubicación
+      usersRows.forEach(row => {
+        const locationId = row.location_id;
+        const userId = row.receiving_user_id;
+        
+        // Verificar que el locationId existe en nuestros mapas
+        if (!newUsersByLocation.has(locationId) || !recurringUsersByLocationInPeriod.has(locationId)) {
+          return; // Omitir esta fila si la ubicación no está en nuestros mapas
+        }
+        
+        // Verificar si este usuario es recurrente en esta ubicación
+        const isRecurring = recurringUsersByLocation.has(locationId) && 
+                           recurringUsersByLocation.get(locationId).has(userId);
+        
+        if (isRecurring) {
+          recurringUsersByLocationInPeriod.get(locationId).add(userId);
+        } else {
+          newUsersByLocation.get(locationId).add(userId);
+        }
+      });
+
+      // Contar usuarios por ubicación
+      locationsMap.forEach((locationData, locationId) => {
+        if (newUsersByLocation.has(locationId)) {
+          locationData.new_users = newUsersByLocation.get(locationId).size;
+        }
+        
+        if (recurringUsersByLocationInPeriod.has(locationId)) {
+          locationData.recurring_users = recurringUsersByLocationInPeriod.get(locationId).size;
+        }
+      });
+
+      // Preparar los datos para la respuesta
+      const locationData = Array.from(locationsMap.values());
+      
+      // Ordenar por nombre de ubicación
+      locationData.sort((a, b) => a.name.localeCompare(b.name));
+
+      const categories = locationData.map(location => location.name);
+      const newUsersData = locationData.map(location => location.new_users);
+      const recurringUsersData = locationData.map(location => location.recurring_users);
+
+      const series = [
+        { name: language === 'en' ? 'New' : 'Nuevos', data: newUsersData },
+        { name: language === 'en' ? 'Recurring' : 'Recurrentes', data: recurringUsersData },
+      ];
+
+      const result = {
+        series,
+        categories
       };
 
       res.json(result);
