@@ -5274,8 +5274,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.location_id IN (' + locations.join() + ')) ';
-        // OR u.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5538,8 +5537,7 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-        // u.location_id IN (' + locations.join() + ') OR 
+        query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5805,8 +5803,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-      // u.location_id IN (' + locations.join() + ') OR 
+        query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5950,8 +5947,7 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-      // u.location_id IN (' + locations.join() + ') OR
+        query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7388,8 +7384,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
 
       // Filtro de ubicaciones
       if (locations.length > 0) {
-        whereClauses.push(`(db.location_id IN (${locations.map(() => '?').join(',')}) )`);
-        // OR u.location_id IN (${locations.map(() => '?').join(',')})
+        whereClauses.push(`(db.location_id IN (${locations.map(() => '?').join(',')}) OR u.first_location_id IN (${locations.map(() => '?').join(',')}))`);
         params.push(...locations, ...locations);
       }
 
@@ -7588,8 +7583,7 @@ router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
-        // OR u.location_id IN (' + locations.join() + ')
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7683,8 +7677,7 @@ router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
-        // OR u.location_id IN (' + locations.join() + ')
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7778,8 +7771,7 @@ router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
-        // OR u.location_id IN (' + locations.join() + ')
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -7898,8 +7890,7 @@ router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') ) ';
-        // OR u.location_id IN (' + locations.join() + ')
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8422,8 +8413,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.location_id IN (' + locations.join() + ')) ';
-        // OR u.location_id IN (' + locations.join() + ')
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8542,8 +8532,8 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) ) ';
-        // OR u.location_id IN (' + locations.join() + ')
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.first_location_id IN (' + locations.join() + ') ) ';
+        // 
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8634,8 +8624,7 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) ) ';
-        // OR u.location_id IN (' + locations.join() + ')
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -10343,15 +10332,13 @@ router.post('/table/user', verifyToken, async (req, res) => {
         case 'all':
           queryTableRole = 'AND (role.id != 2 AND role.id != 5)';
           if (locations.length > 0) {
-            query_locations = 'AND ( u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-            // u.location_id IN (' + locations.join() + ') OR
+            query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
           }
           break;
         case 'beneficiary':
           queryTableRole = 'AND role.id = 5';
           if (locations.length > 0) {
-            query_locations = 'AND ( u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-          // u.location_id IN (' + locations.join() + ') OR
+            query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
           }
           if (filters.register_form) {
             const conditions = [];
