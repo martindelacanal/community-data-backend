@@ -976,13 +976,14 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
                                           email, \
                                           phone, \
                                           zipcode, \
+                                          first_location_id, \
                                           location_id, \
                                           date_of_birth, \
                                           gender_id, \
                                           ethnicity_id, \
                                           other_ethnicity) \
-                                          values(?,?,?,?,?,?,?,?,?,?)',
-        [firstname, lastname, email, phone, zipcode, location_id, dateOfBirth, gender, ethnicity, otherEthnicity]);
+                                          values(?,?,?,?,?,?,?,?,?,?,?)',
+        [firstname, lastname, email, phone, zipcode, location_id, location_id, dateOfBirth, gender, ethnicity, otherEthnicity]);
 
       if (rows.affectedRows > 0) {
         const volunteer_id = rows.insertId;
