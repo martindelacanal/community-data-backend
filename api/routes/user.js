@@ -163,7 +163,7 @@ router.get('/refresh-token', verifyToken, (req, res) => {
 
 function formatDateForMailchimp(dateString) {
   if (!dateString) return '';
-  
+
   // Asumiendo el string viene en formato YYYY-MM-DD
   const [year, month, day] = dateString.split('-');
   return `${month.padStart(2, '0')}/${day.padStart(2, '0')}`;
@@ -186,7 +186,7 @@ async function addSubscriberToMailchimp(userData) {
       status: userData.email ? 'subscribed' : '',
 
       // Aquí agregas el número al campo nativo de SMS
-      sms_phone_number: cleanPhone, 
+      sms_phone_number: cleanPhone,
       sms_subscription_status: cleanPhone ? 'subscribed' : '',
 
       // merge_fields para otros datos (nombre, apellido, etc.)
@@ -346,7 +346,7 @@ router.post('/signup', async (req, res) => {
 
         const gender_name = rowsGender && rowsGender[0]?.name || '';
         const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
-          
+
         await addSubscriberToMailchimp({
           email: email,
           firstname: firstname,
@@ -362,7 +362,7 @@ router.post('/signup', async (req, res) => {
       } catch (mailchimpError) {
         // Update user to set mailchimp_error to 'Y'
         await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
-        
+
       }
       await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
     } else {
@@ -879,9 +879,9 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 INNER JOIN provider as prov ON t.provider_id = prov.id
                 INNER JOIN transported_by as tb ON t.transported_by_id = tb.id
                 INNER JOIN delivered_by as db ON t.delivered_by = db.id
-                INNER join product_donation_ticket as pdt on t.id = pdt.donation_ticket_id
-                INNER join product as p on pdt.product_id = p.id
-                INNER join product_type as pt on p.product_type_id = pt.id
+                LEFT join product_donation_ticket as pdt on t.id = pdt.donation_ticket_id
+                LEFT join product as p on pdt.product_id = p.id
+                LEFT join product_type as pt on p.product_type_id = pt.id
                 WHERE t.id = ? AND t.enabled = 'Y'
                 GROUP BY t.id, pdt.product_id`,
         [id]
@@ -9421,11 +9421,11 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
       // Crear un mapa de ubicaciones para almacenar los resultados
       const locationsMap = new Map();
       locationsRows.forEach(location => {
-        locationsMap.set(location.id, { 
-          id: location.id, 
-          name: location.name, 
-          new_users: 0, 
-          recurring_users: 0 
+        locationsMap.set(location.id, {
+          id: location.id,
+          name: location.name,
+          new_users: 0,
+          recurring_users: 0
         });
       });
 
@@ -9465,9 +9465,9 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 
       // Parámetros para la consulta
       const usersParams = [
-        fromDateUTC, 
-        toDateUTC, 
-        ...params, 
+        fromDateUTC,
+        toDateUTC,
+        ...params,
         ...(locations.length > 0 ? locations : [])
       ];
 
@@ -9488,16 +9488,16 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
       usersRows.forEach(row => {
         const locationId = row.location_id;
         const userId = row.receiving_user_id;
-        
+
         // Verificar que el locationId existe en nuestros mapas
         if (!newUsersByLocation.has(locationId) || !recurringUsersByLocationInPeriod.has(locationId)) {
           return; // Omitir esta fila si la ubicación no está en nuestros mapas
         }
-        
+
         // Verificar si este usuario es recurrente en esta ubicación
-        const isRecurring = recurringUsersByLocation.has(locationId) && 
-                           recurringUsersByLocation.get(locationId).has(userId);
-        
+        const isRecurring = recurringUsersByLocation.has(locationId) &&
+          recurringUsersByLocation.get(locationId).has(userId);
+
         if (isRecurring) {
           recurringUsersByLocationInPeriod.get(locationId).add(userId);
         } else {
@@ -9510,7 +9510,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
         if (newUsersByLocation.has(locationId)) {
           locationData.new_users = newUsersByLocation.get(locationId).size;
         }
-        
+
         if (recurringUsersByLocationInPeriod.has(locationId)) {
           locationData.recurring_users = recurringUsersByLocationInPeriod.get(locationId).size;
         }
@@ -9518,7 +9518,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 
       // Preparar los datos para la respuesta
       const locationData = Array.from(locationsMap.values());
-      
+
       // Ordenar por nombre de ubicación
       locationData.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -10781,7 +10781,7 @@ router.post('/table/volunteer', verifyToken, async (req, res) => {
       buscar = '%' + buscar + '%';
       queryBuscar = `AND (v.id like '${buscar}' or v.email like '${buscar}' or v.firstname like '${buscar}' or v.lastname like '${buscar}' or l.community_city like '${buscar}' or g.name like '${buscar}' or e.name like '${buscar}' or g.name_es like '${buscar}' or e.name_es like '${buscar}' or DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
     }
-   
+
     try {
       const query = `SELECT
       v.id,
@@ -11175,7 +11175,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
       INNER JOIN location ON dt.location_id = location.id
       ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
-      INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+      LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
       WHERE dt.enabled = 'Y'
       ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
       ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
@@ -11205,7 +11205,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
         INNER JOIN location ON dt.location_id = location.id
         ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
-        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         WHERE dt.enabled = 'Y'
         ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
         ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
@@ -13374,8 +13374,10 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         ticket["created_by_username"] = rows[0].created_by_username;
         ticket["creation_date"] = rows[0].creation_date;
 
-        for (let i = 0; i < rows.length; i++) {
-          products.push({ product_id: rows[i].product_id, product: rows[i].product, quantity: rows[i].quantity });
+        if (rows[0].product_id) {
+          for (let i = 0; i < rows.length; i++) {
+            products.push({ product_id: rows[i].product_id, product: rows[i].product, quantity: rows[i].quantity });
+          }
         }
         ticket["products"] = products;
 
