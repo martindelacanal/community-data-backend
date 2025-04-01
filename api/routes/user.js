@@ -9360,7 +9360,6 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 
       // Construir consultas parametrizadas
       const params = [];
-
       let query_conditions = '';
       let query_join_client_user = '';
 
@@ -9392,17 +9391,32 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 
       // Ajustar las fechas para las consultas
       const fromDateUTC = from_date + ' 00:00:00';
-      const toDateUTC = to_date + ' 23:59:59';
+      let toDateObj = new Date(to_date);
+      toDateObj.setDate(toDateObj.getDate() + 1);
+      const toDateUTC = toDateObj.toISOString().slice(0, 10) + ' 23:59:59';
+
+      // Construir query_locations de forma similar al endpoint register
+      let query_locations = '';
+      if (locations.length > 0) {
+        query_locations =
+          'AND ( (db.location_id IN (' +
+          locations.join() +
+          ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' +
+          from_date +
+          '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' +
+          to_date +
+          '\', INTERVAL 1 DAY) ) OR u.first_location_id IN (' +
+          locations.join() +
+          ') )';
+      }
 
       // Primero, obtenemos todas las ubicaciones relevantes
       let locationQuery = '';
       let locationParams = [];
-
       if (locations.length > 0) {
         locationQuery = 'WHERE l.id IN (' + locations.map(() => '?').join(',') + ')';
         locationParams = [...locations];
       }
-
       const [locationsRows] = await mysqlConnection.promise().query(
         `SELECT l.id, l.community_city AS name 
          FROM location l
@@ -9410,13 +9424,50 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
          ORDER BY l.community_city`,
         locationParams
       );
-
       if (locationsRows.length === 0) {
         return res.json({
           series: [],
           categories: []
         });
       }
+
+      // Consulta para usuarios NUEVOS por ubicación
+      // Se usa LEFT JOIN y se calcula la ubicación mediante COALESCE para incluir usuarios sin delivery_beneficiary
+      const newUsersQuery = `
+        SELECT 
+          COALESCE(db.location_id, u.first_location_id) AS location_id,
+          COUNT(DISTINCT u.id) AS new_count
+        FROM user u
+        LEFT JOIN delivery_beneficiary db ON u.id = db.receiving_user_id
+        ${query_join_client_user}
+        WHERE u.role_id = 5 
+          AND u.enabled = 'Y'
+          AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
+          ${query_conditions}
+          ${locations.length > 0 ? query_locations : ''}
+        GROUP BY location_id
+      `;
+      const newUsersParams = [fromDateUTC, toDateUTC, ...params];
+
+      // Consulta para usuarios RECURRENTES por ubicación
+      const recurringUsersQuery = `
+        SELECT 
+          db.location_id AS location_id,
+          COUNT(DISTINCT db.receiving_user_id) AS recurring_count
+        FROM delivery_beneficiary db
+        INNER JOIN user u ON db.receiving_user_id = u.id
+        ${query_join_client_user}
+        WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
+          AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ?
+          ${query_conditions}
+          ${locations.length > 0 ? query_locations : ''}
+        GROUP BY db.location_id
+      `;
+      const recurringUsersParams = [fromDateUTC, toDateUTC, fromDateUTC, ...params];
+
+      // Ejecutar consultas
+      const [newUsersRows] = await mysqlConnection.promise().query(newUsersQuery, newUsersParams);
+      const [recurringUsersRows] = await mysqlConnection.promise().query(recurringUsersQuery, recurringUsersParams);
 
       // Crear un mapa de ubicaciones para almacenar los resultados
       const locationsMap = new Map();
@@ -9429,99 +9480,23 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
         });
       });
 
-      // Obtenemos todos los usuarios que tienen más de una entrega por ubicación (recurrentes)
-      const [usersWithMultipleDeliveries] = await mysqlConnection.promise().query(
-        `SELECT 
-          receiving_user_id, 
-          location_id, 
-          COUNT(*) AS delivery_count
-        FROM delivery_beneficiary 
-        GROUP BY receiving_user_id, location_id
-        HAVING COUNT(*) > 1`
-      );
-
-      // Convertimos el resultado a un mapa para búsqueda rápida
-      const recurringUsersByLocation = new Map();
-      usersWithMultipleDeliveries.forEach(row => {
-        if (!recurringUsersByLocation.has(row.location_id)) {
-          recurringUsersByLocation.set(row.location_id, new Set());
-        }
-        recurringUsersByLocation.get(row.location_id).add(row.receiving_user_id);
-      });
-
-      // Consulta para usuarios que retiraron dentro del rango de fechas por ubicación
-      const usersQuery = `
-        SELECT
-          db.location_id,
-          db.receiving_user_id
-        FROM delivery_beneficiary db
-        JOIN user u ON u.id = db.receiving_user_id
-        ${query_join_client_user}
-        WHERE u.enabled = 'Y' AND u.role_id = 5
-          AND db.creation_date BETWEEN ? AND ?
-          ${query_conditions}
-          ${locations.length > 0 ? `AND db.location_id IN (${locations.map(() => '?').join(',')})` : ''}
-      `;
-
-      // Parámetros para la consulta
-      const usersParams = [
-        fromDateUTC,
-        toDateUTC,
-        ...params,
-        ...(locations.length > 0 ? locations : [])
-      ];
-
-      // Ejecutar consulta
-      const [usersRows] = await mysqlConnection.promise().query(usersQuery, usersParams);
-
-      // Mapas para contar usuarios únicos por ubicación
-      const newUsersByLocation = new Map();
-      const recurringUsersByLocationInPeriod = new Map();
-
-      // Inicializar mapas
-      locationsRows.forEach(location => {
-        newUsersByLocation.set(location.id, new Set());
-        recurringUsersByLocationInPeriod.set(location.id, new Set());
-      });
-
-      // Clasificar usuarios como nuevos o recurrentes según la ubicación
-      usersRows.forEach(row => {
-        const locationId = row.location_id;
-        const userId = row.receiving_user_id;
-
-        // Verificar que el locationId existe en nuestros mapas
-        if (!newUsersByLocation.has(locationId) || !recurringUsersByLocationInPeriod.has(locationId)) {
-          return; // Omitir esta fila si la ubicación no está en nuestros mapas
-        }
-
-        // Verificar si este usuario es recurrente en esta ubicación
-        const isRecurring = recurringUsersByLocation.has(locationId) &&
-          recurringUsersByLocation.get(locationId).has(userId);
-
-        if (isRecurring) {
-          recurringUsersByLocationInPeriod.get(locationId).add(userId);
-        } else {
-          newUsersByLocation.get(locationId).add(userId);
+      // Procesar resultados de nuevos usuarios
+      newUsersRows.forEach(row => {
+        if (locationsMap.has(row.location_id)) {
+          locationsMap.get(row.location_id).new_users = row.new_count;
         }
       });
 
-      // Contar usuarios por ubicación
-      locationsMap.forEach((locationData, locationId) => {
-        if (newUsersByLocation.has(locationId)) {
-          locationData.new_users = newUsersByLocation.get(locationId).size;
-        }
-
-        if (recurringUsersByLocationInPeriod.has(locationId)) {
-          locationData.recurring_users = recurringUsersByLocationInPeriod.get(locationId).size;
+      // Procesar resultados de usuarios recurrentes
+      recurringUsersRows.forEach(row => {
+        if (locationsMap.has(row.location_id)) {
+          locationsMap.get(row.location_id).recurring_users = row.recurring_count;
         }
       });
 
       // Preparar los datos para la respuesta
       const locationData = Array.from(locationsMap.values());
-
-      // Ordenar por nombre de ubicación
       locationData.sort((a, b) => a.name.localeCompare(b.name));
-
       const categories = locationData.map(location => location.name);
       const newUsersData = locationData.map(location => location.new_users);
       const recurringUsersData = locationData.map(location => location.recurring_users);
@@ -9531,12 +9506,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
         { name: language === 'en' ? 'Recurring' : 'Recurrentes', data: recurringUsersData },
       ];
 
-      const result = {
-        series,
-        categories
-      };
-
-      res.json(result);
+      res.json({ series, categories });
     } catch (error) {
       console.log(error);
       res.status(500).send(error.message);
