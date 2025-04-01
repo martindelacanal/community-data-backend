@@ -571,8 +571,15 @@ schedule.scheduleJob('0 0 * * 1', async () => {
     }
 });
 
+// Monthly admin reports rule
+const monthlyAdminRule = new RecurrenceRule();
+monthlyAdminRule.dayOfWeek = 0; // Sunday
+monthlyAdminRule.hour = 18;     // 6:00 PM
+monthlyAdminRule.minute = 0;
+monthlyAdminRule.tz = 'America/Los_Angeles';
+
 // Monthly admin reports - Runs every Sunday, checks if it's last Sunday of month
-schedule.scheduleJob('0 18 * * 0', async () => {
+schedule.scheduleJob(monthlyAdminRule, async () => {
     const today = moment().tz("America/Los_Angeles");
     const nextWeek = today.clone().add(7, 'days');
     
