@@ -2503,10 +2503,10 @@ router.get('/workers', verifyToken, async (req, res) => {
 
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y" order by community_city'
+        'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location order by community_city'
       );
       res.json(rows);
     } catch (err) {
@@ -2517,7 +2517,7 @@ router.get('/locations', verifyToken, async (req, res) => {
     if (cabecera.role === 'admin') {
       try {
         const [rows] = await mysqlConnection.promise().query(
-          'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y" order by community_city'
+          'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location order by community_city'
         );
         res.json(rows);
       } catch (err) {
@@ -2531,7 +2531,7 @@ router.get('/locations', verifyToken, async (req, res) => {
             `select l.id, l.organization, l.community_city, l.address, ST_Y(l.coordinates) as latitude, ST_X(l.coordinates) as longitude 
                   from location as l
                   inner join client_location as cl on l.id = cl.location_id
-                  where cl.client_id = ? and l.enabled = "Y" order by l.community_city`,
+                  where cl.client_id = ? order by l.community_city`,
             [cabecera.client_id]
           );
           res.json(rows);
@@ -2540,7 +2540,19 @@ router.get('/locations', verifyToken, async (req, res) => {
           res.status(500).json('Internal server error');
         }
       } else {
-        res.status(401).json('Unauthorized');
+        if (cabecera.role === 'beneficiary') {
+          try {
+            const [rows] = await mysqlConnection.promise().query(
+              'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y" order by community_city'
+            );
+            res.json(rows);
+          } catch (err) {
+            console.log(err);
+            res.status(500).json('Internal server error');
+          }
+        } else {
+          res.status(401).json('Unauthorized');
+        }
       }
     }
   }
