@@ -280,10 +280,12 @@ async function getSummary(from_date, to_date, csvRawData) {
     // Calcular las sumas correspondientes
     records.forEach(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        const isNew = registrationDate.isBetween(fromDate, toDate, 'day', '[)'); // Include start, exclude end
-        
+        // Use '[]' to include both fromDate and toDate in the check for "New"
+        const isNew = registrationDate.isBetween(fromDate, toDate, 'day', '[]'); 
+
         if (isNew) {
             newCount++;
+            // ... (health plan logic remains the same)
             if (record['Health Insurance?'] === 'Yes') {
                 newHealthPlanYes++;
             } else if (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '') {
@@ -294,6 +296,7 @@ async function getSummary(from_date, to_date, csvRawData) {
         }
     });
 
+    // ... (rest of the function remains the same)
     const totalNewRecurring = newCount + recurringCount;
     const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo;
 
