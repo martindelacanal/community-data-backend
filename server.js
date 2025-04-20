@@ -354,15 +354,15 @@ schedule.scheduleJob(adminRule, async () => {
          FROM client_email AS ce
          INNER JOIN client AS c ON ce.client_id = c.id
          WHERE ce.email = ? AND ce.enabled = 'Y'
-         ORDER BY ce.client_id`,  // Removed LIMIT 1 to get all clients
+         ORDER BY ce.client_id`,
         [adminEmail]
     );
 
     if (adminClients.length > 0) {
-        // Calculate date range
-        let today = moment().tz("America/Los_Angeles");
-        let lastMonday = today.clone().subtract(7, 'days');
-        let lastSunday = today.clone().subtract(1, 'days');
+        // Calculate date range (Corrected)
+        let today = moment().tz("America/Los_Angeles"); // Job runs on Sunday
+        let lastMonday = today.clone().subtract(6, 'days'); // Sunday - 6 days = Monday
+        let lastSunday = today.clone(); // Sunday (today)
         
         let from_date = lastMonday.format("YYYY-MM-DD");
         let to_date = lastSunday.format("YYYY-MM-DD");
@@ -372,7 +372,7 @@ schedule.scheduleJob(adminRule, async () => {
         
         // Send an email for EACH client
         for (const client of adminClients) {
-            let date = today.format("MM-DD-YYYY");
+            let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY"); // Use current date for report name consistency
             
             // Message for email
             const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
