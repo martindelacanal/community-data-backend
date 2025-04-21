@@ -31,8 +31,18 @@ schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
 
 async function getRawData(from_date, to_date, client_id) {
 
+    // The client_id needs to be passed multiple times in the query parameters.
+    const params = [
+        client_id, // For cu.client_id = ?
+        from_date, // For u.creation_date BETWEEN ? AND ?
+        to_date,   // For u.creation_date BETWEEN ? AND ?
+        from_date, // For db3.creation_date BETWEEN ? AND ?
+        to_date,   // For db3.creation_date BETWEEN ? AND ?
+        // client_id is implicitly used in the subquery via cu.client_id
+    ];
+    
     const [rows] = await mysqlConnection.promise().query(
-        `SELECT 
+        `SELECT
                 u.id as user_id,
                 u.username,
                 u.email,
@@ -46,8 +56,8 @@ async function getRawData(from_date, to_date, client_id) {
                 eth.name AS ethnicity,
                 u.other_ethnicity,
                 loc.community_city AS last_location_visited,
-                (SELECT GROUP_CONCAT(DISTINCT loc_visited.community_city) 
-                        FROM delivery_beneficiary AS db_visited 
+                (SELECT GROUP_CONCAT(DISTINCT loc_visited.community_city)
+                        FROM delivery_beneficiary AS db_visited
                         LEFT JOIN location AS loc_visited ON db_visited.location_id = loc_visited.id
                         WHERE db_visited.receiving_user_id = u.id) AS locations_visited,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
@@ -68,16 +78,34 @@ async function getRawData(from_date, to_date, client_id) {
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
-        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 AND q.enabled = 'Y' 
-        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
-        AND EXISTS (SELECT 1 FROM question_location ql INNER JOIN client_location cl ON ql.location_id = cl.location_id WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = \'Y\')
-        and cu.client_id = ?
+        -- No need for LEFT JOIN delivery_beneficiary AS db here, it's handled in the WHERE clause subquery if needed.
+        WHERE u.role_id = 5
+          AND q.enabled = 'Y'
+          AND cu.client_id = ? -- Ensure the user is associated with the target client
+          AND (
+              -- Condition 1: User registered within the date range
+              CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
+              OR
+              -- Condition 2: User had a delivery within the date range AT A LOCATION associated with THIS client
+              u.id IN (
+                  SELECT db3.receiving_user_id
+                  FROM delivery_beneficiary db3
+                  INNER JOIN location loc3 ON db3.location_id = loc3.id
+                  INNER JOIN client_location cl3 ON loc3.id = cl3.location_id
+                  WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
+                    AND cl3.client_id = cu.client_id -- Filter deliveries by the client associated with the user in the outer query
+              )
+          )
+          -- Ensure the question is relevant to at least one location associated with this client
+          AND EXISTS (
+              SELECT 1
+              FROM question_location ql
+              INNER JOIN client_location cl ON ql.location_id = cl.location_id
+              WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = 'Y'
+          )
         GROUP BY u.id, q.id, a.id
         ORDER BY u.id, q.id, a.id`,
-        [from_date, to_date, from_date, to_date, client_id]
+        params // Use the updated parameters array
     );
     // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
     var question_id_array = [];
