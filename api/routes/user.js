@@ -5285,8 +5285,10 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
+      var query_locations_db3 = '';
       if (locations.length > 0) {
         query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
+        query_locations_db3 = 'AND db3.location_id IN (' + locations.join() + ')';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -5374,7 +5376,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         WHERE u.role_id = 5 AND q.enabled = 'Y' 
         AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
         OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
+                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? ${query_locations_db3}))
         ${cabecera.role === 'client' ? 'AND EXISTS (SELECT 1 FROM question_location ql INNER JOIN client_location cl ON ql.location_id = cl.location_id WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = \'Y\')' : ''}
         ${query_locations}
         ${query_genders}
@@ -8425,7 +8427,8 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.first_location_id IN (' + locations.join() + ')) ';
+        // query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.first_location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
       }
       var query_genders = '';
       if (genders.length > 0) {
