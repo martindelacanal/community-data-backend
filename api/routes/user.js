@@ -2503,7 +2503,7 @@ router.get('/workers', verifyToken, async (req, res) => {
 
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'director') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location order by community_city'
