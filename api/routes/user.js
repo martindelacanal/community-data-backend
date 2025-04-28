@@ -2766,7 +2766,19 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
       const user_id = cabecera.id;
       // insertar en tabla client_user el client_id y el user_id si client_id no es null
       if (client_id) {
-        const [rows_client_user] = await mysqlConnection.promise().query('insert into client_user(client_id, user_id) values(?,?)', [client_id, user_id]);
+        // Check if record already exists before inserting
+        const [existingRows] = await mysqlConnection.promise().query(
+          'SELECT 1 FROM client_user WHERE client_id = ? AND user_id = ?',
+          [client_id, user_id]
+        );
+
+        if (existingRows.length === 0) {
+          // Only insert if it doesn't exist
+          const [rows_client_user] = await mysqlConnection.promise().query(
+            'insert into client_user(client_id, user_id) values(?,?)',
+            [client_id, user_id]
+          );
+        }
       }
       // insert user_question, iterate array of questions and insert each question with its answer
       for (let i = 0; i < secondForm.length; i++) {
@@ -9356,7 +9368,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-          from_date = dateRange[0].min_date ? dateRange[0].min_date.toISOString().slice(0, 10) : '1970-01-01';
+        from_date = dateRange[0].min_date ? dateRange[0].min_date.toISOString().slice(0, 10) : '1970-01-01';
       }
 
       if (filters.to_date) {
@@ -9374,7 +9386,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-          to_date = dateRange[0].max_date ? dateRange[0].max_date.toISOString().slice(0, 10) : new Date().toISOString().slice(0,10);
+        to_date = dateRange[0].max_date ? dateRange[0].max_date.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
       }
 
       // Validar las fechas para evitar inyección SQL
@@ -9434,12 +9446,12 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
       }
 
       if (locations.length > 0) {
-          const locationPlaceholders = locations.map(() => '?').join(',');
-          // Location for NEW: Check first_location OR delivery location within period
-          location_condition_new = ` AND (u.first_location_id IN (${locationPlaceholders}) OR db.location_id IN (${locationPlaceholders}))`;
-          // Location for RECURRING: Check ONLY delivery location within period
-          location_condition_recurring = ` AND db.location_id IN (${locationPlaceholders})`;
-          locationParams.push(...locations); // Add location params once
+        const locationPlaceholders = locations.map(() => '?').join(',');
+        // Location for NEW: Check first_location OR delivery location within period
+        location_condition_new = ` AND (u.first_location_id IN (${locationPlaceholders}) OR db.location_id IN (${locationPlaceholders}))`;
+        // Location for RECURRING: Check ONLY delivery location within period
+        location_condition_recurring = ` AND db.location_id IN (${locationPlaceholders})`;
+        locationParams.push(...locations); // Add location params once
       }
       // --- End Parameterized Filters ---
 
@@ -9456,10 +9468,10 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
         locationQuery = 'WHERE l.id IN (' + locations.map(() => '?').join(',') + ')';
         locationQueryParams = [...locations];
       } else {
-         // If no locations specified, get all locations associated with deliveries or users in the date range potentially?
-         // For simplicity, let's get all locations if none are specified. Adjust if needed.
-         locationQuery = '';
-         locationQueryParams = [];
+        // If no locations specified, get all locations associated with deliveries or users in the date range potentially?
+        // For simplicity, let's get all locations if none are specified. Adjust if needed.
+        locationQuery = '';
+        locationQueryParams = [];
       }
       const [locationsRows] = await mysqlConnection.promise().query(
         `SELECT l.id, l.community_city AS name
@@ -9517,7 +9529,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 
       // --- Processing results (keep existing logic) ---
       const locationsMap = new Map();
-       // Use all locations if none specified, otherwise use filtered list
+      // Use all locations if none specified, otherwise use filtered list
       const relevantLocations = locations.length > 0 ? locationsRows : await mysqlConnection.promise().query(`SELECT id, community_city AS name FROM location ORDER BY community_city`).then(([rows]) => rows);
 
       relevantLocations.forEach(location => {
@@ -9529,18 +9541,18 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
         });
       });
 
-       newUsersRows.forEach(row => {
+      newUsersRows.forEach(row => {
         if (row.location_id && locationsMap.has(row.location_id)) { // Check if location_id is not null
           locationsMap.get(row.location_id).new_users = row.new_count;
         }
       });
 
       recurringUsersRows.forEach(row => {
-         if (row.location_id && locationsMap.has(row.location_id)) { // Check if location_id is not null
+        if (row.location_id && locationsMap.has(row.location_id)) { // Check if location_id is not null
           locationsMap.get(row.location_id).recurring_users = row.recurring_count;
         }
       });
-      
+
       // Preparar los datos para la respuesta
       const locationData = Array.from(locationsMap.values());
       locationData.sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically by name
