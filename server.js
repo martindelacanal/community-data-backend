@@ -228,12 +228,12 @@ async function getNewRegistrations(csvRawData, from_date, to_date) {
 
     // Convertir from_date y to_date a objetos de fecha
     const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD");
+    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day'); // Ensure we include the entire day
 
     // Filtrar las filas según registration_date dentro del rango
     const filteredRecords = records.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, 'day', '[)'); // Include start, exclude end
+        return registrationDate.isBetween(fromDate, toDate, 'day', '[]'); // Include both start and end dates
     });
 
     // Generar un nuevo CSV con las filas filtradas
@@ -262,12 +262,12 @@ async function getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, 
 
     // Convertir from_date y to_date a objetos de fecha
     const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD");
+    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day'); // Ensure we include the entire day
 
     // Filtrar las filas sin seguro de salud y con registration_date dentro del rango
     const filteredRecords = records.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, 'day', '[)') && // Include start, exclude end
+        return registrationDate.isBetween(fromDate, toDate, 'day', '[]') && // Include both start and end dates
             (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '');
     });
 
@@ -303,17 +303,16 @@ async function getSummary(from_date, to_date, csvRawData) {
 
     // Convertir from_date y to_date a objetos de fecha
     const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD");
+    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day'); // Ensure we include the entire day
 
     // Calcular las sumas correspondientes
     records.forEach(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        // Use '[]' to include both fromDate and toDate in the check for "New"
+        // Use '[]' to include both fromDate and toDate
         const isNew = registrationDate.isBetween(fromDate, toDate, 'day', '[]'); 
 
         if (isNew) {
             newCount++;
-            // ... (health plan logic remains the same)
             if (record['Health Insurance?'] === 'Yes') {
                 newHealthPlanYes++;
             } else if (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '') {
@@ -324,7 +323,6 @@ async function getSummary(from_date, to_date, csvRawData) {
         }
     });
 
-    // ... (rest of the function remains the same)
     const totalNewRecurring = newCount + recurringCount;
     const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo;
 
@@ -390,10 +388,10 @@ schedule.scheduleJob(adminRule, async () => {
     );
 
     if (adminClients.length > 0) {
-        // Calculate date range (Corrected)
-        let today = moment().tz("America/Los_Angeles"); // Job runs on Sunday
-        let lastMonday = today.clone().subtract(6, 'days'); // Sunday - 6 days = Monday
-        let lastSunday = today.clone(); // Sunday (today)
+        // Calculate date range for previous week (Monday through Sunday)
+        let today = moment().tz("America/Los_Angeles");
+        let lastMonday = today.clone().subtract(6, 'days').startOf('day'); // Sunday - 6 days = Monday
+        let lastSunday = today.clone().endOf('day'); // Sunday (today) including the entire day
         
         let from_date = lastMonday.format("YYYY-MM-DD");
         let to_date = lastSunday.format("YYYY-MM-DD");
@@ -434,20 +432,24 @@ schedule.scheduleJob(rule, async () => {
         ORDER BY ce.client_id`
     );
     if (rows_emails.length > 0) {
-        // Calcular from_date y to_date
+        // Calcular from_date y to_date para semana anterior completa
         let today = moment().tz("America/Los_Angeles");
-        // If running on Monday, we want last Monday through last Sunday
-        let lastMonday = today.clone().subtract(7, 'days'); // Last Monday
-        let lastSunday = today.clone().subtract(1, 'days'); // Yesterday (Sunday)
         
+        // Last Monday (7 days ago)
+        let lastMonday = today.clone().subtract(7, 'days').startOf('day'); 
+        
+        // Last Sunday (yesterday)
+        let lastSunday = today.clone().subtract(1, 'days').endOf('day'); 
+        
+        // Format dates as YYYY-MM-DD for database queries
         let from_date = lastMonday.format("YYYY-MM-DD");
-        let to_date = lastSunday.format("YYYY-MM-DD");  // Include the entire Sunday
+        let to_date = lastSunday.format("YYYY-MM-DD");
         
-        // Formatear las fechas para el mensaje
+        // Format dates for display in message (MM-DD-YYYY)
         let formatted_from_date = lastMonday.format("MM-DD-YYYY");
         let formatted_to_date = lastSunday.format("MM-DD-YYYY");
-        // un cliente puede tener varios emails
-        // recorrer los emails de un cliente, guardarlos en variable emails y enviar el correo
+        
+        // Rest of the function remains the same
         const emails = [];
         const client_id = [];
         var csvRawData = null;

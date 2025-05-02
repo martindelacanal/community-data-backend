@@ -8440,7 +8440,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       // Location filter for 'new' users (might need review, but keeping for now)
       var query_locations_new = '';
       if (locations.length > 0) {
-        query_locations_new = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
+        query_locations_new = 'AND (u.first_location_id IN (' + locations.join() + ')) ';
       }
       // *** ADDED: Specific location filter for 'recurring' users ***
       var query_locations_recurring = '';
