@@ -30,17 +30,15 @@ schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
 });
 
 async function getRawData(from_date, to_date, client_id) {
-
-    // The client_id needs to be passed multiple times in the query parameters.
+    // Ensure from_date and to_date include time for accurate BETWEEN comparison with CONVERT_TZ
     const params = [
-        client_id, // For cu.client_id = ?
-        from_date, // For u.creation_date BETWEEN ? AND ?
-        to_date,   // For u.creation_date BETWEEN ? AND ?
-        from_date, // For db3.creation_date BETWEEN ? AND ?
-        to_date,   // For db3.creation_date BETWEEN ? AND ?
-        // client_id is implicitly used in the subquery via cu.client_id
+        client_id,
+        from_date, // Expected format: 'YYYY-MM-DD HH:mm:ss'
+        to_date,   // Expected format: 'YYYY-MM-DD HH:mm:ss'
+        from_date, // Expected format: 'YYYY-MM-DD HH:mm:ss'
+        to_date,   // Expected format: 'YYYY-MM-DD HH:mm:ss'
     ];
-    
+
     const [rows] = await mysqlConnection.promise().query(
         `SELECT
                 u.id as user_id,
@@ -78,25 +76,21 @@ async function getRawData(from_date, to_date, client_id) {
         LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
         LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
-        -- No need for LEFT JOIN delivery_beneficiary AS db here, it's handled in the WHERE clause subquery if needed.
         WHERE u.role_id = 5
           AND q.enabled = 'Y'
-          AND cu.client_id = ? -- Ensure the user is associated with the target client
+          AND cu.client_id = ?
           AND (
-              -- Condition 1: User registered within the date range
               CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
               OR
-              -- Condition 2: User had a delivery within the date range AT A LOCATION associated with THIS client
               u.id IN (
                   SELECT db3.receiving_user_id
                   FROM delivery_beneficiary db3
                   INNER JOIN location loc3 ON db3.location_id = loc3.id
                   INNER JOIN client_location cl3 ON loc3.id = cl3.location_id
                   WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
-                    AND cl3.client_id = cu.client_id -- Filter deliveries by the client associated with the user in the outer query
+                    AND cl3.client_id = cu.client_id
               )
           )
-          -- Ensure the question is relevant to at least one location associated with this client
           AND EXISTS (
               SELECT 1
               FROM question_location ql
@@ -105,7 +99,7 @@ async function getRawData(from_date, to_date, client_id) {
           )
         GROUP BY u.id, q.id, a.id
         ORDER BY u.id, q.id, a.id`,
-        params // Use the updated parameters array
+        params
     );
     // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
     var question_id_array = [];
@@ -178,6 +172,7 @@ async function getRawData(from_date, to_date, client_id) {
         }
     }
     // iterar el array headers y convertirlo en un array de objetos con id y title para csvWriter
+    // Create headers array
     var headers_array = [
         { id: 'user_id', title: 'User ID' },
         { id: 'username', title: 'Username' },
@@ -390,15 +385,18 @@ schedule.scheduleJob(adminRule, async () => {
     if (adminClients.length > 0) {
         // Calculate date range for previous week (Monday through Sunday)
         let today = moment().tz("America/Los_Angeles");
-        let lastMonday = today.clone().subtract(6, 'days').startOf('day'); // Sunday - 6 days = Monday
-        let lastSunday = today.clone().endOf('day'); // Sunday (today) including the entire day
-        
-        let from_date = lastMonday.format("YYYY-MM-DD");
-        let to_date = lastSunday.format("YYYY-MM-DD");
-        
+        // This runs Sunday PM, so week is Mon (today-6d) to Sun (today)
+        let lastMonday = today.clone().subtract(6, 'days').startOf('day'); // Monday 00:00:00 LA time
+        let lastSunday = today.clone().endOf('day'); // Sunday 23:59:59 LA time
+
+        // Format dates for database query (including time)
+        let from_date = lastMonday.format("YYYY-MM-DD HH:mm:ss");
+        let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+
+        // Format dates for display
         let formatted_from_date = lastMonday.format("MM-DD-YYYY");
         let formatted_to_date = lastSunday.format("MM-DD-YYYY");
-        
+
         // Send an email for EACH client
         for (const client of adminClients) {
             let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY"); // Use current date for report name consistency
@@ -407,14 +405,15 @@ schedule.scheduleJob(adminRule, async () => {
             const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
             const subject = `Bienestar Community report for ${client.client_name} - ${date}`;
             
-            // Generate reports for this specific client
+            // Generate reports for this specific client using full date-time range
             const csvRawData = await getRawData(from_date, to_date, client.client_id);
-            
+
             if (csvRawData && csvRawData.split('\n').length > 2) {
-                const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
-                const csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
-                const csvSummary = await getSummary(from_date, to_date, csvRawData);
-                
+                 // Pass YYYY-MM-DD format to helper functions
+                const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                const csvSummary = await getSummary(lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+
                 // Send admin email for this client
                 await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
             }
@@ -432,20 +431,20 @@ schedule.scheduleJob(rule, async () => {
         ORDER BY ce.client_id`
     );
     if (rows_emails.length > 0) {
-        // Calcular from_date y to_date para semana anterior completa
-        let today = moment().tz("America/Los_Angeles");
-        
+        // Calculate from_date and to_date for previous complete week
+        let today = moment().tz("America/Los_Angeles"); // This is Monday 00:00:00
+
         // Last Monday (7 days ago)
-        let lastMonday = today.clone().subtract(7, 'days').startOf('day'); 
-        
+        let lastMonday = today.clone().subtract(7, 'days').startOf('day'); // Previous Monday 00:00:00 LA time
+
         // Last Sunday (yesterday)
-        let lastSunday = today.clone().subtract(1, 'days').endOf('day'); 
-        
-        // Format dates as YYYY-MM-DD for database queries
-        let from_date = lastMonday.format("YYYY-MM-DD");
-        let to_date = lastSunday.format("YYYY-MM-DD");
-        
-        // Format dates for display in message (MM-DD-YYYY)
+        let lastSunday = today.clone().subtract(1, 'days').endOf('day'); // Previous Sunday 23:59:59 LA time
+
+        // Format dates for database query (including time)
+        let from_date = lastMonday.format("YYYY-MM-DD HH:mm:ss");
+        let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+
+        // Format dates for display in message
         let formatted_from_date = lastMonday.format("MM-DD-YYYY");
         let formatted_to_date = lastSunday.format("MM-DD-YYYY");
         
@@ -470,10 +469,11 @@ schedule.scheduleJob(rule, async () => {
                 client_id.push(rows_emails[i].client_id);
                 subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
                 csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                if (csvRawData && csvRawData.split('\n').length > 2) { // tiene 2 saltos de linea el csv vacio
-                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
-                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
-                    csvSummary = await getSummary(from_date, to_date, csvRawData);
+                if (csvRawData && csvRawData.split('\n').length > 2) {
+                    // Pass YYYY-MM-DD format to helper functions
+                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    csvSummary = await getSummary(lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
                 } else {
                     csvRawData = null;
                 }
@@ -489,10 +489,11 @@ schedule.scheduleJob(rule, async () => {
                 client_id.push(rows_emails[i].client_id);
                 subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
                 csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                if (csvRawData && csvRawData.split('\n').length > 2) { // tiene 2 saltos de linea el csv vacio
-                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
-                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
-                    csvSummary = await getSummary(from_date, to_date, csvRawData);
+                 if (csvRawData && csvRawData.split('\n').length > 2) {
+                    // Pass YYYY-MM-DD format to helper functions
+                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    csvSummary = await getSummary(lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
                 } else {
                     csvRawData = null;
                 }
@@ -523,22 +524,25 @@ schedule.scheduleJob('0 0 * * 1', async () => {
         if (rows_emails.length > 0) {
             // Calculate previous month's date range (first Monday to last Sunday)
             let prevMonth = today.clone().subtract(1, 'month');
-            
+
             // Find the first Monday of the previous month
             let firstMonday = prevMonth.clone().startOf('month');
             while (firstMonday.day() !== 1) {
                 firstMonday.add(1, 'day');
             }
-            
+            firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
+
             // Find the last Sunday of the previous month
             let lastSunday = prevMonth.clone().endOf('month');
-            while (lastSunday.day() !== 0) {
+            while (lastSunday.day() !== 0) { // 0 is Sunday
                 lastSunday.subtract(1, 'day');
             }
-            
-            let from_date = firstMonday.format("YYYY-MM-DD");
-            let to_date = lastSunday.format("YYYY-MM-DD");
-            
+            lastSunday = lastSunday.endOf('day'); // Set time to 23:59:59
+
+            // Format dates for database query (including time)
+            let from_date = firstMonday.format("YYYY-MM-DD HH:mm:ss");
+            let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+
             // Format dates for the message
             let formatted_from_date = firstMonday.format("MM-DD-YYYY");
             let formatted_to_date = lastSunday.format("MM-DD-YYYY");
@@ -568,9 +572,10 @@ schedule.scheduleJob('0 0 * * 1', async () => {
                     subject = `Monthly Bienestar Community report for ${rows_emails[i].client_name} - ${monthName} ${year}`;
                     csvRawData = await getRawData(from_date, to_date, client_id[0]);
                     if (csvRawData && csvRawData.split('\n').length > 2) {
-                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
-                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
-                        csvSummary = await getSummary(from_date, to_date, csvRawData);
+                        // Pass YYYY-MM-DD format to helper functions
+                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        csvSummary = await getSummary(firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
                     } else {
                         csvRawData = null;
                     }
@@ -587,9 +592,10 @@ schedule.scheduleJob('0 0 * * 1', async () => {
                     subject = `Monthly Bienestar Community report for ${rows_emails[i].client_name} - ${monthName} ${year}`;
                     csvRawData = await getRawData(from_date, to_date, client_id[0]);
                     if (csvRawData && csvRawData.split('\n').length > 2) {
-                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
-                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
-                        csvSummary = await getSummary(from_date, to_date, csvRawData);
+                        // Pass YYYY-MM-DD format to helper functions
+                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        csvSummary = await getSummary(firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
                     } else {
                         csvRawData = null;
                     }
@@ -637,13 +643,16 @@ schedule.scheduleJob(monthlyAdminRule, async () => {
             while (firstMonday.day() !== 1) {
                 firstMonday.add(1, 'day');
             }
-            
-            // Last Sunday is today
-            let lastSunday = today.clone();
-            
-            let from_date = firstMonday.format("YYYY-MM-DD");
-            let to_date = lastSunday.format("YYYY-MM-DD");
-            
+            firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
+
+            // Last Sunday is today (since this runs on the last Sunday)
+            let lastSunday = today.clone().endOf('day'); // Set time to 23:59:59
+
+            // Format dates for database query (including time)
+            let from_date = firstMonday.format("YYYY-MM-DD HH:mm:ss");
+            let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+
+            // Format dates for display
             let formatted_from_date = firstMonday.format("MM-DD-YYYY");
             let formatted_to_date = lastSunday.format("MM-DD-YYYY");
             
@@ -655,14 +664,15 @@ schedule.scheduleJob(monthlyAdminRule, async () => {
                 const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
                 const subject = `Monthly Bienestar Community report for ${client.client_name} - ${monthName} ${year}`;
                 
-                // Generate reports for this specific client
+                // Generate reports for this specific client using full date-time range
                 const csvRawData = await getRawData(from_date, to_date, client.client_id);
-                
+
                 if (csvRawData && csvRawData.split('\n').length > 2) {
-                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date);
-                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, from_date, to_date);
-                    const csvSummary = await getSummary(from_date, to_date, csvRawData);
-                    
+                    // Pass YYYY-MM-DD format to helper functions
+                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const csvSummary = await getSummary(firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+
                     // Send admin email for this client
                     await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
                 }

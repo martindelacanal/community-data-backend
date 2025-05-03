@@ -8492,7 +8492,8 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       if (cabecera.role === 'client') {
         params_metrics_participant.push(cabecera.client_id);
       }
-
+      console.log("from_date", from_date);
+      console.log("to_date", toDate.toISOString().slice(0, 10));
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           (SELECT COUNT(DISTINCT u.id)
