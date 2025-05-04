@@ -681,4 +681,11 @@ schedule.scheduleJob(monthlyAdminRule, async () => {
     }
 });
 
+module.exports = {
+    getRawData,
+    getNewRegistrations,
+    getNewRegistrationsWithoutHealthInsurance,
+    getSummary
+};
+
 server.listen(port, () => logger.info(`Server running on port ${port}`));
