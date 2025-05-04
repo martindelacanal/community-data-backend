@@ -522,20 +522,26 @@ schedule.scheduleJob('0 0 * * 1', async () => {
         );
         
         if (rows_emails.length > 0) {
-            // Calculate previous month's date range (first Monday to last Sunday)
+            // Calculate previous month's date range using the full month approach
             let prevMonth = today.clone().subtract(1, 'month');
-
-            // Find the first Monday of the previous month
-            let firstMonday = prevMonth.clone().startOf('month');
-            while (firstMonday.day() !== 1) {
-                firstMonday.add(1, 'day');
+            
+            // Find the first day of previous month
+            let firstDayOfMonth = prevMonth.clone().startOf('month');
+            
+            // Find the Monday before or on the first day of the month
+            let firstMonday = firstDayOfMonth.clone();
+            while (firstMonday.day() !== 1) { // 1 is Monday
+                firstMonday.subtract(1, 'day');
             }
             firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
-
-            // Find the last Sunday of the previous month
-            let lastSunday = prevMonth.clone().endOf('month');
+            
+            // Find the last day of previous month
+            let lastDayOfMonth = prevMonth.clone().endOf('month');
+            
+            // Find the Sunday after or on the last day of the month
+            let lastSunday = lastDayOfMonth.clone();
             while (lastSunday.day() !== 0) { // 0 is Sunday
-                lastSunday.subtract(1, 'day');
+                lastSunday.add(1, 'day');
             }
             lastSunday = lastSunday.endOf('day'); // Set time to 23:59:59
 
@@ -637,15 +643,17 @@ schedule.scheduleJob(monthlyAdminRule, async () => {
         );
         
         if (adminClients.length > 0) {
-            // Calculate current month's date range (first Monday to last Sunday)
-            // First Monday of the month
-            let firstMonday = today.clone().startOf('month');
-            while (firstMonday.day() !== 1) {
-                firstMonday.add(1, 'day');
+            // Find the first day of current month
+            let firstDayOfMonth = today.clone().startOf('month');
+            
+            // Find the Monday before or on the first day of the month
+            let firstMonday = firstDayOfMonth.clone();
+            while (firstMonday.day() !== 1) { // 1 is Monday
+                firstMonday.subtract(1, 'day');
             }
             firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
-
-            // Last Sunday is today (since this runs on the last Sunday)
+            
+            // Last Sunday is today (since this runs on the last Sunday of month)
             let lastSunday = today.clone().endOf('day'); // Set time to 23:59:59
 
             // Format dates for database query (including time)
