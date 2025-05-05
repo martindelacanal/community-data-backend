@@ -68,7 +68,11 @@ async function testWeeklyReports() {
                 // Generate derived reports using imported functions
                 const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, date_only_from, date_only_to);
                 const csvAllNewRegistrations = await getNewRegistrations(csvRawData, date_only_from, date_only_to);
-                const csvSummary = await getSummary(date_only_from, date_only_to, csvRawData);
+                const csvSummary = await getSummary(
+                    date_only_from,
+                    date_only_to,
+                    client.id,          
+                    csvRawData);
 
                 console.log(`Sending email for client: ${client.name} to: ${customEmail}`);
 

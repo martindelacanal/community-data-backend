@@ -8442,10 +8442,10 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       if (locations.length > 0) {
         query_locations_new = 'AND (u.first_location_id IN (' + locations.join() + ')) ';
       }
-      // *** ADDED: Specific location filter for 'recurring' users ***
+      // Location filter for 'recurring' users
       var query_locations_recurring = '';
       if (locations.length > 0) {
-        query_locations_recurring = 'AND db.location_id IN (' + locations.join() + ')'; // Only check delivery location
+        query_locations_recurring = 'AND db_range.location_id IN (' + locations.join() + ')'; 
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8488,12 +8488,18 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       }
 
       // Parameters for 'recurring' subquery
-      params_metrics_participant.push(from_date, toDate.toISOString().slice(0, 10), from_date);
+      params_metrics_participant.push(from_date, toDate.toISOString().slice(0, 10));
+      
+      // Add location params for prev_locations if needed
+      let prev_locations_filter = '';
+      if (locations.length > 0) {
+        prev_locations_filter = 'AND db_prev.location_id IN (' + locations.join() + ')';
+      }
+      
       if (cabecera.role === 'client') {
         params_metrics_participant.push(cabecera.client_id);
       }
-      console.log("from_date", from_date);
-      console.log("to_date", toDate.toISOString().slice(0, 10));
+
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           (SELECT COUNT(DISTINCT u.id)
@@ -8509,18 +8515,26 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                 AND u.enabled = 'Y'
                 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles')
                 BETWEEN ? AND ? ${clientCondition} ${query_locations_new} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS new,
-          (SELECT COUNT(DISTINCT db.receiving_user_id)
-              FROM delivery_beneficiary db
-              INNER JOIN user u ON db.receiving_user_id = u.id
+          (SELECT COUNT(DISTINCT db_range.receiving_user_id)
+              FROM delivery_beneficiary db_range
+              INNER JOIN user u ON db_range.receiving_user_id = u.id
               ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-              WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+              WHERE CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
                 BETWEEN ? AND ?
-                AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ?
-                AND u.role_id = 5 AND u.enabled = 'Y' /* Added role/enabled check */
-                ${clientCondition} ${query_locations_recurring} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS recurring
+                AND u.role_id = 5 AND u.enabled = 'Y'
+                ${clientCondition} ${query_locations_recurring} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}
+                AND EXISTS (
+                  SELECT 1
+                  FROM delivery_beneficiary db_prev
+                  WHERE db_prev.receiving_user_id = db_range.receiving_user_id
+                    AND db_prev.creation_date < db_range.creation_date
+                    ${prev_locations_filter}
+                )
+          ) AS recurring
         LIMIT 1`,
         params_metrics_participant
       );
+      
       if (rows[0]) {
         res.json({ total: rows[0].total, new: rows[0].new, recurring: rows[0].recurring });
       } else {
@@ -8533,8 +8547,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
   } else {
     res.status(403).json('Unauthorized');
   }
-}
-);
+});
 
 router.post('/metrics/participant/email', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);

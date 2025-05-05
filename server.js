@@ -278,7 +278,7 @@ async function getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, 
     return csvData;
 }
 
-async function getSummary(from_date, to_date, csvRawData) {
+async function getSummary(from_date, to_date, client_id, csvRawData) {
     // Parsear el CSV recibido
     const records = parse(csvRawData, {
         columns: true,
@@ -304,7 +304,7 @@ async function getSummary(from_date, to_date, csvRawData) {
     records.forEach(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
         // Use '[]' to include both fromDate and toDate
-        const isNew = registrationDate.isBetween(fromDate, toDate, 'day', '[]'); 
+        const isNew = registrationDate.isBetween(fromDate, toDate, 'day', '[]');
 
         if (isNew) {
             newCount++;
@@ -313,11 +313,41 @@ async function getSummary(from_date, to_date, csvRawData) {
             } else if (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '') {
                 newHealthPlanNo++;
             }
-        } else {
-            recurringCount++;
         }
     });
 
+    /* ------------------------------------------------------------------
+    Recurrentes por CLIENTE (no importa la locación específica):
+    – al menos 1 visita dentro del rango
+    – y alguna visita anterior al mismo cliente (antes en el tiempo)
+    ------------------------------------------------------------------ */
+    const [recurringRows] = await mysqlConnection.promise().query(
+        `
+        SELECT COUNT(DISTINCT db_range.receiving_user_id) AS recurring
+        FROM   delivery_beneficiary db_range
+        JOIN   client_location      cl_range
+                 ON cl_range.location_id = db_range.location_id
+        WHERE  cl_range.client_id = ?
+          AND  CONVERT_TZ(db_range.creation_date,'+00:00','America/Los_Angeles')
+               BETWEEN ? AND ?
+          AND  EXISTS (
+                  SELECT 1
+                  FROM   delivery_beneficiary db_prev
+                  JOIN   client_location      cl_prev
+                         ON cl_prev.location_id = db_prev.location_id
+                  WHERE  db_prev.receiving_user_id = db_range.receiving_user_id
+                    AND  cl_prev.client_id       = cl_range.client_id   -- mismo cliente
+                    AND  db_prev.creation_date   <  db_range.creation_date -- visita anterior
+               )
+        `,
+        [
+            client_id,
+            `${from_date} 00:00:00`,
+            `${to_date} 23:59:59`
+        ]
+    );
+
+    recurringCount = (recurringRows[0] && recurringRows[0].recurring) || 0;
     const totalNewRecurring = newCount + recurringCount;
     const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo;
 
@@ -358,7 +388,7 @@ async function getSummary(from_date, to_date, csvRawData) {
 const rule = new RecurrenceRule();
 rule.dayOfWeek = 1; // Monday (0 is Sunday)
 rule.hour = 0;      // Midnight
-rule.minute = 0;    
+rule.minute = 0;
 rule.tz = 'America/Los_Angeles';
 
 // New rule for Sunday at 6:00 PM for administration email
@@ -372,7 +402,7 @@ adminRule.tz = 'America/Los_Angeles';
 schedule.scheduleJob(adminRule, async () => {
     const adminEmail = 'administration@bienestariswellbeing.org';
     const password = 'bienestarcommunity';
-    
+
     const [adminClients] = await mysqlConnection.promise().query(
         `SELECT ce.client_id, c.name AS client_name
          FROM client_email AS ce
@@ -400,19 +430,23 @@ schedule.scheduleJob(adminRule, async () => {
         // Send an email for EACH client
         for (const client of adminClients) {
             let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY"); // Use current date for report name consistency
-            
+
             // Message for email
             const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
             const subject = `Bienestar Community report for ${client.client_name} - ${date}`;
-            
+
             // Generate reports for this specific client using full date-time range
             const csvRawData = await getRawData(from_date, to_date, client.client_id);
 
             if (csvRawData && csvRawData.split('\n').length > 2) {
-                 // Pass YYYY-MM-DD format to helper functions
+                // Pass YYYY-MM-DD format to helper functions
                 const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                 const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                const csvSummary = await getSummary(lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+                const csvSummary = await getSummary(
+                    lastMonday.format("YYYY-MM-DD"),
+                    lastSunday.format("YYYY-MM-DD"),
+                    client.client_id,          // o client_id[0] en el bloque semanal
+                    csvRawData);
 
                 // Send admin email for this client
                 await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
@@ -447,7 +481,7 @@ schedule.scheduleJob(rule, async () => {
         // Format dates for display in message
         let formatted_from_date = lastMonday.format("MM-DD-YYYY");
         let formatted_to_date = lastSunday.format("MM-DD-YYYY");
-        
+
         // Rest of the function remains the same
         const emails = [];
         const client_id = [];
@@ -473,7 +507,11 @@ schedule.scheduleJob(rule, async () => {
                     // Pass YYYY-MM-DD format to helper functions
                     csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                     csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    csvSummary = await getSummary(lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+                    csvSummary = await getSummary(
+                        lastMonday.format("YYYY-MM-DD"),
+                        lastSunday.format("YYYY-MM-DD"),
+                        client_id[0],
+                        csvRawData);
                 } else {
                     csvRawData = null;
                 }
@@ -489,11 +527,15 @@ schedule.scheduleJob(rule, async () => {
                 client_id.push(rows_emails[i].client_id);
                 subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
                 csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                 if (csvRawData && csvRawData.split('\n').length > 2) {
+                if (csvRawData && csvRawData.split('\n').length > 2) {
                     // Pass YYYY-MM-DD format to helper functions
                     csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                     csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    csvSummary = await getSummary(lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+                    csvSummary = await getSummary(
+                        lastMonday.format("YYYY-MM-DD"),
+                        lastSunday.format("YYYY-MM-DD"),
+                        client_id[0],
+                        csvRawData);
                 } else {
                     csvRawData = null;
                 }
@@ -506,10 +548,16 @@ schedule.scheduleJob(rule, async () => {
 });
 
 // Monthly client reports - Runs every Monday, checks if it's first Monday of month
-schedule.scheduleJob('0 0 * * 1', async () => {
+const monthlyClientRule = new RecurrenceRule();
+monthlyClientRule.dayOfWeek = 1;   // Lunes
+monthlyClientRule.hour      = 0;   // 00:00
+monthlyClientRule.minute    = 0;
+monthlyClientRule.tz        = 'America/Los_Angeles';
+
+schedule.scheduleJob(monthlyClientRule, async () => {
     const today = moment().tz("America/Los_Angeles");
     const dayOfMonth = today.date();
-    
+
     // Check if this is the first Monday of the month (days 1-7)
     if (dayOfMonth <= 7) {
         const password = 'bienestarcommunity';
@@ -520,24 +568,24 @@ schedule.scheduleJob('0 0 * * 1', async () => {
             WHERE ce.enabled = 'Y' AND ce.email != 'administration@bienestariswellbeing.org'
             ORDER BY ce.client_id`
         );
-        
+
         if (rows_emails.length > 0) {
             // Calculate previous month's date range using the full month approach
             let prevMonth = today.clone().subtract(1, 'month');
-            
+
             // Find the first day of previous month
             let firstDayOfMonth = prevMonth.clone().startOf('month');
-            
+
             // Find the Monday before or on the first day of the month
             let firstMonday = firstDayOfMonth.clone();
             while (firstMonday.day() !== 1) { // 1 is Monday
                 firstMonday.subtract(1, 'day');
             }
             firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
-            
+
             // Find the last day of previous month
             let lastDayOfMonth = prevMonth.clone().endOf('month');
-            
+
             // Find the Sunday after or on the last day of the month
             let lastSunday = lastDayOfMonth.clone();
             while (lastSunday.day() !== 0) { // 0 is Sunday
@@ -552,7 +600,7 @@ schedule.scheduleJob('0 0 * * 1', async () => {
             // Format dates for the message
             let formatted_from_date = firstMonday.format("MM-DD-YYYY");
             let formatted_to_date = lastSunday.format("MM-DD-YYYY");
-            
+
             // Variables for email
             const emails = [];
             const client_id = [];
@@ -562,14 +610,14 @@ schedule.scheduleJob('0 0 * * 1', async () => {
             var csvSummary = null;
             var subject = '';
             var message = '';
-            
+
             let monthName = prevMonth.format("MMMM");
             let year = prevMonth.format("YYYY");
             let date = today.format("MM-DD-YYYY");
-            
+
             // Email message
             message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
-            
+
             // Process each client's emails
             for (let i = 0; i < rows_emails.length; i++) {
                 if (i === 0) {
@@ -581,7 +629,11 @@ schedule.scheduleJob('0 0 * * 1', async () => {
                         // Pass YYYY-MM-DD format to helper functions
                         csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                         csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        csvSummary = await getSummary(firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+                        csvSummary = await getSummary(
+                            firstMonday.format("YYYY-MM-DD"),
+                            lastSunday.format("YYYY-MM-DD"),
+                            client_id[0],
+                            csvRawData);
                     } else {
                         csvRawData = null;
                     }
@@ -601,13 +653,17 @@ schedule.scheduleJob('0 0 * * 1', async () => {
                         // Pass YYYY-MM-DD format to helper functions
                         csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                         csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        csvSummary = await getSummary(firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+                        csvSummary = await getSummary(
+                            firstMonday.format("YYYY-MM-DD"),
+                            lastSunday.format("YYYY-MM-DD"),
+                            client_id[0],
+                            csvRawData);
                     } else {
                         csvRawData = null;
                     }
                 }
             }
-            
+
             // Send final email if there's data
             if (csvRawData) {
                 await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
@@ -617,22 +673,23 @@ schedule.scheduleJob('0 0 * * 1', async () => {
 });
 
 // Monthly admin reports rule
-const monthlyAdminRule = new RecurrenceRule();
-monthlyAdminRule.dayOfWeek = 0; // Sunday
-monthlyAdminRule.hour = 18;     // 6:00 PM
-monthlyAdminRule.minute = 0;
-monthlyAdminRule.tz = 'America/Los_Angeles';
+const firstSundayAdminRule = new RecurrenceRule();
+firstSundayAdminRule.dayOfWeek = 0; // Domingo
+firstSundayAdminRule.hour      = 18; // 18:00
+firstSundayAdminRule.minute    = 0;
+firstSundayAdminRule.tz        = 'America/Los_Angeles';
 
-// Monthly admin reports - Runs every Sunday, checks if it's last Sunday of month
-schedule.scheduleJob(monthlyAdminRule, async () => {
+schedule.scheduleJob(firstSundayAdminRule, async () => {
     const today = moment().tz("America/Los_Angeles");
-    const nextWeek = today.clone().add(7, 'days');
-    
+
+    // Solo ejecuta si es el 1.º domingo (día 1-7)
+    if (today.date() > 7) { return; }
+
     // If next Sunday is in a different month, then this is the last Sunday
-    if (nextWeek.month() !== today.month()) {
+    
         const adminEmail = 'administration@bienestariswellbeing.org';
         const password = 'bienestarcommunity';
-        
+
         const [adminClients] = await mysqlConnection.promise().query(
             `SELECT ce.client_id, c.name AS client_name
              FROM client_email AS ce
@@ -641,18 +698,18 @@ schedule.scheduleJob(monthlyAdminRule, async () => {
              ORDER BY ce.client_id`,
             [adminEmail]
         );
-        
+
         if (adminClients.length > 0) {
             // Find the first day of current month
             let firstDayOfMonth = today.clone().startOf('month');
-            
+
             // Find the Monday before or on the first day of the month
             let firstMonday = firstDayOfMonth.clone();
             while (firstMonday.day() !== 1) { // 1 is Monday
                 firstMonday.subtract(1, 'day');
             }
             firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
-            
+
             // Last Sunday is today (since this runs on the last Sunday of month)
             let lastSunday = today.clone().endOf('day'); // Set time to 23:59:59
 
@@ -663,15 +720,15 @@ schedule.scheduleJob(monthlyAdminRule, async () => {
             // Format dates for display
             let formatted_from_date = firstMonday.format("MM-DD-YYYY");
             let formatted_to_date = lastSunday.format("MM-DD-YYYY");
-            
+
             let monthName = today.format("MMMM");
             let year = today.format("YYYY");
-            
+
             // Process each client for admin report
             for (const client of adminClients) {
                 const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
                 const subject = `Monthly Bienestar Community report for ${client.client_name} - ${monthName} ${year}`;
-                
+
                 // Generate reports for this specific client using full date-time range
                 const csvRawData = await getRawData(from_date, to_date, client.client_id);
 
@@ -679,14 +736,18 @@ schedule.scheduleJob(monthlyAdminRule, async () => {
                     // Pass YYYY-MM-DD format to helper functions
                     const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                     const csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const csvSummary = await getSummary(firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), csvRawData);
+                    const csvSummary = await getSummary(
+                        firstMonday.format("YYYY-MM-DD"),
+                        lastSunday.format("YYYY-MM-DD"),
+                        client.client_id,
+                        csvRawData);
 
                     // Send admin email for this client
                     await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
                 }
             }
         }
-    }
+    
 });
 
 module.exports = {
