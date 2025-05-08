@@ -8445,7 +8445,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       // Location filter for 'recurring' users
       var query_locations_recurring = '';
       if (locations.length > 0) {
-        query_locations_recurring = 'AND db_range.location_id IN (' + locations.join() + ')'; 
+        query_locations_recurring = 'AND db_range.location_id IN (' + locations.join() + ')';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8489,13 +8489,13 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
 
       // Parameters for 'recurring' subquery
       params_metrics_participant.push(from_date, toDate.toISOString().slice(0, 10));
-      
+
       // Add location params for prev_locations if needed
       let prev_locations_filter = '';
       if (locations.length > 0) {
         prev_locations_filter = 'AND db_prev.location_id IN (' + locations.join() + ')';
       }
-      
+
       if (cabecera.role === 'client') {
         params_metrics_participant.push(cabecera.client_id);
       }
@@ -8534,7 +8534,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
         LIMIT 1`,
         params_metrics_participant
       );
-      
+
       if (rows[0]) {
         res.json({ total: rows[0].total, new: rows[0].new, recurring: rows[0].recurring });
       } else {
@@ -8809,24 +8809,49 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
         [cabecera.client_id]
       );
 
+      // Modified query based on whether product_types filter is provided
+      let poundsDeliveredQuery;
+      if (product_types.length > 0) {
+        // When product_types is specified, use pdt.quantity (existing behavior)
+        poundsDeliveredQuery = `
+          SELECT 
+            SUM(pdt.quantity) AS poundsDelivered
+            FROM donation_ticket as dt
+            INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
+            INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+            INNER JOIN product as p ON pdt.product_id = p.id
+            ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+            WHERE dt.enabled = 'Y'
+            ${query_from_date_product}
+            ${query_to_date_product}
+            ${query_locations_product}
+            ${query_providers}
+            ${query_product_types}
+            ${query_stocker_upload}
+            ${query_transported_by}
+            ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
+          `;
+      } else {
+        // When product_types is not specified, use dt.total_weight
+        poundsDeliveredQuery = `
+          SELECT 
+            SUM(dt.total_weight) AS poundsDelivered
+            FROM donation_ticket as dt
+            INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
+            ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
+            WHERE dt.enabled = 'Y'
+            ${query_from_date_product}
+            ${query_to_date_product}
+            ${query_locations_product}
+            ${query_providers}
+            ${query_stocker_upload}
+            ${query_transported_by}
+            ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
+          `;
+      }
+
       const [rows_poundsDelivered] = await mysqlConnection.promise().query(
-        `SELECT 
-          SUM(pdt.quantity) AS poundsDelivered
-          FROM donation_ticket as dt
-          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
-          INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-          INNER JOIN product as p ON pdt.product_id = p.id
-          ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
-          WHERE dt.enabled = 'Y'
-          ${query_from_date_product}
-          ${query_to_date_product}
-          ${query_locations_product}
-          ${query_providers}
-          ${query_product_types}
-          ${query_stocker_upload}
-          ${query_transported_by}
-          ${cabecera.role === 'client' ? 'and cl.client_id = ?' : ''}
-          `,
+        poundsDeliveredQuery,
         [cabecera.client_id]
       );
 
@@ -9732,14 +9757,23 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
         params.push(...providers);
       }
-      if (product_types.length > 0) {
+
+      let useProductFilter = product_types.length > 0;
+
+      if (useProductFilter) {
         query_product_types = 'AND p.product_type_id IN (' + product_types.map(() => '?').join(',') + ')';
         params.push(...product_types);
       }
+
       if (cabecera.role === 'client') {
-        query_product_types += ' AND cl.client_id = ?';
+        if (useProductFilter) {
+          query_product_types += ' AND cl.client_id = ?';
+        } else {
+          query_product_types = ' AND cl.client_id = ?';
+        }
         params.push(cabecera.client_id);
       }
+
       var query_stocker_upload = '';
       if (stocker_upload.length > 0) {
         query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
@@ -9752,6 +9786,19 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       // Construir la consulta SQL con el CTE
       let query;
       let cteParams;
+
+      // Define the data selection - use total_weight when no product types are specified
+      const dataSelection = useProductFilter ?
+        "COALESCE(SUM(pdt.quantity), 0) AS data" :
+        "COALESCE(SUM(dt.total_weight), 0) AS data";
+
+      // Define product joins only when needed
+      const productJoins = useProductFilter ?
+        `LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+         LEFT JOIN product as p ON pdt.product_id = p.id
+         LEFT JOIN product_type as pt ON p.product_type_id = pt.id` :
+        '';
+
       if (interval === 'quarter') {
         // Para 'quarter', necesitamos cuatro parámetros en el CTE
         cteParams = [from_date, from_date, from_date, to_date];
@@ -9769,16 +9816,14 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
           )
           SELECT 
             pr.name AS name,
-            COALESCE(SUM(pdt.quantity), 0) AS data,
+            ${dataSelection},
             date_ranges.period AS period
           FROM date_ranges
           LEFT JOIN donation_ticket as dt ON 
             CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date)) = date_ranges.period
           LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
           LEFT JOIN provider as pr ON dt.provider_id = pr.id
-          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-          LEFT JOIN product as p ON pdt.product_id = p.id
-          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+          ${productJoins}
           ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
           WHERE dt.enabled = 'Y'
           ${query_from_date}
@@ -9812,16 +9857,14 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
           )
           SELECT 
             pr.name AS name,
-            COALESCE(SUM(pdt.quantity), 0) AS data,
+            ${dataSelection},
             date_ranges.period AS period
           FROM date_ranges
           LEFT JOIN donation_ticket as dt ON 
             DATE_FORMAT(dt.date, '${formatString}') = date_ranges.period
           LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
           LEFT JOIN provider as pr ON dt.provider_id = pr.id
-          LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-          LEFT JOIN product as p ON pdt.product_id = p.id
-          LEFT JOIN product_type as pt ON p.product_type_id = pt.id
+          ${productJoins}
           ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
           WHERE dt.enabled = 'Y'
           ${query_from_date}
@@ -10292,28 +10335,50 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
       }
 
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT 
-        l.community_city AS name,
-        SUM(pdt.quantity) AS total
-        FROM donation_ticket as dt
-        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
-        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-        INNER JOIN product as p ON pdt.product_id = p.id
-        INNER JOIN location as l ON dt.location_id = l.id
-        WHERE dt.enabled = 'Y'
-        ${cabecera.role === 'client' ? 'and dt.location_id IN (SELECT location_id FROM client_location WHERE client_id = ?)' : ''}
-        ${query_from_date}
-        ${query_to_date}
-        ${query_locations}
-        ${query_providers}
-        ${query_product_types}
-        ${query_stocker_upload}
-        ${query_transported_by}
-        GROUP BY l.id
-        ORDER BY total desc`,
-        [cabecera.client_id]
-      );
+      // Select the appropriate query based on whether product_types filter is provided
+      let query;
+      if (product_types.length > 0) {
+        // Use specific product types query (sum by product quantity)
+        query = `SELECT 
+          l.community_city AS name,
+          SUM(pdt.quantity) AS total
+          FROM donation_ticket as dt
+          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
+          INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+          INNER JOIN product as p ON pdt.product_id = p.id
+          INNER JOIN location as l ON dt.location_id = l.id
+          WHERE dt.enabled = 'Y'
+          ${cabecera.role === 'client' ? 'and dt.location_id IN (SELECT location_id FROM client_location WHERE client_id = ?)' : ''}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_product_types}
+          ${query_stocker_upload}
+          ${query_transported_by}
+          GROUP BY l.id
+          ORDER BY total desc`;
+      } else {
+        // Use total weight query (sum by ticket total weight)
+        query = `SELECT 
+          l.community_city AS name,
+          SUM(dt.total_weight) AS total
+          FROM donation_ticket as dt
+          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id and sl.operation_id = 5
+          INNER JOIN location as l ON dt.location_id = l.id
+          WHERE dt.enabled = 'Y'
+          ${cabecera.role === 'client' ? 'and dt.location_id IN (SELECT location_id FROM client_location WHERE client_id = ?)' : ''}
+          ${query_from_date}
+          ${query_to_date}
+          ${query_locations}
+          ${query_providers}
+          ${query_stocker_upload}
+          ${query_transported_by}
+          GROUP BY l.id
+          ORDER BY total desc`;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(query, [cabecera.client_id]);
 
       // Si no hay datos, devolver un objeto vacío
       if (rows.length === 0) {
