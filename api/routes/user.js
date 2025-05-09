@@ -8437,10 +8437,10 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
-      // Location filter for 'new' users (might need review, but keeping for now)
+      // Location filter for 'new' users - uses first_location_id
       var query_locations_new = '';
       if (locations.length > 0) {
-        query_locations_new = 'AND (u.first_location_id IN (' + locations.join() + ')) ';
+        query_locations_new = 'AND u.first_location_id IN (' + locations.join() + ') ';
       }
       // Location filter for 'recurring' users
       var query_locations_recurring = '';
@@ -8510,7 +8510,6 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
           (SELECT COUNT(DISTINCT u.id)
               FROM user u
               ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-              LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id /* Join needed if query_locations_new uses db */
               WHERE u.role_id = 5
                 AND u.enabled = 'Y'
                 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles')

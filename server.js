@@ -65,7 +65,13 @@ async function getRawData(from_date, to_date, client_id) {
                 q.name AS question,
                 a.name AS answer,
                 uq.answer_text AS answer_text,
-                uq.answer_number AS answer_number
+                uq.answer_number AS answer_number,
+                EXISTS (
+                    SELECT 1
+                    FROM client_location cl_first
+                    WHERE cl_first.location_id = u.first_location_id
+                      AND cl_first.client_id = cu.client_id
+                ) AS registered_at_client_location_flag
         FROM user u
         INNER JOIN client_user cu ON u.id = cu.user_id
         INNER JOIN gender AS g ON u.gender_id = g.id
@@ -103,6 +109,7 @@ async function getRawData(from_date, to_date, client_id) {
     );
     // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
     var question_id_array = [];
+
     if (rows.length > 0) {
         for (let i = 0; i < rows.length; i++) {
             const row = rows[i];
@@ -138,6 +145,7 @@ async function getRawData(from_date, to_date, client_id) {
             row_filtered["locations_visited"] = rows[i].locations_visited;
             row_filtered["registration_date"] = rows[i].registration_date;
             row_filtered["registration_time"] = rows[i].registration_time;
+            row_filtered["registered_at_client_location"] = rows[i].registered_at_client_location_flag ? '1' : '0';
         }
         if (!row_filtered[rows[i].question_id]) {
 
@@ -189,7 +197,8 @@ async function getRawData(from_date, to_date, client_id) {
         { id: 'last_location_visited', title: 'Last location visited' },
         { id: 'locations_visited', title: 'Locations visited' },
         { id: 'registration_date', title: 'Registration date' },
-        { id: 'registration_time', title: 'Registration time' }
+        { id: 'registration_time', title: 'Registration time' },
+        { id: 'registered_at_client_location', title: 'Registered at Client Location' }
     ];
 
     for (let i = 0; i < question_id_array.length; i++) {
@@ -304,9 +313,10 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     records.forEach(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
         // Use '[]' to include both fromDate and toDate
-        const isNew = registrationDate.isBetween(fromDate, toDate, 'day', '[]');
+        const isWithinDateRange = registrationDate.isBetween(fromDate, toDate, 'day', '[]');
+        const wasRegisteredAtThisClientLocation = record['Registered at Client Location'] === '1';
 
-        if (isNew) {
+        if (isWithinDateRange && wasRegisteredAtThisClientLocation) {
             newCount++;
             if (record['Health Insurance?'] === 'Yes') {
                 newHealthPlanYes++;
