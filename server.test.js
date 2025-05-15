@@ -205,34 +205,34 @@ async function testMonthlyReports() {
 
 // Run the test 
 // You can choose to run one or both tests:
-// testWeeklyReports()
-//     .then(() => console.log('Test completed'))
-//     .catch(err => {
-//         console.error('Test failed:', err);
-//         process.exitCode = 1; // Indicate failure
-//     })
-//     .finally(async () => {
-//         try {
-//             await mysqlConnection.end(); // Close the database connection
-//             console.log('Database connection closed.');
-//         } catch (closeErr) {
-//             console.error('Error closing database connection:', closeErr);
-//         }
-//         process.exit(); // Ensure the script exits
-//     });
-
-testMonthlyReports()
+testWeeklyReports()
     .then(() => console.log('Test completed'))
     .catch(err => {
         console.error('Test failed:', err);
-        process.exitCode = 1;
+        process.exitCode = 1; // Indicate failure
     })
     .finally(async () => {
         try {
-            await mysqlConnection.end();
+            await mysqlConnection.end(); // Close the database connection
             console.log('Database connection closed.');
         } catch (closeErr) {
             console.error('Error closing database connection:', closeErr);
         }
-        process.exit();
+        process.exit(); // Ensure the script exits
     });
+
+// testMonthlyReports()
+//     .then(() => console.log('Test completed'))
+//     .catch(err => {
+//         console.error('Test failed:', err);
+//         process.exitCode = 1;
+//     })
+//     .finally(async () => {
+//         try {
+//             await mysqlConnection.end();
+//             console.log('Database connection closed.');
+//         } catch (closeErr) {
+//             console.error('Error closing database connection:', closeErr);
+//         }
+//         process.exit();
+//     });

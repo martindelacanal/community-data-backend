@@ -288,107 +288,237 @@ async function getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, 
 }
 
 async function getSummary(from_date, to_date, client_id, csvRawData) {
-    // Parsear el CSV recibido
+    // Parsear el CSV recibido (used for overall summary stats)
     const records = parse(csvRawData, {
         columns: true,
         skip_empty_lines: true,
         delimiter: ';'
     });
 
-    if (records.length === 0) {
-        return '';
+    // Fetch client name
+    let clientName = 'Unknown Client';
+    try {
+        const [clientRows] = await mysqlConnection.promise().query(
+            `SELECT name FROM client WHERE id = ?`,
+            [client_id]
+        );
+        if (clientRows.length > 0) {
+            clientName = clientRows[0].name;
+        }
+    } catch (error) {
+        logger.error(`Error fetching client name for client_id ${client_id}:`, error);
     }
 
-    // Inicializar contadores
+    // Format dates for display and DB
+    const displayFromDate = moment(from_date, "YYYY-MM-DD").format("MM/DD/YYYY");
+    const displayToDate = moment(to_date, "YYYY-MM-DD").format("MM/DD/YYYY");
+    const dateRangeDisplay = `${displayFromDate} - ${displayToDate}`;
+
+    const from_date_db_start = moment(from_date, "YYYY-MM-DD").format("YYYY-MM-DD 00:00:00");
+    const to_date_db_end = moment(to_date, "YYYY-MM-DD").format("YYYY-MM-DD 23:59:59");
+    // from_date_start_for_prior is no longer needed for the modified recurring per location query.
+    // const from_date_start_for_prior = moment(from_date, "YYYY-MM-DD").format("YYYY-MM-DD");
+
+
+    // Overall Summary Calculations (from csvRawData)
     let newCount = 0;
-    let recurringCount = 0;
     let newHealthPlanYes = 0;
     let newHealthPlanNo = 0;
 
-    // Convertir from_date y to_date a objetos de fecha
-    const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day'); // Ensure we include the entire day
+    if (records.length > 0) {
+        const filterFromDateMoment = moment(from_date, "YYYY-MM-DD");
+        const filterToDateMoment = moment(to_date, "YYYY-MM-DD").endOf('day');
 
-    // Calcular las sumas correspondientes
-    records.forEach(record => {
-        const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        // Use '[]' to include both fromDate and toDate
-        const isWithinDateRange = registrationDate.isBetween(fromDate, toDate, 'day', '[]');
-        const wasRegisteredAtThisClientLocation = record['Registered at Client Location'] === '1';
+        records.forEach(record => {
+            const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
+            const isWithinDateRange = registrationDate.isBetween(filterFromDateMoment, filterToDateMoment, 'day', '[]');
+            const wasRegisteredAtThisClientLocation = record['Registered at Client Location'] === '1';
 
-        if (isWithinDateRange && wasRegisteredAtThisClientLocation) {
-            newCount++;
-            if (record['Health Insurance?'] === 'Yes') {
-                newHealthPlanYes++;
-            } else if (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '') {
-                newHealthPlanNo++;
+            if (isWithinDateRange && wasRegisteredAtThisClientLocation) {
+                newCount++;
+                if (record['Health Insurance?'] === 'Yes') {
+                    newHealthPlanYes++;
+                } else if (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '') {
+                    newHealthPlanNo++;
+                }
             }
-        }
-    });
+        });
+    }
 
-    /* ------------------------------------------------------------------
-    Recurrentes por CLIENTE (no importa la locación específica):
-    – al menos 1 visita dentro del rango
-    – y alguna visita anterior al mismo cliente (antes en el tiempo)
-    ------------------------------------------------------------------ */
-    const [recurringRows] = await mysqlConnection.promise().query(
-        `
-        SELECT COUNT(DISTINCT db_range.receiving_user_id) AS recurring
-        FROM   delivery_beneficiary db_range
-        JOIN   client_location      cl_range
-                 ON cl_range.location_id = db_range.location_id
-        WHERE  cl_range.client_id = ?
-          AND  CONVERT_TZ(db_range.creation_date,'+00:00','America/Los_Angeles')
-               BETWEEN ? AND ?
-          AND  EXISTS (
-                  SELECT 1
-                  FROM   delivery_beneficiary db_prev
-                  JOIN   client_location      cl_prev
-                         ON cl_prev.location_id = db_prev.location_id
-                  WHERE  db_prev.receiving_user_id = db_range.receiving_user_id
-                    AND  cl_prev.client_id       = cl_range.client_id   -- mismo cliente
-                    AND  db_prev.creation_date   <  db_range.creation_date -- visita anterior
-               )
-        `,
-        [
-            client_id,
-            `${from_date} 00:00:00`,
-            `${to_date} 23:59:59`
-        ]
-    );
-
-    recurringCount = (recurringRows[0] && recurringRows[0].recurring) || 0;
+    let recurringCount = 0; // Overall recurring
+    try {
+        const [recurringRows] = await mysqlConnection.promise().query(
+            `
+            SELECT COUNT(DISTINCT db_range.receiving_user_id) AS recurring
+            FROM   delivery_beneficiary db_range
+            JOIN   client_location      cl_range
+                     ON cl_range.location_id = db_range.location_id
+            WHERE  cl_range.client_id = ?
+              AND  CONVERT_TZ(db_range.creation_date,'+00:00','America/Los_Angeles')
+                   BETWEEN ? AND ?
+              AND  EXISTS (
+                      SELECT 1
+                      FROM   delivery_beneficiary db_prev
+                      JOIN   client_location      cl_prev
+                             ON cl_prev.location_id = db_prev.location_id
+                      WHERE  db_prev.receiving_user_id = db_range.receiving_user_id
+                        AND  cl_prev.client_id       = cl_range.client_id
+                        AND  db_prev.creation_date   < db_range.creation_date 
+                   )
+            `,
+            [client_id, from_date_db_start, to_date_db_end]
+        );
+        recurringCount = (recurringRows[0] && recurringRows[0].recurring) || 0;
+    } catch (error) {
+        logger.error(`Error fetching overall recurring count for client_id ${client_id}:`, error);
+    }
+    
     const totalNewRecurring = newCount + recurringCount;
     const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo;
 
-    // Crear el CSV con la información resumida
-    const summaryData = [
+    // Prepare CSV structure (5 columns)
+    const summaryPartRows = [
+        { col1: 'Client Name', col2: clientName, col3: '', col4: '', col5: '' },
+        { col1: 'Date Range', col2: dateRangeDisplay, col3: '', col4: '', col5: '' },
+        { col1: '', col2: '', col3: '', col4: '', col5: '' }, // Empty row
+        { col1: 'New', col2: newCount, col3: '', col4: '', col5: '' },
+        { col1: 'Recurring', col2: recurringCount, col3: '', col4: '', col5: '' },
+        { col1: 'Total', col2: totalNewRecurring, col3: '', col4: '', col5: '' },
+        { col1: '', col2: '', col3: '', col4: '', col5: '' }, // Empty row
+        { col1: '(New) Health Plan', col2: '', col3: '', col4: '', col5: '' },
+        { col1: '  YES', col2: newHealthPlanYes, col3: '', col4: '', col5: '' },
+        { col1: '  NO', col2: newHealthPlanNo, col3: '', col4: '', col5: '' },
+        { col1: '  Total', col2: totalNewHealthPlan, col3: '', col4: '', col5: '' }
+    ];
+
+    // --- Location Specific Data ---
+    const locationTableRows = [];
+    locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' }); // Empty row before location table
+    locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New', col4: 'Recurring', col5: 'Totals' });
+
+    let allClientLocations = [];
+    try {
+        [allClientLocations] = await mysqlConnection.promise().query(
+            `SELECT l.id, l.community_city as name FROM location l JOIN client_location cl ON l.id = cl.location_id WHERE cl.client_id = ? ORDER BY l.id`,
+            [client_id]
+        );
+    } catch (error) {
+        logger.error(`Error fetching locations for client_id ${client_id}:`, error);
+    }
+
+    const newPerLocationMap = {};
+    try {
+        const [newLocRows] = await mysqlConnection.promise().query(
+            `SELECT
+                u.first_location_id AS location_id,
+                COUNT(DISTINCT u.id) AS new_count
+            FROM user u
+            JOIN client_user cu ON u.id = cu.user_id AND cu.client_id = ?
+            JOIN client_location cl ON u.first_location_id = cl.location_id AND cl.client_id = ?
+            WHERE u.role_id = 5
+              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
+            GROUP BY u.first_location_id;`,
+            [client_id, client_id, from_date_db_start, to_date_db_end]
+        );
+        newLocRows.forEach(row => { newPerLocationMap[row.location_id] = row.new_count; });
+    } catch (error) {
+        logger.error(`Error fetching new per location for client_id ${client_id}:`, error);
+    }
+
+    const recurringPerLocationMap = {};
+    try {
+        const [recLocRows] = await mysqlConnection.promise().query(
+            `SELECT
+                db_range.location_id,
+                COUNT(DISTINCT db_range.receiving_user_id) AS recurring_count
+            FROM delivery_beneficiary db_range
+            JOIN client_location cl_range ON cl_range.location_id = db_range.location_id AND cl_range.client_id = ?
+            WHERE CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM delivery_beneficiary db_prev
+                  JOIN client_location cl_prev ON cl_prev.location_id = db_prev.location_id AND cl_prev.client_id = ?
+                  WHERE db_prev.receiving_user_id = db_range.receiving_user_id
+                    AND db_prev.creation_date < db_range.creation_date 
+              )
+            GROUP BY db_range.location_id;`,
+            [client_id, from_date_db_start, to_date_db_end, client_id] // Parameters updated
+        );
+        recLocRows.forEach(row => { recurringPerLocationMap[row.location_id] = row.recurring_count; });
+    } catch (error) {
+        logger.error(`Error fetching recurring per location for client_id ${client_id}:`, error);
+    }
+
+    let totalNewByLocation = 0;
+    let totalRecurringByLocation = 0;
+    let grandTotalByLocation = 0;
+
+    if (allClientLocations.length > 0) {
+        allClientLocations.forEach(loc => {
+            const newAtLoc = newPerLocationMap[loc.id] || 0;
+            const recurringAtLoc = recurringPerLocationMap[loc.id] || 0;
+            const totalAtLoc = newAtLoc + recurringAtLoc;
+            
+            locationTableRows.push({
+                col1: loc.id,
+                col2: loc.name,
+                col3: newAtLoc,
+                col4: recurringAtLoc,
+                col5: totalAtLoc
+            });
+
+            totalNewByLocation += newAtLoc;
+            totalRecurringByLocation += recurringAtLoc;
+            grandTotalByLocation += totalAtLoc;
+        });
+
+        // Add empty row before TOTAL row
+        locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' });
+
+        // Add the TOTAL row for locations
+        locationTableRows.push({
+            col1: '', // ID column is blank for TOTAL row
+            col2: 'TOTAL',
+            col3: totalNewByLocation,
+            col4: totalRecurringByLocation,
+            col5: grandTotalByLocation
+        });
+
+    } else {
+        // locationTableRows.push({ col1: '', col2: 'No locations found for this client.', col3: '', col4: '', col5: '' });
+    }
+
+    const allCsvRows = summaryPartRows.concat(locationTableRows);
+
+    const csvFileStringifier = createCsvStringifier({
+        header: [
+            { id: 'col1', title: 'Column1' },
+            { id: 'col2', title: 'Column2' },
+            { id: 'col3', title: 'Column3' },
+            { id: 'col4', title: 'Column4' },
+            { id: 'col5', title: 'Column5' }
+        ],
+        fieldDelimiter: ';'
+    });
+    const csvString = csvFileStringifier.stringifyRecords(allCsvRows);
+
+    // Data for the email HTML table (original one-row format - UNCHANGED)
+    const emailTableData = [
         {
-            New: newCount,
-            Recurring: recurringCount,
+            'New': newCount,
+            'Recurring': recurringCount,
             'Total New+Recurring': totalNewRecurring,
             '(New) Health Plan YES': newHealthPlanYes,
             '(New) Health Plan NO': newHealthPlanNo,
             'Total (New) Health Plan': totalNewHealthPlan
         }
     ];
+    
+    if (records.length === 0 && recurringCount === 0 && allClientLocations.length === 0) { 
+        return { csvString: "", emailTableData: [] };
+    }
 
-    const csvStringifier = createCsvStringifier({
-        header: [
-            { id: 'New', title: 'New' },
-            { id: 'Recurring', title: 'Recurring' },
-            { id: 'Total New+Recurring', title: 'Total New+Recurring' },
-            { id: '(New) Health Plan YES', title: '(New) Health Plan YES' },
-            { id: '(New) Health Plan NO', title: '(New) Health Plan NO' },
-            { id: 'Total (New) Health Plan', title: 'Total (New) Health Plan' }
-        ],
-        fieldDelimiter: ';'
-    });
-
-    let csvData = csvStringifier.getHeaderString();
-    csvData += csvStringifier.stringifyRecords(summaryData);
-
-    return csvData;
+    return { csvString: csvString, emailTableData: emailTableData };
 }
 
 // schedule.scheduleJob('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
@@ -430,36 +560,44 @@ schedule.scheduleJob(adminRule, async () => {
         let lastSunday = today.clone().endOf('day'); // Sunday 23:59:59 LA time
 
         // Format dates for database query (including time)
-        let from_date = lastMonday.format("YYYY-MM-DD HH:mm:ss");
-        let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+        let from_date_db = lastMonday.format("YYYY-MM-DD HH:mm:ss");
+        let to_date_db = lastSunday.format("YYYY-MM-DD HH:mm:ss");
 
         // Format dates for display
-        let formatted_from_date = lastMonday.format("MM-DD-YYYY");
-        let formatted_to_date = lastSunday.format("MM-DD-YYYY");
+        let formatted_from_date_display = lastMonday.format("MM-DD-YYYY");
+        let formatted_to_date_display = lastSunday.format("MM-DD-YYYY");
 
         // Send an email for EACH client
         for (const client of adminClients) {
             let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY"); // Use current date for report name consistency
 
             // Message for email
-            const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+            const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
             const subject = `Bienestar Community report for ${client.client_name} - ${date}`;
 
             // Generate reports for this specific client using full date-time range
-            const csvRawData = await getRawData(from_date, to_date, client.client_id);
+            const csvRawData = await getRawData(from_date_db, to_date_db, client.client_id);
 
-            if (csvRawData && csvRawData.split('\n').length > 2) {
+            if (csvRawData && csvRawData.split('\n').length > 1) { // Check if raw data has more than header
                 // Pass YYYY-MM-DD format to helper functions
-                const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                const csvSummary = await getSummary(
+                const summaryObject = await getSummary(
                     lastMonday.format("YYYY-MM-DD"),
                     lastSunday.format("YYYY-MM-DD"),
-                    client.client_id,          // o client_id[0] en el bloque semanal
+                    client.client_id,
                     csvRawData);
 
-                // Send admin email for this client
-                await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
+                // Ensure summaryObject and its properties are valid before proceeding
+                if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                
+                    // Send admin email for this client
+                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, [adminEmail]);
+                } else {
+                    logger.warn(`No summary data generated for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
+                }
+            } else {
+                 logger.warn(`No raw data found for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
             }
         }
     }
@@ -485,74 +623,51 @@ schedule.scheduleJob(rule, async () => {
         let lastSunday = today.clone().subtract(1, 'days').endOf('day'); // Previous Sunday 23:59:59 LA time
 
         // Format dates for database query (including time)
-        let from_date = lastMonday.format("YYYY-MM-DD HH:mm:ss");
-        let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+        let from_date_db = lastMonday.format("YYYY-MM-DD HH:mm:ss");
+        let to_date_db = lastSunday.format("YYYY-MM-DD HH:mm:ss");
 
         // Format dates for display in message
-        let formatted_from_date = lastMonday.format("MM-DD-YYYY");
-        let formatted_to_date = lastSunday.format("MM-DD-YYYY");
+        let formatted_from_date_display = lastMonday.format("MM-DD-YYYY");
+        let formatted_to_date_display = lastSunday.format("MM-DD-YYYY");
 
-        // Rest of the function remains the same
-        const emails = [];
-        const client_id = [];
-        var csvRawData = null;
-        var csvNewRegistrations = null;
-        var csvAllNewRegistrations = null;
-        var csvSummary = null;
-        var subject = '';
-        var message = '';
+        const emailsByClient = {};
+        rows_emails.forEach(row => {
+            if (!emailsByClient[row.client_id]) {
+                emailsByClient[row.client_id] = {
+                    name: row.client_name,
+                    emails: []
+                };
+            }
+            emailsByClient[row.client_id].emails.push(row.email);
+        });
 
         let date = today.format("MM-DD-YYYY");
+        const messageBody = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
 
-        // add to message that it is a zip file and need to be unzipped with password
-        message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+        for (const clientId in emailsByClient) {
+            const clientData = emailsByClient[clientId];
+            const subject = `Bienestar Community report for ${clientData.name} - ${date}`;
+            
+            const csvRawData = await getRawData(from_date_db, to_date_db, clientId);
 
-        for (let i = 0; i < rows_emails.length; i++) {
-            if (i === 0) {
-                emails.push(rows_emails[i].email);
-                client_id.push(rows_emails[i].client_id);
-                subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
-                csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                if (csvRawData && csvRawData.split('\n').length > 2) {
-                    // Pass YYYY-MM-DD format to helper functions
-                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    csvSummary = await getSummary(
-                        lastMonday.format("YYYY-MM-DD"),
-                        lastSunday.format("YYYY-MM-DD"),
-                        client_id[0],
-                        csvRawData);
+            if (csvRawData && csvRawData.split('\n').length > 1) { // Check if raw data has more than header
+                const summaryObject = await getSummary(
+                    lastMonday.format("YYYY-MM-DD"),
+                    lastSunday.format("YYYY-MM-DD"),
+                    clientId,
+                    csvRawData);
+
+                if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    
+                    await email.sendEmailWithAttachment(subject, messageBody, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, clientData.emails);
                 } else {
-                    csvRawData = null;
+                     logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
-            } else if (client_id.includes(rows_emails[i].client_id)) {
-                emails.push(rows_emails[i].email);
             } else {
-                if (csvRawData) {
-                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
-                }
-                emails.length = 0;
-                emails.push(rows_emails[i].email);
-                client_id.length = 0;
-                client_id.push(rows_emails[i].client_id);
-                subject = `Bienestar Community report for ${rows_emails[i].client_name} - ${date}`;
-                csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                if (csvRawData && csvRawData.split('\n').length > 2) {
-                    // Pass YYYY-MM-DD format to helper functions
-                    csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    csvSummary = await getSummary(
-                        lastMonday.format("YYYY-MM-DD"),
-                        lastSunday.format("YYYY-MM-DD"),
-                        client_id[0],
-                        csvRawData);
-                } else {
-                    csvRawData = null;
-                }
+                logger.warn(`No raw data found for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
             }
-        }
-        if (csvRawData) {
-            await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
         }
     }
 });
@@ -580,103 +695,66 @@ schedule.scheduleJob(monthlyClientRule, async () => {
         );
 
         if (rows_emails.length > 0) {
-            // Calculate previous month's date range using the full month approach
             let prevMonth = today.clone().subtract(1, 'month');
-
-            // Find the first day of previous month
             let firstDayOfMonth = prevMonth.clone().startOf('month');
-
-            // Find the Monday before or on the first day of the month
             let firstMonday = firstDayOfMonth.clone();
-            while (firstMonday.day() !== 1) { // 1 is Monday
+            while (firstMonday.day() !== 1) { 
                 firstMonday.subtract(1, 'day');
             }
-            firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
+            firstMonday = firstMonday.startOf('day'); 
 
-            // Find the last day of previous month
             let lastDayOfMonth = prevMonth.clone().endOf('month');
-
-            // Find the Sunday after or on the last day of the month
             let lastSunday = lastDayOfMonth.clone();
-            while (lastSunday.day() !== 0) { // 0 is Sunday
+            while (lastSunday.day() !== 0) { 
                 lastSunday.add(1, 'day');
             }
-            lastSunday = lastSunday.endOf('day'); // Set time to 23:59:59
+            lastSunday = lastSunday.endOf('day'); 
 
-            // Format dates for database query (including time)
-            let from_date = firstMonday.format("YYYY-MM-DD HH:mm:ss");
-            let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+            let from_date_db = firstMonday.format("YYYY-MM-DD HH:mm:ss");
+            let to_date_db = lastSunday.format("YYYY-MM-DD HH:mm:ss");
 
-            // Format dates for the message
-            let formatted_from_date = firstMonday.format("MM-DD-YYYY");
-            let formatted_to_date = lastSunday.format("MM-DD-YYYY");
-
-            // Variables for email
-            const emails = [];
-            const client_id = [];
-            var csvRawData = null;
-            var csvNewRegistrations = null;
-            var csvAllNewRegistrations = null;
-            var csvSummary = null;
-            var subject = '';
-            var message = '';
-
+            let formatted_from_date_display = firstMonday.format("MM-DD-YYYY");
+            let formatted_to_date_display = lastSunday.format("MM-DD-YYYY");
+            
             let monthName = prevMonth.format("MMMM");
             let year = prevMonth.format("YYYY");
-            let date = today.format("MM-DD-YYYY");
 
-            // Email message
-            message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+            const messageBody = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
 
-            // Process each client's emails
-            for (let i = 0; i < rows_emails.length; i++) {
-                if (i === 0) {
-                    emails.push(rows_emails[i].email);
-                    client_id.push(rows_emails[i].client_id);
-                    subject = `Monthly Bienestar Community report for ${rows_emails[i].client_name} - ${monthName} ${year}`;
-                    csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                    if (csvRawData && csvRawData.split('\n').length > 2) {
-                        // Pass YYYY-MM-DD format to helper functions
-                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        csvSummary = await getSummary(
-                            firstMonday.format("YYYY-MM-DD"),
-                            lastSunday.format("YYYY-MM-DD"),
-                            client_id[0],
-                            csvRawData);
-                    } else {
-                        csvRawData = null;
-                    }
-                } else if (client_id.includes(rows_emails[i].client_id)) {
-                    emails.push(rows_emails[i].email);
-                } else {
-                    if (csvRawData) {
-                        await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
-                    }
-                    emails.length = 0;
-                    emails.push(rows_emails[i].email);
-                    client_id.length = 0;
-                    client_id.push(rows_emails[i].client_id);
-                    subject = `Monthly Bienestar Community report for ${rows_emails[i].client_name} - ${monthName} ${year}`;
-                    csvRawData = await getRawData(from_date, to_date, client_id[0]);
-                    if (csvRawData && csvRawData.split('\n').length > 2) {
-                        // Pass YYYY-MM-DD format to helper functions
-                        csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        csvSummary = await getSummary(
-                            firstMonday.format("YYYY-MM-DD"),
-                            lastSunday.format("YYYY-MM-DD"),
-                            client_id[0],
-                            csvRawData);
-                    } else {
-                        csvRawData = null;
-                    }
+            const emailsByClient = {};
+            rows_emails.forEach(row => {
+                if (!emailsByClient[row.client_id]) {
+                    emailsByClient[row.client_id] = {
+                        name: row.client_name,
+                        emails: []
+                    };
                 }
-            }
+                emailsByClient[row.client_id].emails.push(row.email);
+            });
 
-            // Send final email if there's data
-            if (csvRawData) {
-                await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, emails);
+            for (const clientId in emailsByClient) {
+                const clientData = emailsByClient[clientId];
+                const subject = `Monthly Bienestar Community report for ${clientData.name} - ${monthName} ${year}`;
+                const csvRawData = await getRawData(from_date_db, to_date_db, clientId);
+
+                if (csvRawData && csvRawData.split('\n').length > 1) {
+                    const summaryObject = await getSummary(
+                        firstMonday.format("YYYY-MM-DD"),
+                        lastSunday.format("YYYY-MM-DD"),
+                        clientId,
+                        csvRawData);
+                    
+                    if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                        const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        const csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        
+                        await email.sendEmailWithAttachment(subject, messageBody, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, clientData.emails);
+                    } else {
+                        logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly). Skipping email.`);
+                    }
+                } else {
+                     logger.warn(`No raw data found for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly). Skipping email.`);
+                }
             }
         }
     }
@@ -692,72 +770,70 @@ firstSundayAdminRule.tz        = 'America/Los_Angeles';
 schedule.scheduleJob(firstSundayAdminRule, async () => {
     const today = moment().tz("America/Los_Angeles");
 
-    // Solo ejecuta si es el 1.º domingo (día 1-7)
-    if (today.date() > 7) { return; }
-
-    // If next Sunday is in a different month, then this is the last Sunday
+    if (today.date() > 7) { return; } // Only run on the first Sunday of the month
     
-        const adminEmail = 'administration@bienestariswellbeing.org';
-        const password = 'bienestarcommunity';
+    const adminEmail = 'administration@bienestariswellbeing.org';
+    const password = 'bienestarcommunity';
 
-        const [adminClients] = await mysqlConnection.promise().query(
-            `SELECT ce.client_id, c.name AS client_name
-             FROM client_email AS ce
-             INNER JOIN client AS c ON ce.client_id = c.id
-             WHERE ce.email = ? AND ce.enabled = 'Y'
-             ORDER BY ce.client_id`,
-            [adminEmail]
-        );
+    const [adminClients] = await mysqlConnection.promise().query(
+        `SELECT ce.client_id, c.name AS client_name
+         FROM client_email AS ce
+         INNER JOIN client AS c ON ce.client_id = c.id
+         WHERE ce.email = ? AND ce.enabled = 'Y'
+         ORDER BY ce.client_id`,
+        [adminEmail]
+    );
 
-        if (adminClients.length > 0) {
-            // Find the first day of current month
-            let firstDayOfMonth = today.clone().startOf('month');
+    if (adminClients.length > 0) {
+        // For the monthly admin report, the range is the *current* month up to this first Sunday.
+        // This seems to be the logic from the original code for the "Monthly admin reports rule"
+        // which calculates based on `today` being the first Sunday.
+        // If the intention was for the *previous* full month, the date logic would need to mirror `monthlyClientRule`.
+        // Assuming current month up to the first Sunday:
+        let firstDayOfCurrentMonth = today.clone().startOf('month');
+        let reportFirstMonday = firstDayOfCurrentMonth.clone();
+        while (reportFirstMonday.day() !== 1) { // 1 is Monday
+            reportFirstMonday.subtract(1, 'day'); // Go to the Monday of or before the 1st of the month
+        }
+        reportFirstMonday = reportFirstMonday.startOf('day');
 
-            // Find the Monday before or on the first day of the month
-            let firstMonday = firstDayOfMonth.clone();
-            while (firstMonday.day() !== 1) { // 1 is Monday
-                firstMonday.subtract(1, 'day');
-            }
-            firstMonday = firstMonday.startOf('day'); // Set time to 00:00:00
+        let reportLastSunday = today.clone().endOf('day'); // Report up to "today" (the first Sunday)
 
-            // Last Sunday is today (since this runs on the last Sunday of month)
-            let lastSunday = today.clone().endOf('day'); // Set time to 23:59:59
+        let from_date_db = reportFirstMonday.format("YYYY-MM-DD HH:mm:ss");
+        let to_date_db = reportLastSunday.format("YYYY-MM-DD HH:mm:ss");
 
-            // Format dates for database query (including time)
-            let from_date = firstMonday.format("YYYY-MM-DD HH:mm:ss");
-            let to_date = lastSunday.format("YYYY-MM-DD HH:mm:ss");
+        let formatted_from_date_display = reportFirstMonday.format("MM-DD-YYYY");
+        let formatted_to_date_display = reportLastSunday.format("MM-DD-YYYY");
 
-            // Format dates for display
-            let formatted_from_date = firstMonday.format("MM-DD-YYYY");
-            let formatted_to_date = lastSunday.format("MM-DD-YYYY");
+        let monthName = today.format("MMMM"); // Current month name
+        let year = today.format("YYYY");
 
-            let monthName = today.format("MMMM");
-            let year = today.format("YYYY");
+        for (const client of adminClients) {
+            const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+            const subject = `Monthly Bienestar Community report for ${client.client_name} - ${monthName} ${year}`;
 
-            // Process each client for admin report
-            for (const client of adminClients) {
-                const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
-                const subject = `Monthly Bienestar Community report for ${client.client_name} - ${monthName} ${year}`;
+            const csvRawData = await getRawData(from_date_db, to_date_db, client.client_id);
 
-                // Generate reports for this specific client using full date-time range
-                const csvRawData = await getRawData(from_date, to_date, client.client_id);
+            if (csvRawData && csvRawData.split('\n').length > 1) {
+                const summaryObject = await getSummary(
+                    reportFirstMonday.format("YYYY-MM-DD"),
+                    reportLastSunday.format("YYYY-MM-DD"),
+                    client.client_id,
+                    csvRawData);
 
-                if (csvRawData && csvRawData.split('\n').length > 2) {
-                    // Pass YYYY-MM-DD format to helper functions
-                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const csvSummary = await getSummary(
-                        firstMonday.format("YYYY-MM-DD"),
-                        lastSunday.format("YYYY-MM-DD"),
-                        client.client_id,
-                        csvRawData);
-
-                    // Send admin email for this client
-                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, csvSummary, csvAllNewRegistrations, password, [adminEmail]);
+                if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
+                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
+                    
+                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, [adminEmail]);
+                } else {
+                    logger.warn(`No summary data generated for admin client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly Admin). Skipping email.`);
                 }
+            } else {
+                logger.warn(`No raw data found for admin client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly Admin). Skipping email.`);
             }
         }
-    
+    }
 });
 
 module.exports = {
