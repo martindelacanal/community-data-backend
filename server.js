@@ -372,7 +372,7 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     } catch (error) {
         logger.error(`Error fetching overall recurring count for client_id ${client_id}:`, error);
     }
-    
+
     const totalNewRecurring = newCount + recurringCount;
     const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo;
 
@@ -390,11 +390,6 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
         { col1: '  NO', col2: newHealthPlanNo, col3: '', col4: '', col5: '' },
         { col1: '  Total', col2: totalNewHealthPlan, col3: '', col4: '', col5: '' }
     ];
-
-    // --- Location Specific Data ---
-    const locationTableRows = [];
-    locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' }); // Empty row before location table
-    locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New', col4: 'Recurring', col5: 'Totals' });
 
     let allClientLocations = [];
     try {
@@ -449,6 +444,46 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
         logger.error(`Error fetching recurring per location for client_id ${client_id}:`, error);
     }
 
+    // --- Location Specific Data ---
+    const locationTableRows = [];
+    locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' }); // Empty row before location table
+
+    // Decide headers for locations table based on client_id
+    let locationHeaders, locationRowBuilder;
+    if (parseInt(client_id) === 1) {
+        // For client_id 1, exclude Recurring and Totals columns
+        locationHeaders = [
+            { id: 'col1', title: 'Id' },
+            { id: 'col2', title: 'Location' },
+            { id: 'col3', title: 'New' }
+        ];
+        // Add header row
+        locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New' });
+        // Row builder for client_id 1
+        locationRowBuilder = (loc, newAtLoc) => ({
+            col1: loc.id,
+            col2: loc.name,
+            col3: newAtLoc
+        });
+    } else {
+        // Default: include all columns
+        locationHeaders = [
+            { id: 'col1', title: 'Id' },
+            { id: 'col2', title: 'Location' },
+            { id: 'col3', title: 'New' },
+            { id: 'col4', title: 'Recurring' },
+            { id: 'col5', title: 'Totals' }
+        ];
+        locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New', col4: 'Recurring', col5: 'Totals' });
+        locationRowBuilder = (loc, newAtLoc, recurringAtLoc, totalAtLoc) => ({
+            col1: loc.id,
+            col2: loc.name,
+            col3: newAtLoc,
+            col4: recurringAtLoc,
+            col5: totalAtLoc
+        });
+    }
+
     let totalNewByLocation = 0;
     let totalRecurringByLocation = 0;
     let grandTotalByLocation = 0;
@@ -458,14 +493,12 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
             const newAtLoc = newPerLocationMap[loc.id] || 0;
             const recurringAtLoc = recurringPerLocationMap[loc.id] || 0;
             const totalAtLoc = newAtLoc + recurringAtLoc;
-            
-            locationTableRows.push({
-                col1: loc.id,
-                col2: loc.name,
-                col3: newAtLoc,
-                col4: recurringAtLoc,
-                col5: totalAtLoc
-            });
+
+            if (parseInt(client_id) === 1) {
+                locationTableRows.push(locationRowBuilder(loc, newAtLoc));
+            } else {
+                locationTableRows.push(locationRowBuilder(loc, newAtLoc, recurringAtLoc, totalAtLoc));
+            }
 
             totalNewByLocation += newAtLoc;
             totalRecurringByLocation += recurringAtLoc;
@@ -476,30 +509,48 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
         locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' });
 
         // Add the TOTAL row for locations
-        locationTableRows.push({
-            col1: '', // ID column is blank for TOTAL row
-            col2: 'TOTAL',
-            col3: totalNewByLocation,
-            col4: totalRecurringByLocation,
-            col5: grandTotalByLocation
-        });
-
-    } else {
-        // locationTableRows.push({ col1: '', col2: 'No locations found for this client.', col3: '', col4: '', col5: '' });
+        if (parseInt(client_id) === 1) {
+            locationTableRows.push({
+                col1: '',
+                col2: 'TOTAL',
+                col3: totalNewByLocation
+            });
+        } else {
+            locationTableRows.push({
+                col1: '',
+                col2: 'TOTAL',
+                col3: totalNewByLocation,
+                col4: totalRecurringByLocation,
+                col5: grandTotalByLocation
+            });
+        }
     }
 
-    const allCsvRows = summaryPartRows.concat(locationTableRows);
+    // Build the CSV with the correct headers
+    let allCsvRows = summaryPartRows.concat(locationTableRows);
 
-    const csvFileStringifier = createCsvStringifier({
-        header: [
-            { id: 'col1', title: 'Column1' },
-            { id: 'col2', title: 'Column2' },
-            { id: 'col3', title: 'Column3' },
-            { id: 'col4', title: 'Column4' },
-            { id: 'col5', title: 'Column5' }
-        ],
-        fieldDelimiter: ';'
-    });
+    let csvFileStringifier;
+    if (parseInt(client_id) === 1) {
+        csvFileStringifier = createCsvStringifier({
+            header: [
+                { id: 'col1', title: 'Column1' },
+                { id: 'col2', title: 'Column2' },
+                { id: 'col3', title: 'Column3' }
+            ],
+            fieldDelimiter: ';'
+        });
+    } else {
+        csvFileStringifier = createCsvStringifier({
+            header: [
+                { id: 'col1', title: 'Column1' },
+                { id: 'col2', title: 'Column2' },
+                { id: 'col3', title: 'Column3' },
+                { id: 'col4', title: 'Column4' },
+                { id: 'col5', title: 'Column5' }
+            ],
+            fieldDelimiter: ';'
+        });
+    }
     const csvString = csvFileStringifier.stringifyRecords(allCsvRows);
 
     // Data for the email HTML table (original one-row format - UNCHANGED)
@@ -513,8 +564,8 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
             'Total (New) Health Plan': totalNewHealthPlan
         }
     ];
-    
-    if (records.length === 0 && recurringCount === 0 && allClientLocations.length === 0) { 
+
+    if (records.length === 0 && recurringCount === 0 && allClientLocations.length === 0) {
         return { csvString: "", emailTableData: [] };
     }
 
@@ -590,14 +641,14 @@ schedule.scheduleJob(adminRule, async () => {
                 if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
                     const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                     const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                
+
                     // Send admin email for this client
                     await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, [adminEmail]);
                 } else {
                     logger.warn(`No summary data generated for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
             } else {
-                 logger.warn(`No raw data found for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
+                logger.warn(`No raw data found for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
             }
         }
     }
@@ -647,7 +698,7 @@ schedule.scheduleJob(rule, async () => {
         for (const clientId in emailsByClient) {
             const clientData = emailsByClient[clientId];
             const subject = `Bienestar Community report for ${clientData.name} - ${date}`;
-            
+
             const csvRawData = await getRawData(from_date_db, to_date_db, clientId);
 
             if (csvRawData && csvRawData.split('\n').length > 1) { // Check if raw data has more than header
@@ -660,10 +711,10 @@ schedule.scheduleJob(rule, async () => {
                 if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
                     const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                     const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    
+
                     await email.sendEmailWithAttachment(subject, messageBody, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, clientData.emails);
                 } else {
-                     logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
+                    logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
             } else {
                 logger.warn(`No raw data found for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
@@ -675,9 +726,9 @@ schedule.scheduleJob(rule, async () => {
 // Monthly client reports - Runs every Monday, checks if it's first Monday of month
 const monthlyClientRule = new RecurrenceRule();
 monthlyClientRule.dayOfWeek = 1;   // Lunes
-monthlyClientRule.hour      = 0;   // 00:00
-monthlyClientRule.minute    = 0;
-monthlyClientRule.tz        = 'America/Los_Angeles';
+monthlyClientRule.hour = 0;   // 00:00
+monthlyClientRule.minute = 0;
+monthlyClientRule.tz = 'America/Los_Angeles';
 
 schedule.scheduleJob(monthlyClientRule, async () => {
     const today = moment().tz("America/Los_Angeles");
@@ -698,24 +749,24 @@ schedule.scheduleJob(monthlyClientRule, async () => {
             let prevMonth = today.clone().subtract(1, 'month');
             let firstDayOfMonth = prevMonth.clone().startOf('month');
             let firstMonday = firstDayOfMonth.clone();
-            while (firstMonday.day() !== 1) { 
+            while (firstMonday.day() !== 1) {
                 firstMonday.subtract(1, 'day');
             }
-            firstMonday = firstMonday.startOf('day'); 
+            firstMonday = firstMonday.startOf('day');
 
             let lastDayOfMonth = prevMonth.clone().endOf('month');
             let lastSunday = lastDayOfMonth.clone();
-            while (lastSunday.day() !== 0) { 
+            while (lastSunday.day() !== 0) {
                 lastSunday.add(1, 'day');
             }
-            lastSunday = lastSunday.endOf('day'); 
+            lastSunday = lastSunday.endOf('day');
 
             let from_date_db = firstMonday.format("YYYY-MM-DD HH:mm:ss");
             let to_date_db = lastSunday.format("YYYY-MM-DD HH:mm:ss");
 
             let formatted_from_date_display = firstMonday.format("MM-DD-YYYY");
             let formatted_to_date_display = lastSunday.format("MM-DD-YYYY");
-            
+
             let monthName = prevMonth.format("MMMM");
             let year = prevMonth.format("YYYY");
 
@@ -743,17 +794,17 @@ schedule.scheduleJob(monthlyClientRule, async () => {
                         lastSunday.format("YYYY-MM-DD"),
                         clientId,
                         csvRawData);
-                    
+
                     if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
                         const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                         const csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        
+
                         await email.sendEmailWithAttachment(subject, messageBody, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, clientData.emails);
                     } else {
                         logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly). Skipping email.`);
                     }
                 } else {
-                     logger.warn(`No raw data found for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly). Skipping email.`);
+                    logger.warn(`No raw data found for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly). Skipping email.`);
                 }
             }
         }
@@ -763,15 +814,15 @@ schedule.scheduleJob(monthlyClientRule, async () => {
 // Monthly admin reports rule
 const firstSundayAdminRule = new RecurrenceRule();
 firstSundayAdminRule.dayOfWeek = 0; // Domingo
-firstSundayAdminRule.hour      = 18; // 18:00
-firstSundayAdminRule.minute    = 0;
-firstSundayAdminRule.tz        = 'America/Los_Angeles';
+firstSundayAdminRule.hour = 18; // 18:00
+firstSundayAdminRule.minute = 0;
+firstSundayAdminRule.tz = 'America/Los_Angeles';
 
 schedule.scheduleJob(firstSundayAdminRule, async () => {
     const today = moment().tz("America/Los_Angeles");
 
     if (today.date() > 7) { return; } // Only run on the first Sunday of the month
-    
+
     const adminEmail = 'administration@bienestariswellbeing.org';
     const password = 'bienestarcommunity';
 
@@ -824,7 +875,7 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
                 if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
                     const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
                     const csvAllNewRegistrations = await getNewRegistrations(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
-                    
+
                     await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, [adminEmail]);
                 } else {
                     logger.warn(`No summary data generated for admin client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly Admin). Skipping email.`);
