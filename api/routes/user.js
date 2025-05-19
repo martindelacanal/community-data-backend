@@ -9514,7 +9514,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
       // Query for NEW users
       const newUsersQuery = `
         SELECT
-          COALESCE(db.location_id, u.first_location_id) AS location_id,
+          COALESCE(u.first_location_id, db.location_id) AS location_id,
           COUNT(DISTINCT u.id) AS new_count
         FROM user u
         LEFT JOIN delivery_beneficiary db ON u.id = db.receiving_user_id
