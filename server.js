@@ -637,7 +637,7 @@ rule.tz = 'America/Los_Angeles';
 // New rule for Sunday at 6:00 PM for administration email
 const adminRule = new RecurrenceRule();
 adminRule.dayOfWeek = 0; // Sunday (0 is Sunday)
-adminRule.hour = 18;     // 6:00 PM
+adminRule.hour = 22;     // 10:00 PM
 adminRule.minute = 0;
 adminRule.tz = 'America/Los_Angeles';
 
@@ -866,7 +866,7 @@ schedule.scheduleJob(monthlyClientRule, async () => {
 // Monthly admin reports rule
 const firstSundayAdminRule = new RecurrenceRule();
 firstSundayAdminRule.dayOfWeek = 0; // Domingo
-firstSundayAdminRule.hour = 18; // 18:00
+firstSundayAdminRule.hour = 22; // 22:00
 firstSundayAdminRule.minute = 0;
 firstSundayAdminRule.tz = 'America/Los_Angeles';
 
