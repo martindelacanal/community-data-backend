@@ -345,28 +345,52 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
         });
     }
 
-    let recurringCount = 0; // Overall recurring
     try {
+        const recurringParams = [
+            client_id, // for cu.client_id
+            client_id, // for cl_range.client_id
+            from_date_db_start, // for db_range.creation_date BETWEEN ?
+            to_date_db_end,     // AND ?
+            from_date_db_start, // for u.creation_date < ?
+            from_date_db_start  // for db_no_past.creation_date < ?
+        ];
         const [recurringRows] = await mysqlConnection.promise().query(
             `
-            SELECT COUNT(DISTINCT db_range.receiving_user_id) AS recurring
-            FROM   delivery_beneficiary db_range
-            JOIN   client_location      cl_range
-                     ON cl_range.location_id = db_range.location_id
-            WHERE  cl_range.client_id = ?
-              AND  CONVERT_TZ(db_range.creation_date,'+00:00','America/Los_Angeles')
-                   BETWEEN ? AND ?
-              AND  EXISTS (
-                      SELECT 1
-                      FROM   delivery_beneficiary db_prev
-                      JOIN   client_location      cl_prev
-                             ON cl_prev.location_id = db_prev.location_id
-                      WHERE  db_prev.receiving_user_id = db_range.receiving_user_id
-                        AND  cl_prev.client_id       = cl_range.client_id
-                        AND  db_prev.creation_date   < db_range.creation_date 
-                   )
+            SELECT COUNT(DISTINCT u.id) AS recurring
+            FROM user u
+            INNER JOIN client_user cu ON u.id = cu.user_id AND cu.client_id = ?
+            INNER JOIN delivery_beneficiary db_range ON u.id = db_range.receiving_user_id
+            INNER JOIN client_location cl_range ON db_range.location_id = cl_range.location_id AND cl_range.client_id = ?
+            WHERE u.role_id = 5 AND u.enabled = 'Y'
+              AND CONVERT_TZ(db_range.creation_date,'+00:00','America/Los_Angeles') BETWEEN ? AND ?
+              AND (
+                    -- Original recurring: had a delivery prior to this specific db_range delivery, at a client location for THIS client
+                    EXISTS (
+                        SELECT 1
+                        FROM delivery_beneficiary db_prev
+                        INNER JOIN client_location cl_prev ON db_prev.location_id = cl_prev.location_id AND cl_prev.client_id = cu.client_id
+                        WHERE db_prev.receiving_user_id = u.id
+                          AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
+                    )
+                    OR
+                    -- New type of recurring: registered before from_date, first_loc is a client location, AND no deliveries ANYWHERE before from_date
+                    (
+                        CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? 
+                        AND EXISTS ( -- u.first_location_id is one of this client's locations
+                            SELECT 1
+                            FROM client_location cl_first_check
+                            WHERE cl_first_check.location_id = u.first_location_id AND cl_first_check.client_id = cu.client_id
+                        )
+                        AND NOT EXISTS ( -- No deliveries for this user ANYWHERE before from_date_db_start
+                            SELECT 1
+                            FROM delivery_beneficiary db_no_past
+                            WHERE db_no_past.receiving_user_id = u.id
+                              AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < ? 
+                        )
+                    )
+              )
             `,
-            [client_id, from_date_db_start, to_date_db_end]
+            recurringParams
         );
         recurringCount = (recurringRows[0] && recurringRows[0].recurring) || 0;
     } catch (error) {
@@ -422,22 +446,50 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
 
     const recurringPerLocationMap = {};
     try {
+        const recurringPerLocationParams = [
+            client_id, // for cu.client_id
+            client_id, // for cl_range.client_id
+            from_date_db_start, // for db_range.creation_date BETWEEN ?
+            to_date_db_end,     // AND ?
+            from_date_db_start, // for u.creation_date < ?
+            from_date_db_start  // for db_no_past.creation_date < ?
+        ];
         const [recLocRows] = await mysqlConnection.promise().query(
             `SELECT
                 db_range.location_id,
-                COUNT(DISTINCT db_range.receiving_user_id) AS recurring_count
-            FROM delivery_beneficiary db_range
-            JOIN client_location cl_range ON cl_range.location_id = db_range.location_id AND cl_range.client_id = ?
-            WHERE CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
-              AND EXISTS (
-                  SELECT 1
-                  FROM delivery_beneficiary db_prev
-                  JOIN client_location cl_prev ON cl_prev.location_id = db_prev.location_id AND cl_prev.client_id = ?
-                  WHERE db_prev.receiving_user_id = db_range.receiving_user_id
-                    AND db_prev.creation_date < db_range.creation_date 
+                COUNT(DISTINCT u.id) AS recurring_count
+            FROM user u
+            INNER JOIN client_user cu ON u.id = cu.user_id AND cu.client_id = ?
+            INNER JOIN delivery_beneficiary db_range ON u.id = db_range.receiving_user_id
+            INNER JOIN client_location cl_range ON db_range.location_id = cl_range.location_id AND cl_range.client_id = ?
+            WHERE u.role_id = 5 AND u.enabled = 'Y'
+              AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM delivery_beneficiary db_prev
+                      INNER JOIN client_location cl_prev ON db_prev.location_id = cl_prev.location_id AND cl_prev.client_id = cu.client_id
+                      WHERE db_prev.receiving_user_id = u.id
+                        AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
+                  )
+                  OR
+                  (
+                      CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ?
+                      AND EXISTS (
+                          SELECT 1
+                          FROM client_location cl_first_check
+                          WHERE cl_first_check.location_id = u.first_location_id AND cl_first_check.client_id = cu.client_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db_no_past
+                          WHERE db_no_past.receiving_user_id = u.id
+                            AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < ?
+                      )
+                  )
               )
             GROUP BY db_range.location_id;`,
-            [client_id, from_date_db_start, to_date_db_end, client_id] // Parameters updated
+            recurringPerLocationParams
         );
         recLocRows.forEach(row => { recurringPerLocationMap[row.location_id] = row.recurring_count; });
     } catch (error) {

@@ -8416,112 +8416,144 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
         to_date = new Date(filters.to_date).toISOString().slice(0, 10);
       }
 
-      const language = req.query.language || 'en';
+      // const language = req.query.language || 'en'; // Not used in this specific query's results
 
-      var query_from_date = '';
-      if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
-      }
-      var query_to_date = '';
-      if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      // Location filter for 'new' users - uses first_location_id
-      var query_locations_new = '';
+      // Location filter for 'new' users (checks u.first_location_id)
+      // and for the new type of 'recurring' users (checks u.first_location_id)
+      var query_locations_new_user_first_location = '';
       if (locations.length > 0) {
-        query_locations_new = 'AND u.first_location_id IN (' + locations.join() + ') ';
+        query_locations_new_user_first_location = `AND u.first_location_id IN (${locations.map(Number).join(',')}) `;
       }
-      // Location filter for 'recurring' users
-      var query_locations_recurring = '';
+
+      // Location filter for 'recurring' users (checks db_range.location_id for deliveries within the date range)
+      var query_locations_recurring_delivery = '';
       if (locations.length > 0) {
-        query_locations_recurring = 'AND db_range.location_id IN (' + locations.join() + ')';
+        query_locations_recurring_delivery = `AND db_range.location_id IN (${locations.map(Number).join(',')})`;
       }
+      
+      // Location filter for original 'recurring' logic (checks db_prev_original.location_id for deliveries prior to current one)
+      let original_recurring_location_condition_sql = '';
+      if (locations.length > 0) {
+        original_recurring_location_condition_sql = `AND db_prev_original.location_id IN (${locations.map(Number).join(',')})`;
+      }
+
       var query_genders = '';
       if (genders.length > 0) {
-        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+        query_genders = `AND u.gender_id IN (${genders.map(Number).join(',')})`;
       }
       var query_ethnicities = '';
       if (ethnicities.length > 0) {
-        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+        query_ethnicities = `AND u.ethnicity_id IN (${ethnicities.map(Number).join(',')})`;
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ${Number(min_age)}`;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ${Number(max_age)}`;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
-        // IMPORTANT: Ensure zipcode is validated/sanitized if using direct concatenation
-        query_zipcode = 'AND u.zipcode = ' + mysqlConnection.escape(zipcode); // Use escape for safety
+        query_zipcode = 'AND u.zipcode = ' + mysqlConnection.escape(zipcode);
       }
 
       let params_metrics_participant = [];
       let clientCondition = '';
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final para que la comparación sea menor que la fecha final
 
-      // Client condition parameter
       if (cabecera.role === 'client') {
         clientCondition = 'AND cu.client_id = ?';
-        // Add client_id for the 'total' subquery
-        params_metrics_participant.push(cabecera.client_id);
       }
 
-      // Parameters for 'new' subquery
-      params_metrics_participant.push(from_date, toDate.toISOString().slice(0, 10));
+      // Params for TOTAL subquery
       if (cabecera.role === 'client') {
         params_metrics_participant.push(cabecera.client_id);
       }
 
-      // Parameters for 'recurring' subquery
-      params_metrics_participant.push(from_date, toDate.toISOString().slice(0, 10));
-
-      // Add location params for prev_locations if needed
-      let prev_locations_filter = '';
-      if (locations.length > 0) {
-        prev_locations_filter = 'AND db_prev.location_id IN (' + locations.join() + ')';
-      }
-
+      // Params for NEW subquery
+      params_metrics_participant.push(from_date); // For u.creation_date >= ?
+      params_metrics_participant.push(to_date);   // For u.creation_date < DATE_ADD(?, INTERVAL 1 DAY)
       if (cabecera.role === 'client') {
         params_metrics_participant.push(cabecera.client_id);
       }
 
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT
+      // Params for RECURRING subquery
+      // For db_range.creation_date range:
+      params_metrics_participant.push(from_date); // For db_range.creation_date >= ?
+      params_metrics_participant.push(to_date);   // For db_range.creation_date < DATE_ADD(?, INTERVAL 1 DAY)
+      // For the OR (...) part:
+      // Params for the new type of recurring:
+      params_metrics_participant.push(from_date); // For u.creation_date < ?
+      params_metrics_participant.push(from_date); // For db_no_past.creation_date < ?
+      
+      if (cabecera.role === 'client') {
+        params_metrics_participant.push(cabecera.client_id);
+      }
+
+      const sqlQuery = `
+        SELECT
           (SELECT COUNT(DISTINCT u.id)
               FROM user u
               ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
               WHERE u.role_id = 5
-                AND u.enabled = 'Y' ${clientCondition}) AS total,
+                AND u.enabled = 'Y' ${clientCondition}
+          ) AS total,
           (SELECT COUNT(DISTINCT u.id)
               FROM user u
               ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
               WHERE u.role_id = 5
                 AND u.enabled = 'Y'
-                AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles')
-                BETWEEN ? AND ? ${clientCondition} ${query_locations_new} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}) AS new,
+                AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                ${clientCondition}
+                ${query_locations_new_user_first_location}
+                ${query_genders}
+                ${query_ethnicities}
+                ${query_min_age}
+                ${query_max_age}
+                ${query_zipcode}
+          ) AS new,
           (SELECT COUNT(DISTINCT db_range.receiving_user_id)
               FROM delivery_beneficiary db_range
               INNER JOIN user u ON db_range.receiving_user_id = u.id
               ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-              WHERE CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
-                BETWEEN ? AND ?
+              WHERE 
+                CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
                 AND u.role_id = 5 AND u.enabled = 'Y'
-                ${clientCondition} ${query_locations_recurring} ${query_genders} ${query_ethnicities} ${query_min_age} ${query_max_age} ${query_zipcode}
-                AND EXISTS (
-                  SELECT 1
-                  FROM delivery_beneficiary db_prev
-                  WHERE db_prev.receiving_user_id = db_range.receiving_user_id
-                    AND db_prev.creation_date < db_range.creation_date
-                    ${prev_locations_filter}
+                ${clientCondition}
+                ${query_locations_recurring_delivery}
+                ${query_genders}
+                ${query_ethnicities}
+                ${query_min_age}
+                ${query_max_age}
+                ${query_zipcode}
+                AND (
+                    -- Original recurring: had a delivery prior to this specific db_range delivery (respecting location filter for that prior delivery)
+                    EXISTS (
+                        SELECT 1
+                        FROM delivery_beneficiary db_prev_original
+                        WHERE db_prev_original.receiving_user_id = u.id
+                          AND CONVERT_TZ(db_prev_original.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
+                          ${original_recurring_location_condition_sql}
+                    )
+                    OR
+                    -- New type of recurring: registered before from_date, first_loc matches (if loc filter), AND no deliveries ANYWHERE before from_date
+                    (
+                        CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? 
+                        ${query_locations_new_user_first_location} 
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM delivery_beneficiary db_no_past
+                            WHERE db_no_past.receiving_user_id = u.id
+                              AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < ? 
+                        )
+                    )
                 )
           ) AS recurring
-        LIMIT 1`,
-        params_metrics_participant
-      );
+        LIMIT 1`;
+
+      const [rows] = await mysqlConnection.promise().query(sqlQuery, params_metrics_participant);
 
       if (rows[0]) {
         res.json({ total: rows[0].total, new: rows[0].new, recurring: rows[0].recurring });
@@ -9097,265 +9129,249 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const interval = filters.interval || 'month';
       const language = req.query.language || 'en';
 
-      // Función auxiliar para obtener el último día del mes
-      const getLastDayOfMonth = (year, month) => {
-        return new Date(year, month + 1, 0).getDate();
-      };
+      const laTimeZone = "'America/Los_Angeles'";
+      const utcTimeZone = "'+00:00'";
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
         from_date = new Date(filters.from_date).toISOString().slice(0, 10);
       } else {
-        // Si no se proporciona, obtener la fecha mínima de la base de datos
         const [dateRange] = await mysqlConnection
           .promise()
           .query(
             `SELECT 
-              MIN(creation_date) AS min_date
+              MIN(CONVERT_TZ(creation_date, ${utcTimeZone}, ${laTimeZone})) AS min_date
             FROM (
-              SELECT creation_date FROM user WHERE enabled = 'Y'
+              SELECT creation_date FROM user WHERE enabled = 'Y' AND role_id = 5
               UNION ALL
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-        from_date = dateRange[0].min_date.toISOString().slice(0, 10);
+        from_date = dateRange[0].min_date ? new Date(dateRange[0].min_date).toISOString().slice(0, 10) : '1970-01-01';
       }
 
       if (filters.to_date) {
         to_date = new Date(filters.to_date).toISOString().slice(0, 10);
       } else {
-        // Si no se proporciona, obtener la fecha máxima de la base de datos
         const [dateRange] = await mysqlConnection
           .promise()
           .query(
             `SELECT 
-              MAX(creation_date) AS max_date
+              MAX(CONVERT_TZ(creation_date, ${utcTimeZone}, ${laTimeZone})) AS max_date
             FROM (
-              SELECT creation_date FROM user WHERE enabled = 'Y'
+              SELECT creation_date FROM user WHERE enabled = 'Y' AND role_id = 5
               UNION ALL
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-        to_date = dateRange[0].max_date.toISOString().slice(0, 10);
+        to_date = dateRange[0].max_date ? new Date(dateRange[0].max_date).toISOString().slice(0, 10) : new Date().toISOString().slice(0,10);
       }
 
-      // Validar las fechas para evitar inyección SQL
       const isValidDate = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date);
       if (!isValidDate(from_date) || !isValidDate(to_date)) {
         return res.status(400).send('Invalid date format.');
       }
+      
+      const from_date_param_original = from_date;
+      const to_date_obj_for_exclusive = new Date(to_date);
+      to_date_obj_for_exclusive.setDate(to_date_obj_for_exclusive.getDate() + 1);
+      const to_date_exclusive_param = to_date_obj_for_exclusive.toISOString().slice(0, 10);
 
-      // Ajustar to_date para que incluya todo el último período
-      const toDateObj = new Date(to_date);
-      switch (interval) {
-        case 'day':
-          // No es necesario ajustar
-          break;
-        case 'week':
-          // Ajustar al último día de la semana (sábado)
-          toDateObj.setDate(toDateObj.getDate() + (6 - toDateObj.getDay()));
-          break;
-        case 'month':
-          // Ajustar al último día del mes
-          const lastDay = getLastDayOfMonth(toDateObj.getFullYear(), toDateObj.getMonth());
-          toDateObj.setDate(lastDay);
-          break;
-        case 'quarter':
-          // Ajustar al último día del trimestre
-          const currentQuarter = Math.floor(toDateObj.getMonth() / 3);
-          toDateObj.setMonth(currentQuarter * 3 + 2); // Último mes del trimestre
-          toDateObj.setDate(getLastDayOfMonth(toDateObj.getFullYear(), toDateObj.getMonth()));
-          break;
-        case 'year':
-          // Ajustar al último día del año
-          toDateObj.setMonth(11); // Diciembre
-          toDateObj.setDate(31);
-          break;
-        default:
-          // Por defecto, tratamos como 'month'
-          const lastDayDefault = getLastDayOfMonth(toDateObj.getFullYear(), toDateObj.getMonth());
-          toDateObj.setDate(lastDayDefault);
-          break;
-      }
-      to_date = toDateObj.toISOString().slice(0, 10);
-
-      // Definir expresiones de período dinámicas según el parámetro 'interval'
       let periodExpressionUser;
       let periodExpressionDelivery;
       switch (interval) {
         case 'day':
-          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y-%m-%d')";
-          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y-%m-%d')";
+          periodExpressionUser = `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m-%d')`;
+          periodExpressionDelivery = `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m-%d')`;
           break;
         case 'week':
-          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%x-W%v')"; // Número de semana ISO
-          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%x-W%v')";
+          periodExpressionUser = `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}), '%x-W%v')`;
+          periodExpressionDelivery = `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone}), '%x-W%v')`;
           break;
         case 'month':
-          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y-%m')";
-          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y-%m')";
+          periodExpressionUser = `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m')`;
+          periodExpressionDelivery = `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m')`;
           break;
         case 'quarter':
-          periodExpressionUser = "CONCAT(YEAR(u.creation_date), '-Q', QUARTER(u.creation_date))";
-          periodExpressionDelivery = "CONCAT(YEAR(db_current.creation_date), '-Q', QUARTER(db_current.creation_date))";
+          periodExpressionUser = `CONCAT(YEAR(CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone})), '-Q', QUARTER(CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone})))`;
+          periodExpressionDelivery = `CONCAT(YEAR(CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone})), '-Q', QUARTER(CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone})))`;
           break;
         case 'year':
-          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y')";
-          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y')";
+          periodExpressionUser = `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y')`;
+          periodExpressionDelivery = `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y')`;
           break;
         default:
-          periodExpressionUser = "DATE_FORMAT(u.creation_date, '%Y-%m')";
-          periodExpressionDelivery = "DATE_FORMAT(db_current.creation_date, '%Y-%m')";
+          periodExpressionUser = `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m')`;
+          periodExpressionDelivery = `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m')`;
           break;
       }
 
-      // Generar los períodos en código
-      const periods = generatePeriods(from_date, to_date, interval);
+      const periods = generatePeriods(from_date, to_date, interval); // generatePeriods should use LA dates
 
-      // Construir consultas parametrizadas
-      const params = [];
+      let clientConditionSql = '';
+      const clientParams = [];
+      if (cabecera.role === 'client') {
+        clientConditionSql = 'AND cu.client_id = ?';
+        clientParams.push(cabecera.client_id);
+      }
 
-      let query_conditions = '';
-      let query_join_client_user = '';
-
+      const demographicParams = [];
+      let demographic_filters_sql = '';
       if (genders.length > 0) {
-        query_conditions += ` AND u.gender_id IN (${genders.map(() => '?').join(',')})`;
-        params.push(...genders);
+        demographic_filters_sql += ` AND u.gender_id IN (${genders.map(() => '?').join(',')})`;
+        demographicParams.push(...genders.map(Number));
       }
       if (ethnicities.length > 0) {
-        query_conditions += ` AND u.ethnicity_id IN (${ethnicities.map(() => '?').join(',')})`;
-        params.push(...ethnicities);
+        demographic_filters_sql += ` AND u.ethnicity_id IN (${ethnicities.map(() => '?').join(',')})`;
+        demographicParams.push(...ethnicities.map(Number));
       }
       if (filters.min_age) {
-        query_conditions += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) >= ?`;
-        params.push(min_age);
+        demographic_filters_sql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), ${utcTimeZone}, ${laTimeZone}))) >= ?`;
+        demographicParams.push(Number(min_age));
       }
       if (filters.max_age) {
-        query_conditions += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, CURDATE()) <= ?`;
-        params.push(max_age);
+        demographic_filters_sql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), ${utcTimeZone}, ${laTimeZone}))) <= ?`;
+        demographicParams.push(Number(max_age));
       }
       if (filters.zipcode) {
-        query_conditions += ' AND u.zipcode = ?';
-        params.push(zipcode);
-      }
-      if (cabecera.role === 'client') {
-        query_join_client_user = 'INNER JOIN client_user cu ON u.id = cu.user_id';
-        query_conditions += ' AND cu.client_id = ?';
-        params.push(cabecera.client_id);
+        demographic_filters_sql += ' AND u.zipcode = ?';
+        demographicParams.push(zipcode);
       }
 
-      // Modificación del filtro de ubicaciones para usar las entregas
-      let query_locations = '';
-      let query_locations_recurring = '';
-      let locationParams = [];
+      let query_locations_new_user_first_location_history = '';
+      const location_params_for_first_location = [];
       if (locations.length > 0) {
-        query_locations = ` AND u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (${locations.map(() => '?').join(',')}))`;
-        query_locations_recurring = ` AND db_current.location_id IN (${locations.map(() => '?').join(',')})`;
-        locationParams = [...locations];
+        query_locations_new_user_first_location_history = `AND u.first_location_id IN (${locations.map(() => '?').join(',')})`;
+        location_params_for_first_location.push(...locations.map(Number));
       }
 
-      // Ajustar las fechas y agregar un día a to_date
-      const fromDateUTC = from_date + ' 00:00:00';
-      const toDateUTC = to_date + ' 23:59:59';
+      let query_locations_recurring_delivery_history = '';
+      const location_params_for_recurring_delivery = [];
+      if (locations.length > 0) {
+        query_locations_recurring_delivery_history = `AND db_current.location_id IN (${locations.map(() => '?').join(',')})`;
+        location_params_for_recurring_delivery.push(...locations.map(Number));
+      }
+      
+      let original_recurring_location_condition_sql_history = '';
+      const location_params_for_original_recurring = [];
+      if (locations.length > 0) {
+        original_recurring_location_condition_sql_history = `AND db_prev_original.location_id IN (${locations.map(() => '?').join(',')})`;
+        location_params_for_original_recurring.push(...locations.map(Number));
+      }
 
-      // Consulta para nuevos usuarios
+      const newUsersParams = [
+        from_date_param_original, 
+        to_date_exclusive_param,
+        ...demographicParams,
+        ...clientParams, // clientParams for clientConditionSql
+        ...location_params_for_first_location
+      ];
+      
       const newUsersQuery = `
         SELECT
           ${periodExpressionUser} AS period,
           COUNT(DISTINCT u.id) AS new_users
         FROM user u
-        ${query_join_client_user}
-        WHERE u.enabled = 'Y' AND u.role_id = 5
-          AND u.creation_date BETWEEN ? AND ?
-          ${query_conditions}
-          ${query_locations}
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+        WHERE u.role_id = 5
+          AND u.enabled = 'Y'
+          AND CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}) >= ?
+          AND CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}) < ?
+          ${clientConditionSql}
+          ${demographic_filters_sql}
+          ${query_locations_new_user_first_location_history}
         GROUP BY period
       `;
+      
+      const recurringUsersParams = [
+        from_date_param_original,
+        to_date_exclusive_param,
+        ...demographicParams,
+        ...clientParams, // For clientConditionSql on u
+        ...location_params_for_recurring_delivery, // For query_locations_recurring_delivery_history
+        // Params for the AND ( (EXISTS) OR (NEW_TYPE_RECURRING) ) block
+        ...location_params_for_original_recurring, // For original_recurring_location_condition_sql_history
+        from_date_param_original, // For u.creation_date < ? in NEW_TYPE_RECURRING
+        ...location_params_for_first_location, // For query_locations_new_user_first_location_history in NEW_TYPE_RECURRING
+        from_date_param_original  // For db_no_past.creation_date < ? in NEW_TYPE_RECURRING
+      ];
 
-      // Parámetros para la consulta de nuevos usuarios
-      const newUsersParams = [fromDateUTC, toDateUTC, ...params, ...locationParams];
-
-      // Consulta para usuarios recurrentes
       const recurringUsersQuery = `
         SELECT
           ${periodExpressionDelivery} AS period,
           COUNT(DISTINCT db_current.receiving_user_id) AS recurring_users
         FROM delivery_beneficiary db_current
-        JOIN user u ON u.id = db_current.receiving_user_id
-          ${query_join_client_user}
-        WHERE u.enabled = 'Y' AND u.role_id = 5
-          AND db_current.creation_date BETWEEN ? AND ?
-          ${query_conditions.replace(/u\./g, 'u.')}
-          ${query_locations_recurring}
-          AND EXISTS (
-            SELECT 1
-            FROM delivery_beneficiary db_previous
-            WHERE db_previous.receiving_user_id = db_current.receiving_user_id
-              AND db_previous.creation_date < db_current.creation_date
+        INNER JOIN user u ON db_current.receiving_user_id = u.id
+        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+        WHERE 
+          CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone}) >= ? 
+          AND CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone}) < ?
+          AND u.role_id = 5 AND u.enabled = 'Y'
+          ${clientConditionSql}
+          ${demographic_filters_sql}
+          ${query_locations_recurring_delivery_history}
+          AND (
+              EXISTS (
+                  SELECT 1
+                  FROM delivery_beneficiary db_prev_original
+                  WHERE db_prev_original.receiving_user_id = u.id
+                    AND CONVERT_TZ(db_prev_original.creation_date, ${utcTimeZone}, ${laTimeZone}) < CONVERT_TZ(db_current.creation_date, ${utcTimeZone}, ${laTimeZone})
+                    ${original_recurring_location_condition_sql_history}
+              )
+              OR
+              (
+                  CONVERT_TZ(u.creation_date, ${utcTimeZone}, ${laTimeZone}) < ? 
+                  ${query_locations_new_user_first_location_history} 
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM delivery_beneficiary db_no_past
+                      WHERE db_no_past.receiving_user_id = u.id
+                        AND CONVERT_TZ(db_no_past.creation_date, ${utcTimeZone}, ${laTimeZone}) < ? 
+                  )
+              )
           )
         GROUP BY period
       `;
 
-      // Parámetros para la consulta de usuarios recurrentes
-      const recurringUsersParams = [fromDateUTC, toDateUTC, ...params, ...locationParams];
-
-      // Ejecutar la consulta de nuevos usuarios
       const [newUsersRows] = await mysqlConnection.promise().query(newUsersQuery, newUsersParams);
-
-      // Ejecutar la consulta de usuarios recurrentes
       const [recurringUsersRows] = await mysqlConnection.promise().query(recurringUsersQuery, recurringUsersParams);
 
-      // Crear un mapa de períodos a datos
       const periodsMap = new Map();
       periods.forEach(period => {
         periodsMap.set(period, { new_users: 0, recurring_users: 0 });
       });
 
-      // Rellenar los datos de nuevos usuarios
       newUsersRows.forEach(row => {
         if (periodsMap.has(row.period)) {
-          periodsMap.get(row.period).new_users = row.new_users;
+          periodsMap.get(row.period).new_users = Number(row.new_users);
         }
       });
 
-      // Rellenar los datos de usuarios recurrentes
       recurringUsersRows.forEach(row => {
         if (periodsMap.has(row.period)) {
-          periodsMap.get(row.period).recurring_users = row.recurring_users;
+          periodsMap.get(row.period).recurring_users = Number(row.recurring_users);
         }
       });
 
-      // Preparar los datos para la respuesta
       const categories = Array.from(periodsMap.keys());
-      const newUsersData = [];
-      const recurringUsersData = [];
+      const newUsersData = categories.map(period => periodsMap.get(period).new_users);
+      const recurringUsersData = categories.map(period => periodsMap.get(period).recurring_users);
+      
+      const formattedCategories = categories.map(c => formatPeriod(c, interval, language));
 
-      categories.forEach(period => {
-        const data = periodsMap.get(period);
-        newUsersData.push(data.new_users);
-        recurringUsersData.push(data.recurring_users);
-      });
-
-      // Aquí formateamos las categorías
-      const formattedCategories = categories.map(c => formatPeriod(c, interval));
 
       const series = [
         { name: language === 'en' ? 'New' : 'Nuevos', data: newUsersData },
         { name: language === 'en' ? 'Recurring' : 'Recurrentes', data: recurringUsersData },
       ];
 
-      const result = {
-        series,
-        categories: formattedCategories // usar las categorías formateadas
-      };
-
-      res.json(result);
+      res.json({ series, categories: formattedCategories });
     } catch (error) {
-      console.log(error);
-      res.status(500).send(error.message);
+      console.error("Error in /metrics/participant/register_history:", error);
+      res.status(500).json({ message: 'Internal server error', error: error.message });
     }
   } else {
-    res.status(403).send('Forbidden');
+    res.status(403).json('Forbidden');
   }
 });
 
@@ -9542,14 +9558,54 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
         ${query_join_client_user}
         WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ?
           AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < ?
-          AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? /* Registered before period */
-          AND u.role_id = 5 AND u.enabled = 'Y' /* Added role/enabled check */
+          AND u.role_id = 5 AND u.enabled = 'Y'
           ${query_conditions_recurring}
-          ${location_condition_recurring} /* Apply parameterized location condition */
+          ${location_condition_recurring} /* Apply parameterized location condition for db.location_id */
+          AND (
+            -- Condition 1: User had a previous delivery to the current one (classic recurring)
+            EXISTS (
+              SELECT 1
+              FROM delivery_beneficiary db_prev
+              WHERE db_prev.receiving_user_id = u.id
+                AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')
+                ${locations.length > 0 ? `AND db_prev.location_id IN (${locations.map(() => '?').join(',')})` : ''}
+            )
+            OR
+            -- Condition 2: User registered before the period, first_location_id matches filter (if any), and no deliveries before the period
+            (
+              CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ?
+              ${locations.length > 0 ? `AND u.first_location_id IN (${locations.map(() => '?').join(',')})` : ''}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM delivery_beneficiary db_past
+                WHERE db_past.receiving_user_id = u.id
+                  AND CONVERT_TZ(db_past.creation_date, '+00:00', 'America/Los_Angeles') < ?
+              )
+            )
+          )
         GROUP BY db.location_id
       `;
-      // Params: delivery_date_from, delivery_date_to, user_registered_before, ...demographic/client params, ...location params
-      const recurringUsersParams = [fromDateUTC, toDateUTCExclusive, fromDateUTC, ...paramsRecurring, ...locationParams];
+      // Params:
+      // 1. db.creation_date >= fromDateUTC
+      // 2. db.creation_date < toDateUTCExclusive
+      // 3. ...paramsRecurring (for query_conditions_recurring)
+      // 4. ...locationParams (for location_condition_recurring on db.location_id)
+      // For the AND ( (...) OR (...) ) block:
+      // 5. ...locationParams (for EXISTS db_prev.location_id IN (...)) - if locations.length > 0
+      // 6. fromDateUTC (for u.creation_date < ? in OR)
+      // 7. ...locationParams (for u.first_location_id IN (...)) - if locations.length > 0
+      // 8. fromDateUTC (for NOT EXISTS db_past.creation_date < ?)
+      const recurringUsersParams = [
+        fromDateUTC,
+        toDateUTCExclusive,
+        ...paramsRecurring,
+        ...(locations.length > 0 ? locationParams : []), // For main db.location_id filter
+        // Params for the new AND block
+        ...(locations.length > 0 ? locationParams : []), // For EXISTS db_prev.location_id
+        fromDateUTC, // For u.creation_date < ?
+        ...(locations.length > 0 ? locationParams : []), // For u.first_location_id
+        fromDateUTC  // For NOT EXISTS db_past.creation_date < ?
+      ];
       // Execute queries
       const [newUsersRows] = await mysqlConnection.promise().query(newUsersQuery, newUsersParams);
       const [recurringUsersRows] = await mysqlConnection.promise().query(recurringUsersQuery, recurringUsersParams);
@@ -9605,54 +9661,54 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 // Funciones auxiliares
 function generatePeriods(startDate, endDate, interval) {
   const periods = [];
-  let current = new Date(startDate);
-  const end = new Date(endDate);
+  let current = new Date(new Date(startDate + 'T00:00:00.000Z').toLocaleString("en-US", {timeZone: "America/Los_Angeles"}));
+  const end = new Date(new Date(endDate + 'T00:00:00.000Z').toLocaleString("en-US", {timeZone: "America/Los_Angeles"}));
 
   while (current <= end) {
     let period;
+    const year = current.getFullYear();
+    const month = current.getMonth(); // 0-11
+    const day = current.getDate();
+
     switch (interval) {
       case 'day':
-        period = current.toISOString().slice(0, 10);
+        period = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
         current.setDate(current.getDate() + 1);
         break;
       case 'week':
-        const weekNumber = getWeekNumber(current);
-        period = `${current.getFullYear()}-W${weekNumber}`;
+        // This needs to match MySQL's %x-W%v format for the LA timezone.
+        // Moment.js or a similar library would be robust here.
+        // Simplified version, might not perfectly match MySQL's week definition across all edge cases.
+        const tempDateForWeek = new Date(current.valueOf());
+        tempDateForWeek.setDate(tempDateForWeek.getDate() - (tempDateForWeek.getDay() + 6) % 7); // Monday of the week
+        const weekYear = tempDateForWeek.getFullYear();
+        const firstDayOfYear = new Date(weekYear, 0, 1);
+        const pastDaysOfYear = (tempDateForWeek - firstDayOfYear) / 86400000;
+        const weekNumber = String(Math.ceil((pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7)).padStart(2,'0');
+        period = `${weekYear}-W${weekNumber}`; // Approximation
         current.setDate(current.getDate() + 7);
         break;
       case 'month':
-        period = current.toISOString().slice(0, 7);
+        period = `${year}-${String(month + 1).padStart(2, '0')}`;
         current.setMonth(current.getMonth() + 1);
         break;
       case 'quarter':
-        const quarter = Math.floor(current.getMonth() / 3) + 1;
-        period = `${current.getFullYear()}-Q${quarter}`;
+        const quarter = Math.floor(month / 3) + 1;
+        period = `${year}-Q${quarter}`;
         current.setMonth(current.getMonth() + 3);
         break;
       case 'year':
-        period = `${current.getFullYear()}`;
+        period = `${year}`;
         current.setFullYear(current.getFullYear() + 1);
         break;
-      default:
-        period = current.toISOString().slice(0, 7);
+      default: // Default to month
+        period = `${year}-${String(month + 1).padStart(2, '0')}`;
         current.setMonth(current.getMonth() + 1);
         break;
     }
     periods.push(period);
   }
   return periods;
-}
-
-function getLastDayOfMonth(year, month) {
-  return new Date(year, month + 1, 0).getDate();
-}
-
-function getWeekNumber(d) {
-  d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const dayNum = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
 }
 
 router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
