@@ -41,29 +41,21 @@ async function createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSu
 async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, emails) {
   return new Promise(async (resolve) => {
     try {
-
-      // Crear el archivo ZIP protegido con contraseña en memoria
-      // Pass summaryObject.csvString for the zip file content
       const zipContent = await createPasswordProtectedZip(csvRawData, csvNewRegistrations, summaryObject.csvString, csvAllNewRegistrations, password);
-      // obtener fecha actual en formato mm/dd/yyyy y convertido de UTC a California
       let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
 
-      // Append formatted summary to the message
-      // Pass summaryObject.emailTableData to generateHtmlTable
-      const summaryHtmlTable = generateHtmlTable(summaryObject.emailTableData);
+      const summaryHtmlReport = generateSummaryHtmlReport(summaryObject.emailReportData); // MODIFIED HERE
       let fullHtmlMessage = message.replace(/\n/g, '<br>');
-      if (summaryHtmlTable) {
-        fullHtmlMessage += '<br><br><b>Summary:</b><br>' + summaryHtmlTable;
+      if (summaryHtmlReport) { // Check if summaryHtmlReport is not empty or a "no data" message
+        fullHtmlMessage += '<br><br><b>Summary Report:</b><br>' + summaryHtmlReport;
       }
 
-
-      // Opciones del correo
       let mailOptions = {
         from: 'bienestarcommunity@gmail.com',
         to: emails.join(', '),
         subject: subject,
-        text: message, // Text part remains simple
-        html: fullHtmlMessage, // HTML part includes the table
+        text: message, 
+        html: fullHtmlMessage,
         attachments: [
           {
             filename: `community-data-${date}.zip`,
@@ -72,7 +64,6 @@ async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegis
         ]
       };
 
-      // Enviar el correo
       transporter.sendMail(mailOptions, async (err, info) => {
         if (err) {
           console.log(`error sendEmail to ${emails.join(', ')}: `, err);
@@ -91,42 +82,92 @@ async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegis
 }
 
 // Optional: Function to generate an HTML table from csvSummary
-function generateHtmlTable(records) {
-  // records is now expected to be summaryObject.emailTableData
-  // which is an array like:
-  // [
-  //   {
-  //     'New': newCount,
-  //     'Recurring': recurringCount,
-  //     // ... other summary fields
-  //   }
-  // ]
-
-  if (!records || records.length === 0) {
-    return '';
-  }
-
-  let html = '<table border="1" cellspacing="0" cellpadding="5" style="border-collapse: collapse; width: auto;">';
-  
-  // Header row
-  html += '<thead><tr>';
-  for (let key in records[0]) {
-    html += `<th style="background-color: #f2f2f2; text-align: left; padding: 8px;">${key}</th>`;
-  }
-  html += '</tr></thead>';
-  
-  // Data row(s)
-  html += '<tbody>';
-  records.forEach(record => {
-    html += '<tr>';
-    for (let key in record) {
-      html += `<td style="text-align: left; padding: 8px; border: 1px solid #ddd;">${record[key]}</td>`;
+function generateSummaryHtmlReport(reportData) {
+    if (!reportData) {
+        return '<p>No summary data available for this period.</p>';
     }
-    html += '</tr>';
-  });
-  html += '</tbody></table>';
 
-  return html;
+    const {
+        clientName, dateRangeDisplay,
+        newCount, recurringCount, totalNewRecurring,
+        newHealthPlanYes, newHealthPlanNo, totalNewHealthPlan,
+        locations, newPerLocationMap, recurringPerLocationMap,
+        totalNewByLocation, totalRecurringByLocation, grandTotalByLocation,
+        clientId
+    } = reportData;
+
+    let html = '';
+    const tableStyle = 'border="1" cellspacing="0" cellpadding="5" style="border-collapse: collapse; width: auto; margin-bottom: 15px;"';
+    const thStyle = 'style="background-color: #f2f2f2; text-align: left; padding: 8px; border: 1px solid #ddd;"';
+    const tdStyle = 'style="padding: 8px; border: 1px solid #ddd;"';
+    const tdRightStyle = 'style="padding: 8px; border: 1px solid #ddd; text-align: right;"';
+
+    // Client and Date Info
+    html += `<p><b>Client Name:</b> ${clientName}<br>`;
+    html += `<b>Date Range:</b> ${dateRangeDisplay}</p>`;
+
+    // Table 1: Overall Summary (New, Recurring, Total)
+    html += `<table ${tableStyle}>`;
+    html += '<tbody>';
+    html += `<tr><td ${tdStyle}>New</td><td ${tdRightStyle}>${newCount}</td></tr>`;
+    html += `<tr><td ${tdStyle}>Recurring</td><td ${tdRightStyle}>${recurringCount}</td></tr>`;
+    html += `<tr><td ${tdStyle}><b>Total</b></td><td ${tdRightStyle}><b>${totalNewRecurring}</b></td></tr>`;
+    html += '</tbody></table>';
+
+    // Table 2: (New) Health Plan Summary
+    html += `<table ${tableStyle}>`;
+    html += `<thead><tr><th ${thStyle} colspan="2">(New) Health Plan</th></tr></thead>`;
+    html += '<tbody>';
+    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;YES</td><td ${tdRightStyle}>${newHealthPlanYes}</td></tr>`;
+    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;NO</td><td ${tdRightStyle}>${newHealthPlanNo}</td></tr>`;
+    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;<b>Total</b></td><td ${tdRightStyle}><b>${totalNewHealthPlan}</b></td></tr>`;
+    html += '</tbody></table>';
+
+    // Table 3: Location Breakdown
+    if (locations && locations.length > 0) {
+        html += `<table ${tableStyle}>`;
+        html += '<thead><tr>';
+        html += `<th ${thStyle}>Id</th>`;
+        html += `<th ${thStyle}>Location</th>`;
+        html += `<th ${thStyle.replace('text-align: left;', 'text-align: right;')}>New</th>`; // Align right for numbers
+        if (parseInt(clientId) !== 1) {
+            html += `<th ${thStyle.replace('text-align: left;', 'text-align: right;')}>Recurring</th>`;
+            html += `<th ${thStyle.replace('text-align: left;', 'text-align: right;')}>Totals</th>`;
+        }
+        html += '</tr></thead>';
+        html += '<tbody>';
+
+        locations.forEach(loc => {
+            const newAtLoc = newPerLocationMap[loc.id] || 0;
+            const recurringAtLoc = recurringPerLocationMap[loc.id] || 0;
+            const totalAtLoc = newAtLoc + recurringAtLoc;
+            html += '<tr>';
+            html += `<td ${tdStyle}>${loc.id}</td>`;
+            html += `<td ${tdStyle}>${loc.name}</td>`;
+            html += `<td ${tdRightStyle}>${newAtLoc}</td>`;
+            if (parseInt(clientId) !== 1) {
+                html += `<td ${tdRightStyle}>${recurringAtLoc}</td>`;
+                html += `<td ${tdRightStyle}>${totalAtLoc}</td>`;
+            }
+            html += '</tr>';
+        });
+
+        // Total row for locations
+        html += '<tr>';
+        html += `<td ${tdStyle}></td>`;
+        html += `<td ${tdStyle}><b>TOTAL</b></td>`;
+        html += `<td ${tdRightStyle}><b>${totalNewByLocation}</b></td>`;
+        if (parseInt(clientId) !== 1) {
+            html += `<td ${tdRightStyle}><b>${totalRecurringByLocation}</b></td>`;
+            html += `<td ${tdRightStyle}><b>${grandTotalByLocation}</b></td>`;
+        }
+        html += '</tr>';
+        html += '</tbody></table>';
+    } else {
+        html += '<p>No location-specific data available for this period.</p>';
+    }
+
+    return html;
 }
 
 async function sendTicketEmail(formData, products, images, emails) {

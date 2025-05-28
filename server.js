@@ -316,14 +316,12 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
 
     const from_date_db_start = moment(from_date, "YYYY-MM-DD").format("YYYY-MM-DD 00:00:00");
     const to_date_db_end = moment(to_date, "YYYY-MM-DD").format("YYYY-MM-DD 23:59:59");
-    // from_date_start_for_prior is no longer needed for the modified recurring per location query.
-    // const from_date_start_for_prior = moment(from_date, "YYYY-MM-DD").format("YYYY-MM-DD");
-
 
     // Overall Summary Calculations (from csvRawData)
     let newCount = 0;
     let newHealthPlanYes = 0;
     let newHealthPlanNo = 0;
+    let recurringCount = 0; // Initialize recurringCount
 
     if (records.length > 0) {
         const filterFromDateMoment = moment(from_date, "YYYY-MM-DD");
@@ -347,12 +345,12 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
 
     try {
         const recurringParams = [
-            client_id, // for cu.client_id
-            client_id, // for cl_range.client_id
-            from_date_db_start, // for db_range.creation_date BETWEEN ?
-            to_date_db_end,     // AND ?
-            from_date_db_start, // for u.creation_date < ?
-            from_date_db_start  // for db_no_past.creation_date < ?
+            client_id, 
+            client_id, 
+            from_date_db_start, 
+            to_date_db_end,     
+            from_date_db_start, 
+            from_date_db_start  
         ];
         const [recurringRows] = await mysqlConnection.promise().query(
             `
@@ -364,7 +362,6 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
             WHERE u.role_id = 5 AND u.enabled = 'Y'
               AND CONVERT_TZ(db_range.creation_date,'+00:00','America/Los_Angeles') BETWEEN ? AND ?
               AND (
-                    -- Original recurring: had a delivery prior to this specific db_range delivery, at a client location for THIS client
                     EXISTS (
                         SELECT 1
                         FROM delivery_beneficiary db_prev
@@ -373,15 +370,14 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
                           AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
                     )
                     OR
-                    -- New type of recurring: registered before from_date, first_loc is a client location, AND no deliveries ANYWHERE before from_date
                     (
                         CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? 
-                        AND EXISTS ( -- u.first_location_id is one of this client's locations
+                        AND EXISTS ( 
                             SELECT 1
                             FROM client_location cl_first_check
                             WHERE cl_first_check.location_id = u.first_location_id AND cl_first_check.client_id = cu.client_id
                         )
-                        AND NOT EXISTS ( -- No deliveries for this user ANYWHERE before from_date_db_start
+                        AND NOT EXISTS ( 
                             SELECT 1
                             FROM delivery_beneficiary db_no_past
                             WHERE db_no_past.receiving_user_id = u.id
@@ -400,15 +396,14 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     const totalNewRecurring = newCount + recurringCount;
     const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo;
 
-    // Prepare CSV structure (5 columns)
     const summaryPartRows = [
         { col1: 'Client Name', col2: clientName, col3: '', col4: '', col5: '' },
         { col1: 'Date Range', col2: dateRangeDisplay, col3: '', col4: '', col5: '' },
-        { col1: '', col2: '', col3: '', col4: '', col5: '' }, // Empty row
+        { col1: '', col2: '', col3: '', col4: '', col5: '' }, 
         { col1: 'New', col2: newCount, col3: '', col4: '', col5: '' },
         { col1: 'Recurring', col2: recurringCount, col3: '', col4: '', col5: '' },
         { col1: 'Total', col2: totalNewRecurring, col3: '', col4: '', col5: '' },
-        { col1: '', col2: '', col3: '', col4: '', col5: '' }, // Empty row
+        { col1: '', col2: '', col3: '', col4: '', col5: '' }, 
         { col1: '(New) Health Plan', col2: '', col3: '', col4: '', col5: '' },
         { col1: '  YES', col2: newHealthPlanYes, col3: '', col4: '', col5: '' },
         { col1: '  NO', col2: newHealthPlanNo, col3: '', col4: '', col5: '' },
@@ -447,12 +442,12 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     const recurringPerLocationMap = {};
     try {
         const recurringPerLocationParams = [
-            client_id, // for cu.client_id
-            client_id, // for cl_range.client_id
-            from_date_db_start, // for db_range.creation_date BETWEEN ?
-            to_date_db_end,     // AND ?
-            from_date_db_start, // for u.creation_date < ?
-            from_date_db_start  // for db_no_past.creation_date < ?
+            client_id, 
+            client_id, 
+            from_date_db_start, 
+            to_date_db_end,     
+            from_date_db_start, 
+            from_date_db_start  
         ];
         const [recLocRows] = await mysqlConnection.promise().query(
             `SELECT
@@ -496,36 +491,18 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
         logger.error(`Error fetching recurring per location for client_id ${client_id}:`, error);
     }
 
-    // --- Location Specific Data ---
     const locationTableRows = [];
-    locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' }); // Empty row before location table
+    locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' }); 
 
-    // Decide headers for locations table based on client_id
-    let locationHeaders, locationRowBuilder;
+    let locationRowBuilder;
     if (parseInt(client_id) === 1) {
-        // For client_id 1, exclude Recurring and Totals columns
-        locationHeaders = [
-            { id: 'col1', title: 'Id' },
-            { id: 'col2', title: 'Location' },
-            { id: 'col3', title: 'New' }
-        ];
-        // Add header row
         locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New' });
-        // Row builder for client_id 1
         locationRowBuilder = (loc, newAtLoc) => ({
             col1: loc.id,
             col2: loc.name,
             col3: newAtLoc
         });
     } else {
-        // Default: include all columns
-        locationHeaders = [
-            { id: 'col1', title: 'Id' },
-            { id: 'col2', title: 'Location' },
-            { id: 'col3', title: 'New' },
-            { id: 'col4', title: 'Recurring' },
-            { id: 'col5', title: 'Totals' }
-        ];
         locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New', col4: 'Recurring', col5: 'Totals' });
         locationRowBuilder = (loc, newAtLoc, recurringAtLoc, totalAtLoc) => ({
             col1: loc.id,
@@ -557,10 +534,8 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
             grandTotalByLocation += totalAtLoc;
         });
 
-        // Add empty row before TOTAL row
         locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' });
 
-        // Add the TOTAL row for locations
         if (parseInt(client_id) === 1) {
             locationTableRows.push({
                 col1: '',
@@ -578,15 +553,13 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
         }
     }
 
-    // Build the CSV with the correct headers
     let allCsvRows = summaryPartRows.concat(locationTableRows);
 
     let csvFileStringifier;
     if (parseInt(client_id) === 1) {
         csvFileStringifier = createCsvStringifier({
             header: [
-                { id: 'col1', title: 'Column1' },
-                { id: 'col2', title: 'Column2' },
+                { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
                 { id: 'col3', title: 'Column3' }
             ],
             fieldDelimiter: ';'
@@ -594,34 +567,45 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     } else {
         csvFileStringifier = createCsvStringifier({
             header: [
-                { id: 'col1', title: 'Column1' },
-                { id: 'col2', title: 'Column2' },
-                { id: 'col3', title: 'Column3' },
-                { id: 'col4', title: 'Column4' },
+                { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
+                { id: 'col3', title: 'Column3' }, { id: 'col4', title: 'Column4' },
                 { id: 'col5', title: 'Column5' }
             ],
             fieldDelimiter: ';'
         });
     }
     const csvString = csvFileStringifier.stringifyRecords(allCsvRows);
+    
+    const emailReportData = {
+        clientName: clientName,
+        dateRangeDisplay: dateRangeDisplay,
+        newCount: newCount,
+        recurringCount: recurringCount,
+        totalNewRecurring: totalNewRecurring,
+        newHealthPlanYes: newHealthPlanYes,
+        newHealthPlanNo: newHealthPlanNo,
+        totalNewHealthPlan: totalNewHealthPlan,
+        locations: allClientLocations,
+        newPerLocationMap: newPerLocationMap,
+        recurringPerLocationMap: recurringPerLocationMap,
+        totalNewByLocation: totalNewByLocation,
+        totalRecurringByLocation: totalRecurringByLocation,
+        grandTotalByLocation: grandTotalByLocation,
+        clientId: client_id
+    };
 
-    // Data for the email HTML table (original one-row format - UNCHANGED)
-    const emailTableData = [
-        {
-            'New': newCount,
-            'Recurring': recurringCount,
-            'Total New+Recurring': totalNewRecurring,
-            '(New) Health Plan YES': newHealthPlanYes,
-            '(New) Health Plan NO': newHealthPlanNo,
-            'Total (New) Health Plan': totalNewHealthPlan
-        }
-    ];
-
-    if (records.length === 0 && recurringCount === 0 && allClientLocations.length === 0) {
-        return { csvString: "", emailTableData: [] };
+    // Check if there's any meaningful data to report
+    // If csvString is just headers (or empty), and emailReportData has all zeros and empty arrays, consider it no data.
+    // For simplicity, we'll rely on csvString length. If it's short (just headers), it implies minimal data.
+    // The original check was: records.length === 0 && recurringCount === 0 && allClientLocations.length === 0
+    // This might be too restrictive. Let's assume if csvString has content beyond headers, we send data.
+    // A more robust check could be if (newCount === 0 && recurringCount === 0 && totalNewByLocation === 0 && totalRecurringByLocation === 0)
+    
+    if (csvString.split('\n').length <= 1 && newCount === 0 && recurringCount === 0) { // If only header in CSV and no overall new/recurring
+         return { csvString: "", emailReportData: null }; // Indicate no substantial data for email body
     }
 
-    return { csvString: csvString, emailTableData: emailTableData };
+    return { csvString: csvString, emailReportData: emailReportData };
 }
 
 // schedule.scheduleJob('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
@@ -690,7 +674,7 @@ schedule.scheduleJob(adminRule, async () => {
                     csvRawData);
 
                 // Ensure summaryObject and its properties are valid before proceeding
-                if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
                     const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                     const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
@@ -760,7 +744,7 @@ schedule.scheduleJob(rule, async () => {
                     clientId,
                     csvRawData);
 
-                if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
                     const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                     const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
@@ -847,7 +831,7 @@ schedule.scheduleJob(monthlyClientRule, async () => {
                         clientId,
                         csvRawData);
 
-                    if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                    if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
                         const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
                         const csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
@@ -924,7 +908,7 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
                     client.client_id,
                     csvRawData);
 
-                if (summaryObject && summaryObject.csvString && summaryObject.emailTableData) {
+                if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
                     const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
                     const csvAllNewRegistrations = await getNewRegistrations(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
 
