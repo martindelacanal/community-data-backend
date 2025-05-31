@@ -251,15 +251,22 @@ router.post('/signup', async (req, res) => {
   const ethnicity = firstForm.ethnicity || null;
   const otherEthnicity = firstForm.otherEthnicity || null;
 
+  let connection;
+  
   try {
+    // Obtener conexión y iniciar transacción
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
 
-    const [rows_client_id] = await mysqlConnection.promise().query('SELECT client_id FROM client_location WHERE location_id = ?', [location_id]);
+    // Buscar client_id asociado a la location
+    const [rows_client_id] = await connection.query('SELECT client_id FROM client_location WHERE location_id = ?', [location_id]);
     let client_id = null;
     if (rows_client_id.length > 0) {
       client_id = rows_client_id[0].client_id;
     }
 
-    const [rows] = await mysqlConnection.promise().query('insert into user(username, \
+    // Insertar usuario
+    const [rows] = await connection.query('insert into user(username, \
                                                           password, \
                                                           email, \
                                                           role_id, \
@@ -277,89 +284,126 @@ router.post('/signup', async (req, res) => {
                                                           other_ethnicity) \
                                                           values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, location_id, householdSize, gender, ethnicity, otherEthnicity]);
-    if (rows.affectedRows > 0) {
-      // save inserted user id
-      const user_id = rows.insertId;
-      // insertar en tabla client_user el client_id y el user_id si client_id no es null
-      if (client_id) {
-        const [rows_client_user] = await mysqlConnection.promise().query('insert into client_user(client_id, user_id) values(?,?)', [client_id, user_id]);
+    
+    if (rows.affectedRows === 0) {
+      throw new Error('No se pudo crear el usuario');
+    }
+
+    // Guardar el ID del usuario insertado
+    const user_id = rows.insertId;
+    
+    // Insertar en tabla client_user si client_id no es null
+    if (client_id) {
+      const [rows_client_user] = await connection.query('insert into client_user(client_id, user_id) values(?,?)', [client_id, user_id]);
+      if (rows_client_user.affectedRows === 0) {
+        throw new Error('No se pudo crear la relación client_user');
       }
-      // insert user_question, iterate array of questions and insert each question with its answer
-      for (let i = 0; i < secondForm.length; i++) {
-        const question_id = secondForm[i].question_id;
-        const answer_type_id = secondForm[i].answer_type_id;
-        const answer = secondForm[i].answer;
-        var user_question_id = null;
-        if (answer) {
-          switch (answer_type_id) {
-            case 1: // texto
-              const [rows] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_text) values(?,?,?,?)',
-                [user_id, question_id, answer_type_id, answer]);
-              break;
-            case 2: // numero
-              const [rows2] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_number) values(?,?,?,?)',
-                [user_id, question_id, answer_type_id, answer]);
-              break;
-            case 3: // opcion simple
-              const [rows3] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
+    }
+    
+    // Insertar user_question, iterar array de preguntas e insertar cada pregunta con su respuesta
+    for (let i = 0; i < secondForm.length; i++) {
+      const question_id = secondForm[i].question_id;
+      const answer_type_id = secondForm[i].answer_type_id;
+      const answer = secondForm[i].answer;
+      var user_question_id = null;
+      
+      if (answer) {
+        switch (answer_type_id) {
+          case 1: // texto
+            const [rows] = await connection.query('insert into user_question(user_id, question_id, answer_type_id, answer_text) values(?,?,?,?)',
+              [user_id, question_id, answer_type_id, answer]);
+            if (rows.affectedRows === 0) {
+              throw new Error(`No se pudo insertar la respuesta de texto para la pregunta ${question_id}`);
+            }
+            break;
+          case 2: // numero
+            const [rows2] = await connection.query('insert into user_question(user_id, question_id, answer_type_id, answer_number) values(?,?,?,?)',
+              [user_id, question_id, answer_type_id, answer]);
+            if (rows2.affectedRows === 0) {
+              throw new Error(`No se pudo insertar la respuesta numérica para la pregunta ${question_id}`);
+            }
+            break;
+          case 3: // opcion simple
+            const [rows3] = await connection.query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
+              [user_id, question_id, answer_type_id]);
+            if (rows3.affectedRows === 0) {
+              throw new Error(`No se pudo insertar la pregunta ${question_id}`);
+            }
+            user_question_id = rows3.insertId;
+            const [rows4] = await connection.query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+              [user_question_id, answer]);
+            if (rows4.affectedRows === 0) {
+              throw new Error(`No se pudo insertar la respuesta para la pregunta ${question_id}`);
+            }
+            break;
+          case 4: // opcion multiple
+            if (answer.length > 0) {
+              const [rows5] = await connection.query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
                 [user_id, question_id, answer_type_id]);
-              user_question_id = rows3.insertId;
-              const [rows4] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                [user_question_id, answer]);
-              break;
-            case 4: // opcion multiple
-              if (answer.length > 0) {
-                const [rows5] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
-                  [user_id, question_id, answer_type_id]);
-                user_question_id = rows5.insertId;
-                for (let j = 0; j < answer.length; j++) {
-                  const answer_id = answer[j];
-                  const [rows6] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                    [user_question_id, answer_id]);
+              if (rows5.affectedRows === 0) {
+                throw new Error(`No se pudo insertar la pregunta múltiple ${question_id}`);
+              }
+              user_question_id = rows5.insertId;
+              for (let j = 0; j < answer.length; j++) {
+                const answer_id = answer[j];
+                const [rows6] = await connection.query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+                  [user_question_id, answer_id]);
+                if (rows6.affectedRows === 0) {
+                  throw new Error(`No se pudo insertar la respuesta múltiple ${answer_id} para la pregunta ${question_id}`);
                 }
               }
-              break;
-            default:
-              break;
-          }
+            }
+            break;
+          default:
+            break;
         }
       }
-
-      res.status(200).json('Data inserted successfully');
-
-      // After successful user creation, add to Mailchimp
-      try {
-        // get gender name and ethnicity name from their ids
-        const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', gender);
-        const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', ethnicity);
-
-        const gender_name = rowsGender && rowsGender[0]?.name || '';
-        const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
-
-        await addSubscriberToMailchimp({
-          email: email,
-          firstname: firstname,
-          lastname: lastname,
-          phone: phone,
-          zipcode: zipcode,
-          dateOfBirth: dateOfBirth,
-          gender: gender_name,
-          ethnicity: ethnicity_name,
-          otherEthnicity: otherEthnicity
-        });
-
-      } catch (mailchimpError) {
-        // Update user to set mailchimp_error to 'Y'
-        await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
-
-      }
-      await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
-    } else {
-      res.status(500).json('Could not create user');
     }
+
+    // Confirmar transacción
+    await connection.commit();
+    
+    // Responder éxito antes de procesar Mailchimp (para no afectar la transacción)
+    res.status(200).json('Data inserted successfully');
+
+    // Después del commit exitoso, procesar Mailchimp (fuera de la transacción)
+    try {
+      // Obtener nombres de género y etnicidad
+      const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', [gender]);
+      const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', [ethnicity]);
+
+      const gender_name = rowsGender && rowsGender[0]?.name || '';
+      const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
+
+      await addSubscriberToMailchimp({
+        email: email,
+        firstname: firstname,
+        lastname: lastname,
+        phone: phone,
+        zipcode: zipcode,
+        dateOfBirth: dateOfBirth,
+        gender: gender_name,
+        ethnicity: ethnicity_name,
+        otherEthnicity: otherEthnicity
+      });
+
+    } catch (mailchimpError) {
+      // Actualizar usuario para marcar error de Mailchimp
+      await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
+    }
+
   } catch (err) {
+    // Rollback en caso de error
+    if (connection) {
+      await connection.rollback();
+    }
     console.log(err);
     res.status(500).json('Internal server error');
+  } finally {
+    // Liberar conexión
+    if (connection) {
+      connection.release();
+    }
   }
 });
 
