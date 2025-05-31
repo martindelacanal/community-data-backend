@@ -11318,6 +11318,10 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       tb.name as transported_by,
       ${language === 'en' ? 'as1.name' : 'as1.name_es'} as audit_status,
       COUNT(DISTINCT pdt.product_id) AS products,
+      CASE 
+        WHEN COALESCE(SUM(pdt.quantity), 0) != dt.total_weight THEN 'Y'
+        ELSE 'N'
+      END AS weight_difference,
       DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
       FROM donation_ticket as dt
       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
