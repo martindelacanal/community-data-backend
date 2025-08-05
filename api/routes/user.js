@@ -906,6 +906,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 p.name as product,
                 p.product_type_id as product_type,
                 pdt.quantity as quantity,
+                pdt.id as product_donation_ticket_id,
                 COUNT(dti.id) as image_count
                 FROM donation_ticket as t
                 INNER JOIN donation_ticket_image as dti ON t.id = dti.donation_ticket_id
@@ -916,7 +917,8 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
                 LEFT join product as p on pdt.product_id = p.id
                 LEFT join product_type as pt on p.product_type_id = pt.id
                 WHERE t.id = ? AND t.enabled = 'Y'
-                GROUP BY t.id, pdt.product_id`,
+                GROUP BY t.id, pdt.product_id, pdt.id
+                ORDER BY pdt.id ASC`,
         [id]
       );
       if (rows.length > 0) {
@@ -937,7 +939,8 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
           newTicket.products.push({
             product: row.product,
             product_type: row.product_type,
-            quantity: row.quantity
+            quantity: row.quantity,
+            product_donation_ticket_id: row.product_donation_ticket_id
           });
         }
 
@@ -7325,7 +7328,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ${query_transported_by}
         ${query_stocker_upload}
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
-        ORDER BY dt.date, dt.id`,
+        ORDER BY dt.date, dt.id, pdt.id`,
         [from_date, to_date, cabecera.client_id]
       );
 
@@ -13629,7 +13632,8 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
         WHERE dt.id = ? AND dt.enabled = 'Y'
-        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}`,
+        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
+        ORDER BY pdt.id ASC`,
         [idTicket, cabecera.client_id]
       );
 
