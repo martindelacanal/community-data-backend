@@ -15,6 +15,8 @@ const moment = require('moment-timezone');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const { parse } = require('csv-parse/sync');
 
+const XLSX = require('xlsx');
+
 schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
     // Modificar todos los delivery_log con operation_id = 3 y offboarding_date = null que hayan sido creados hace más de 5 horas y agregarle la fecha actual
     const [rows] = await mysqlConnection.promise().query(`
@@ -29,7 +31,7 @@ schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
     `);
 });
 
-async function getRawData(from_date, to_date, client_id) {
+async function getRawDataExcel(from_date, to_date, client_id) {
     // Ensure from_date and to_date include time for accurate BETWEEN comparison with CONVERT_TZ
     const params = [
         client_id,
@@ -180,120 +182,130 @@ async function getRawData(from_date, to_date, client_id) {
         }
     }
     // iterar el array headers y convertirlo en un array de objetos con id y title para csvWriter
-    // Create headers array
-    var headers_array = [
-        { id: 'user_id', title: 'User ID' },
-        { id: 'username', title: 'Username' },
-        { id: 'email', title: 'Email' },
-        { id: 'firstname', title: 'Firstname' },
-        { id: 'lastname', title: 'Lastname' },
-        { id: 'date_of_birth', title: 'Date of birth' },
-        { id: 'phone', title: 'Phone' },
-        { id: 'zipcode', title: 'Zipcode' },
-        { id: 'household_size', title: 'Household size' },
-        { id: 'gender', title: 'Gender' },
-        { id: 'ethnicity', title: 'Ethnicity' },
-        { id: 'other_ethnicity', title: 'Other ethnicity' },
-        { id: 'last_location_visited', title: 'Last location visited' },
-        { id: 'locations_visited', title: 'Locations visited' },
-        { id: 'registration_date', title: 'Registration date' },
-        { id: 'registration_time', title: 'Registration time' },
-        { id: 'registered_at_client_location', title: 'Registered at Client Location' }
+    // En lugar de usar csvStringifier, crear un workbook de Excel
+    const workbook = XLSX.utils.book_new();
+
+    // Crear las cabeceras
+    const headers = [
+        'User ID', 'Username', 'Email', 'Firstname', 'Lastname', 'Date of birth',
+        'Phone', 'Zipcode', 'Household size', 'Gender', 'Ethnicity', 'Other ethnicity',
+        'Last location visited', 'Locations visited', 'Registration date', 'Registration time',
+        'Registered at Client Location'
     ];
 
+    // Agregar las preguntas como headers
     for (let i = 0; i < question_id_array.length; i++) {
-        const question_id = question_id_array[i].question_id;
-        const question = question_id_array[i].question;
-        headers_array.push({ id: question_id, title: question });
+        headers.push(question_id_array[i].question);
     }
 
-    const csvStringifier = createCsvStringifier({
-        header: headers_array,
-        fieldDelimiter: ';'
+    // Crear los datos para Excel
+    const excelData = [];
+    excelData.push(headers); // Primera fila con headers
+
+    // Agregar los datos
+    rows_filtered.forEach(row => {
+        const excelRow = [
+            row.user_id,
+            row.username,
+            row.email,
+            row.firstname,
+            row.lastname,
+            row.date_of_birth,
+            row.phone,
+            row.zipcode,
+            row.household_size,
+            row.gender,
+            row.ethnicity,
+            row.other_ethnicity,
+            row.last_location_visited,
+            row.locations_visited,
+            row.registration_date,
+            row.registration_time,
+            row.registered_at_client_location
+        ];
+
+        // Agregar las respuestas de las preguntas
+        for (let i = 0; i < question_id_array.length; i++) {
+            const questionId = question_id_array[i].question_id;
+            excelRow.push(row[questionId] || '');
+        }
+
+        excelData.push(excelRow);
     });
 
-    let csvData = csvStringifier.getHeaderString();
-    csvData += csvStringifier.stringifyRecords(rows_filtered);
+    // Crear worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Raw Data');
 
-    return csvData;
+    // Convertir a buffer
+    const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+
+    return excelBuffer;
 }
 
-async function getNewRegistrations(csvRawData, from_date, to_date) {
-    // Parsear el CSV recibido
-    const records = parse(csvRawData, {
-        columns: true,
-        skip_empty_lines: true,
-        delimiter: ';'
-    });
+async function getNewRegistrationsExcel(excelRawData, from_date, to_date) {
+    // Leer el Excel buffer
+    const workbook = XLSX.read(excelRawData, { type: 'buffer' });
+    const worksheet = workbook.Sheets['Raw Data'];
+    const jsonData = XLSX.utils.sheet_to_json(worksheet);
 
-    if (records.length === 0) {
-        return '';
+    if (jsonData.length === 0) {
+        return Buffer.alloc(0);
     }
 
     // Convertir from_date y to_date a objetos de fecha
     const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day'); // Ensure we include the entire day
+    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day');
 
     // Filtrar las filas según registration_date dentro del rango
-    const filteredRecords = records.filter(record => {
+    const filteredRecords = jsonData.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, 'day', '[]'); // Include both start and end dates
+        return registrationDate.isBetween(fromDate, toDate, 'day', '[]');
     });
 
-    // Generar un nuevo CSV con las filas filtradas
-    const csvStringifier = createCsvStringifier({
-        header: Object.keys(records[0]).map(key => ({ id: key, title: key })),
-        fieldDelimiter: ';'
-    });
+    // Crear nuevo workbook con datos filtrados
+    const newWorkbook = XLSX.utils.book_new();
+    const newWorksheet = XLSX.utils.json_to_sheet(filteredRecords);
+    XLSX.utils.book_append_sheet(newWorkbook, newWorksheet, 'New Registrations');
 
-    let csvData = csvStringifier.getHeaderString();
-    csvData += csvStringifier.stringifyRecords(filteredRecords);
-
-    return csvData;
+    return XLSX.write(newWorkbook, { bookType: 'xlsx', type: 'buffer' });
 }
 
-async function getNewRegistrationsWithoutHealthInsurance(csvRawData, from_date, to_date) {
-    // Parsear el CSV recibido
-    const records = parse(csvRawData, {
-        columns: true,
-        skip_empty_lines: true,
-        delimiter: ';'
-    });
 
-    if (records.length === 0) {
-        return '';
+async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from_date, to_date) {
+    // Leer el Excel buffer
+    const workbook = XLSX.read(excelRawData, { type: 'buffer' });
+    const worksheet = workbook.Sheets['Raw Data'];
+    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+    if (jsonData.length === 0) {
+        return Buffer.alloc(0);
     }
 
     // Convertir from_date y to_date a objetos de fecha
     const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day'); // Ensure we include the entire day
+    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day');
 
     // Filtrar las filas sin seguro de salud y con registration_date dentro del rango
-    const filteredRecords = records.filter(record => {
+    const filteredRecords = jsonData.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, 'day', '[]') && // Include both start and end dates
+        return registrationDate.isBetween(fromDate, toDate, 'day', '[]') &&
             (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '');
     });
 
-    // Generar un nuevo CSV con las filas filtradas
-    const csvStringifier = createCsvStringifier({
-        header: Object.keys(records[0]).map(key => ({ id: key, title: key })),
-        fieldDelimiter: ';'
-    });
+    // Crear nuevo workbook con datos filtrados
+    const newWorkbook = XLSX.utils.book_new();
+    const newWorksheet = XLSX.utils.json_to_sheet(filteredRecords);
+    XLSX.utils.book_append_sheet(newWorkbook, newWorksheet, 'No Health Insurance');
 
-    let csvData = csvStringifier.getHeaderString();
-    csvData += csvStringifier.stringifyRecords(filteredRecords);
-
-    return csvData;
+    return XLSX.write(newWorkbook, { bookType: 'xlsx', type: 'buffer' });
 }
 
-async function getSummary(from_date, to_date, client_id, csvRawData) {
-    // Parsear el CSV recibido (used for overall summary stats)
-    const records = parse(csvRawData, {
-        columns: true,
-        skip_empty_lines: true,
-        delimiter: ';'
-    });
+async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
+    // Leer el Excel buffer en lugar de parsear CSV
+    const workbook = XLSX.read(excelRawData, { type: 'buffer' });
+    const worksheet = workbook.Sheets['Raw Data'];
+    const records = XLSX.utils.sheet_to_json(worksheet);
 
     // Fetch client name
     let clientName = 'Unknown Client';
@@ -345,12 +357,12 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
 
     try {
         const recurringParams = [
-            client_id, 
-            client_id, 
-            from_date_db_start, 
-            to_date_db_end,     
-            from_date_db_start, 
-            from_date_db_start  
+            client_id,
+            client_id,
+            from_date_db_start,
+            to_date_db_end,
+            from_date_db_start,
+            from_date_db_start
         ];
         const [recurringRows] = await mysqlConnection.promise().query(
             `
@@ -399,11 +411,11 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     const summaryPartRows = [
         { col1: 'Client Name', col2: clientName, col3: '', col4: '', col5: '' },
         { col1: 'Date Range', col2: dateRangeDisplay, col3: '', col4: '', col5: '' },
-        { col1: '', col2: '', col3: '', col4: '', col5: '' }, 
+        { col1: '', col2: '', col3: '', col4: '', col5: '' },
         { col1: 'New', col2: newCount, col3: '', col4: '', col5: '' },
         { col1: 'Recurring', col2: recurringCount, col3: '', col4: '', col5: '' },
         { col1: 'Total', col2: totalNewRecurring, col3: '', col4: '', col5: '' },
-        { col1: '', col2: '', col3: '', col4: '', col5: '' }, 
+        { col1: '', col2: '', col3: '', col4: '', col5: '' },
         { col1: '(New) Health Plan', col2: '', col3: '', col4: '', col5: '' },
         { col1: '  YES', col2: newHealthPlanYes, col3: '', col4: '', col5: '' },
         { col1: '  NO', col2: newHealthPlanNo, col3: '', col4: '', col5: '' },
@@ -442,12 +454,12 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     const recurringPerLocationMap = {};
     try {
         const recurringPerLocationParams = [
-            client_id, 
-            client_id, 
-            from_date_db_start, 
-            to_date_db_end,     
-            from_date_db_start, 
-            from_date_db_start  
+            client_id,
+            client_id,
+            from_date_db_start,
+            to_date_db_end,
+            from_date_db_start,
+            from_date_db_start
         ];
         const [recLocRows] = await mysqlConnection.promise().query(
             `SELECT
@@ -492,7 +504,7 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     }
 
     const locationTableRows = [];
-    locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' }); 
+    locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' });
 
     let locationRowBuilder;
     if (parseInt(client_id) === 1) {
@@ -555,27 +567,27 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
 
     let allCsvRows = summaryPartRows.concat(locationTableRows);
 
-    let csvFileStringifier;
-    if (parseInt(client_id) === 1) {
-        csvFileStringifier = createCsvStringifier({
-            header: [
-                { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
-                { id: 'col3', title: 'Column3' }
-            ],
-            fieldDelimiter: ';'
-        });
-    } else {
-        csvFileStringifier = createCsvStringifier({
-            header: [
-                { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
-                { id: 'col3', title: 'Column3' }, { id: 'col4', title: 'Column4' },
-                { id: 'col5', title: 'Column5' }
-            ],
-            fieldDelimiter: ';'
-        });
-    }
-    const csvString = csvFileStringifier.stringifyRecords(allCsvRows);
-    
+    // let csvFileStringifier;
+    // if (parseInt(client_id) === 1) {
+    //     csvFileStringifier = createCsvStringifier({
+    //         header: [
+    //             { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
+    //             { id: 'col3', title: 'Column3' }
+    //         ],
+    //         fieldDelimiter: ';'
+    //     });
+    // } else {
+    //     csvFileStringifier = createCsvStringifier({
+    //         header: [
+    //             { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
+    //             { id: 'col3', title: 'Column3' }, { id: 'col4', title: 'Column4' },
+    //             { id: 'col5', title: 'Column5' }
+    //         ],
+    //         fieldDelimiter: ';'
+    //     });
+    // }
+    // const csvString = csvFileStringifier.stringifyRecords(allCsvRows);
+
     const emailReportData = {
         clientName: clientName,
         dateRangeDisplay: dateRangeDisplay,
@@ -600,12 +612,31 @@ async function getSummary(from_date, to_date, client_id, csvRawData) {
     // The original check was: records.length === 0 && recurringCount === 0 && allClientLocations.length === 0
     // This might be too restrictive. Let's assume if csvString has content beyond headers, we send data.
     // A more robust check could be if (newCount === 0 && recurringCount === 0 && totalNewByLocation === 0 && totalRecurringByLocation === 0)
-    
-    if (csvString.split('\n').length <= 1 && newCount === 0 && recurringCount === 0) { // If only header in CSV and no overall new/recurring
-         return { csvString: "", emailReportData: null }; // Indicate no substantial data for email body
+
+    // En lugar de crear CSV, crear Excel
+    const summaryWorkbook = XLSX.utils.book_new();
+
+    // Crear datos para el summary
+    const summaryData = [];
+
+    if (parseInt(client_id) === 1) {
+        // Para client_id = 1, solo 3 columnas
+        allCsvRows.forEach(row => {
+            summaryData.push([row.col1, row.col2, row.col3]);
+        });
+    } else {
+        // Para otros clientes, 5 columnas
+        allCsvRows.forEach(row => {
+            summaryData.push([row.col1, row.col2, row.col3, row.col4, row.col5]);
+        });
     }
 
-    return { csvString: csvString, emailReportData: emailReportData };
+    const summaryWorksheet = XLSX.utils.aoa_to_sheet(summaryData);
+    XLSX.utils.book_append_sheet(summaryWorkbook, summaryWorksheet, 'Summary');
+
+    const excelBuffer = XLSX.write(summaryWorkbook, { bookType: 'xlsx', type: 'buffer' });
+
+    return { excelBuffer: excelBuffer, emailReportData: emailReportData };
 }
 
 // schedule.scheduleJob('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
@@ -663,23 +694,20 @@ schedule.scheduleJob(adminRule, async () => {
             const subject = `Bienestar Community report for ${client.client_name} - ${date}`;
 
             // Generate reports for this specific client using full date-time range
-            const csvRawData = await getRawData(from_date_db, to_date_db, client.client_id);
+            const excelRawData = await getRawDataExcel(from_date_db, to_date_db, client.client_id);
 
-            if (csvRawData && csvRawData.split('\n').length > 1) { // Check if raw data has more than header
-                // Pass YYYY-MM-DD format to helper functions
-                const summaryObject = await getSummary(
+            if (excelRawData && excelRawData.length > 0) {
+                const summaryObject = await getSummaryExcel(
                     lastMonday.format("YYYY-MM-DD"),
                     lastSunday.format("YYYY-MM-DD"),
                     client.client_id,
-                    csvRawData);
+                    excelRawData);
 
-                // Ensure summaryObject and its properties are valid before proceeding
-                if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
-                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
-                    // Send admin email for this client
-                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, [adminEmail]);
+                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail]);
                 } else {
                     logger.warn(`No summary data generated for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
@@ -735,20 +763,20 @@ schedule.scheduleJob(rule, async () => {
             const clientData = emailsByClient[clientId];
             const subject = `Bienestar Community report for ${clientData.name} - ${date}`;
 
-            const csvRawData = await getRawData(from_date_db, to_date_db, clientId);
+            const excelRawData = await getRawDataExcel(from_date_db, to_date_db, clientId);
 
-            if (csvRawData && csvRawData.split('\n').length > 1) { // Check if raw data has more than header
-                const summaryObject = await getSummary(
+            if (excelRawData && excelRawData.length > 0) {
+                const summaryObject = await getSummaryExcel(
                     lastMonday.format("YYYY-MM-DD"),
                     lastSunday.format("YYYY-MM-DD"),
                     clientId,
-                    csvRawData);
+                    excelRawData);
 
-                if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
-                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
-                    await email.sendEmailWithAttachment(subject, messageBody, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, clientData.emails);
+                    await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails);
                 } else {
                     logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
@@ -822,20 +850,21 @@ schedule.scheduleJob(monthlyClientRule, async () => {
             for (const clientId in emailsByClient) {
                 const clientData = emailsByClient[clientId];
                 const subject = `Monthly Bienestar Community report for ${clientData.name} - ${monthName} ${year}`;
-                const csvRawData = await getRawData(from_date_db, to_date_db, clientId);
 
-                if (csvRawData && csvRawData.split('\n').length > 1) {
-                    const summaryObject = await getSummary(
-                        firstMonday.format("YYYY-MM-DD"),
+                const excelRawData = await getRawDataExcel(from_date_db, to_date_db, clientId);
+
+                if (excelRawData && excelRawData.length > 0) {
+                    const summaryObject = await getSummaryExcel(
+                        lastMonday.format("YYYY-MM-DD"),
                         lastSunday.format("YYYY-MM-DD"),
                         clientId,
-                        csvRawData);
+                        excelRawData);
 
-                    if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
-                        const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        const csvAllNewRegistrations = await getNewRegistrations(csvRawData, firstMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
+                        const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
-                        await email.sendEmailWithAttachment(subject, messageBody, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, clientData.emails);
+                        await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails);
                     } else {
                         logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly). Skipping email.`);
                     }
@@ -899,20 +928,20 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
             const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
             const subject = `Monthly Bienestar Community report for ${client.client_name} - ${monthName} ${year}`;
 
-            const csvRawData = await getRawData(from_date_db, to_date_db, client.client_id);
+            const excelRawData = await getRawDataExcel(from_date_db, to_date_db, client.client_id);
 
-            if (csvRawData && csvRawData.split('\n').length > 1) {
-                const summaryObject = await getSummary(
-                    reportFirstMonday.format("YYYY-MM-DD"),
-                    reportLastSunday.format("YYYY-MM-DD"),
+            if (excelRawData && excelRawData.length > 0) {
+                const summaryObject = await getSummaryExcel(
+                    lastMonday.format("YYYY-MM-DD"),
+                    lastSunday.format("YYYY-MM-DD"),
                     client.client_id,
-                    csvRawData);
+                    excelRawData);
 
-                if (summaryObject && summaryObject.csvString && summaryObject.emailReportData) {
-                    const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
-                    const csvAllNewRegistrations = await getNewRegistrations(csvRawData, reportFirstMonday.format("YYYY-MM-DD"), reportLastSunday.format("YYYY-MM-DD"));
+                if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
-                    await email.sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, [adminEmail]);
+                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail]);
                 } else {
                     logger.warn(`No summary data generated for admin client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly Admin). Skipping email.`);
                 }
@@ -924,10 +953,10 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
 });
 
 module.exports = {
-    getRawData,
-    getNewRegistrations,
-    getNewRegistrationsWithoutHealthInsurance,
-    getSummary
+    getRawDataExcel,
+    getNewRegistrationsExcel,
+    getNewRegistrationsWithoutHealthInsuranceExcel,
+    getSummaryExcel
 };
 
 server.listen(port, () => logger.info(`Server running on port ${port}`));

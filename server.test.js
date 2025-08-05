@@ -1,19 +1,17 @@
-// filepath: c:\Users\marti\Desktop\TRABAJO\PROYECTOS\COMMUNITY_DATA\BACKEND\server.test.js
 require('dotenv').config({ path: './.env' }); // Load environment variables
 const mysqlConnection = require('./api/connection/connection.js');
 const email = require('./api/email/email.js');
 const moment = require('moment-timezone');
 
-// Import functions from server.js
-// Ensure these functions are exported from server.js using module.exports
+// Import functions from server.js - ACTUALIZAR A LAS NUEVAS FUNCIONES EXCEL
 const {
-    getRawData,
-    getNewRegistrations,
-    getNewRegistrationsWithoutHealthInsurance,
-    getSummary
+    getRawDataExcel,
+    getNewRegistrationsExcel,
+    getNewRegistrationsWithoutHealthInsuranceExcel,
+    getSummaryExcel
 } = require('./server.js'); // Adjust path if necessary
 
-// Test function to manually run the weekly report generation
+// Test function to manually run the weekly reports generation
 async function testWeeklyReports() {
     try {
         console.log('Starting test for weekly reports...');
@@ -54,41 +52,48 @@ async function testWeeklyReports() {
             const subject = `TEST - Bienestar Community report for ${client.name} - ${report_date_label}`;
             const message = `This is a TEST report.\n\nAttached you will find the Bienestar Community report for ${report_date_label}. The report covers the period from ${formatted_from_date} to ${formatted_to_date}. The file is password protected.`;
 
-            // Generate data for this client using the imported function
-            const csvRawData = await getRawData(from_date, to_date, client.id);
+            // CAMBIO: Usar la nueva función Excel en lugar de CSV
+            const excelRawData = await getRawDataExcel(from_date, to_date, client.id);
 
-            // Check if raw data has more than just the header row
-            if (csvRawData && csvRawData.trim().split('\n').length > 1) {
-                console.log(`Generated raw data for client: ${client.name}`);
+            // CAMBIO: Verificar que excelRawData sea un buffer válido
+            if (excelRawData && excelRawData.length > 0) {
+                console.log(`Generated raw Excel data for client: ${client.name}`);
 
                 // Use YYYY-MM-DD format for helper functions as they parse based on date part
                 const date_only_from = lastMonday.format("YYYY-MM-DD");
                 const date_only_to = lastSunday.format("YYYY-MM-DD");
 
-                // Generate derived reports using imported functions
-                const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, date_only_from, date_only_to);
-                const csvAllNewRegistrations = await getNewRegistrations(csvRawData, date_only_from, date_only_to);
-                const csvSummary = await getSummary(
+                // CAMBIO: Usar las nuevas funciones Excel
+                const summaryObject = await getSummaryExcel(
                     date_only_from,
                     date_only_to,
                     client.id,
-                    csvRawData);
-
-                console.log(`Sending email for client: ${client.name} to: ${customEmail}`);
-
-                // Send email with the generated reports
-                await email.sendEmailWithAttachment(
-                    subject,
-                    message,
-                    csvRawData,
-                    csvNewRegistrations,
-                    csvSummary,
-                    csvAllNewRegistrations,
-                    password,
-                    [customEmail] // Send only to the test email address
+                    excelRawData
                 );
 
-                console.log(`Email sent successfully for client: ${client.name}`);
+                // CAMBIO: Verificar que summaryObject tenga la estructura correcta
+                if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, date_only_from, date_only_to);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, date_only_from, date_only_to);
+
+                    console.log(`Sending email for client: ${client.name} to: ${customEmail}`);
+
+                    // CAMBIO: Usar la nueva función de email para Excel
+                    await email.sendEmailWithExcelAttachment(
+                        subject,
+                        message,
+                        excelRawData,
+                        excelNewRegistrations,
+                        summaryObject,
+                        excelAllNewRegistrations,
+                        password,
+                        [customEmail] // Send only to the test email address
+                    );
+
+                    console.log(`Email sent successfully for client: ${client.name}`);
+                } else {
+                    console.log(`No summary data generated for client: ${client.name}. Skipping email.`);
+                }
             } else {
                 console.log(`No data available for client: ${client.name} in the specified date range. Skipping email.`);
             }
@@ -108,10 +113,6 @@ async function testMonthlyReports() {
         const password = 'bienestarcommunity'; // Consider moving to .env
         const customEmail = 'martin.delacanalerbetta@gmail.com'; // Consider moving to .env or config
 
-        // Simulate the date the job would run for the desired report period.
-        // For a report covering April 2025 (period March 31, 2025 - May 04, 2025),
-        // the job would typically run on the first Monday of May 2025.
-        // Let's use May 5, 2025 (first Monday of May) as the reference "job run date".
         const jobRunDate = moment.tz("2025-05-05", "America/Los_Angeles");
 
         // Calculate previous month based on the job run date
@@ -164,34 +165,46 @@ async function testMonthlyReports() {
             const subject = `TEST - Monthly Bienestar Community report for ${client.name} - ${monthName} ${year}`;
             const message = `This is a TEST monthly report.\n\nAttached you will find the Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.`;
 
-            const csvRawData = await getRawData(from_date_db, to_date_db, client.id);
+            // CAMBIO: Usar la nueva función Excel
+            const excelRawData = await getRawDataExcel(from_date_db, to_date_db, client.id);
 
-            if (csvRawData && csvRawData.trim().split('\n').length > 1) {
-                console.log(`Generated raw data for client: ${client.name}`);
+            // CAMBIO: Verificar que excelRawData sea un buffer válido
+            if (excelRawData && excelRawData.length > 0) {
+                console.log(`Generated raw Excel data for client: ${client.name}`);
 
                 const date_only_from = reportFirstMonday.format("YYYY-MM-DD");
                 const date_only_to = reportLastSunday.format("YYYY-MM-DD");
 
-                const csvNewRegistrations = await getNewRegistrationsWithoutHealthInsurance(csvRawData, date_only_from, date_only_to);
-                const csvAllNewRegistrations = await getNewRegistrations(csvRawData, date_only_from, date_only_to);
-                const csvSummary = await getSummary(
+                // CAMBIO: Usar las nuevas funciones Excel
+                const summaryObject = await getSummaryExcel(
                     date_only_from,
                     date_only_to,
                     client.id,
-                    csvRawData);
-
-                console.log(`Sending email for client: ${client.name} to: ${customEmail}`);
-                await email.sendEmailWithAttachment(
-                    subject,
-                    message,
-                    csvRawData,
-                    csvNewRegistrations,
-                    csvSummary,
-                    csvAllNewRegistrations,
-                    password,
-                    [customEmail]
+                    excelRawData
                 );
-                console.log(`Email sent successfully for client: ${client.name}`);
+
+                // CAMBIO: Verificar que summaryObject tenga la estructura correcta
+                if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, date_only_from, date_only_to);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, date_only_from, date_only_to);
+
+                    console.log(`Sending email for client: ${client.name} to: ${customEmail}`);
+
+                    // CAMBIO: Usar la nueva función de email para Excel
+                    await email.sendEmailWithExcelAttachment(
+                        subject,
+                        message,
+                        excelRawData,
+                        excelNewRegistrations,
+                        summaryObject,
+                        excelAllNewRegistrations,
+                        password,
+                        [customEmail]
+                    );
+                    console.log(`Email sent successfully for client: ${client.name}`);
+                } else {
+                    console.log(`No summary data generated for client: ${client.name}. Skipping email.`);
+                }
             } else {
                 console.log(`No data available for client: ${client.name} in the specified date range. Skipping email.`);
             }

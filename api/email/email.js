@@ -17,7 +17,7 @@ let transporter = nodemailer.createTransport({
   }
 });
 
-async function createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSummaryString, csvAllNewRegistrations, password) {
+async function createPasswordProtectedZipExcel(excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password) {
   return new Promise((resolve, reject) => {
     const archive = archiver.create('zip-encrypted', {
       zlib: { level: 9 },
@@ -30,23 +30,23 @@ async function createPasswordProtectedZip(csvRawData, csvNewRegistrations, csvSu
     archive.on('end', () => resolve(Buffer.concat(buffers)));
     archive.on('error', err => reject(err));
 
-    archive.append(csvRawData, { name: 'raw-data.csv' });
-    archive.append(csvNewRegistrations, { name: 'new-registrations-without-health-insurance.csv' });
-    archive.append(csvAllNewRegistrations, { name: 'new-registrations.csv' });
-    archive.append(csvSummaryString, { name: 'summary.csv' }); // Use the CSV string here
+    archive.append(excelRawData, { name: 'raw-data.xlsx' });
+    archive.append(excelNewRegistrations, { name: 'new-registrations-without-health-insurance.xlsx' });
+    archive.append(excelAllNewRegistrations, { name: 'new-registrations.xlsx' });
+    archive.append(summaryObject.excelBuffer, { name: 'summary.xlsx' });
     archive.finalize();
   });
 }
 
-async function sendEmailWithAttachment(subject, message, csvRawData, csvNewRegistrations, summaryObject, csvAllNewRegistrations, password, emails) {
+async function sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, emails) {
   return new Promise(async (resolve) => {
     try {
-      const zipContent = await createPasswordProtectedZip(csvRawData, csvNewRegistrations, summaryObject.csvString, csvAllNewRegistrations, password);
+      const zipContent = await createPasswordProtectedZipExcel(excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password);
       let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
 
-      const summaryHtmlReport = generateSummaryHtmlReport(summaryObject.emailReportData); // MODIFIED HERE
+      const summaryHtmlReport = generateSummaryHtmlReport(summaryObject.emailReportData);
       let fullHtmlMessage = message.replace(/\n/g, '<br>');
-      if (summaryHtmlReport) { // Check if summaryHtmlReport is not empty or a "no data" message
+      if (summaryHtmlReport) {
         fullHtmlMessage += '<br><br><b>Summary Report:</b><br>' + summaryHtmlReport;
       }
 
@@ -362,4 +362,4 @@ module.exports.sendVolunteerConfirmation = sendVolunteerConfirmation;
 
 module.exports.sendTicketEmail = sendTicketEmail;
 
-module.exports.sendEmailWithAttachment = sendEmailWithAttachment;
+module.exports.sendEmailWithExcelAttachment = sendEmailWithExcelAttachment;
