@@ -3229,6 +3229,65 @@ router.get('/user/location', verifyToken, async (req, res) => {
   }
 });
 
+router.get('/client/locations', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (
+    cabecera.role === 'admin' ||
+    cabecera.role === 'opsmanager' ||
+    cabecera.role === 'director' ||
+    cabecera.role === 'auditor'
+  ) {
+    try {
+      // Get all enabled clients with their locations
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          c.id as client_id,
+          c.short_name as client_name,
+          l.id as location_id,
+          l.organization,
+          l.community_city,
+          l.address,
+          ST_Y(l.coordinates) as latitude,
+          ST_X(l.coordinates) as longitude
+        FROM client c
+        INNER JOIN client_location cl ON c.id = cl.client_id
+        INNER JOIN location l ON cl.location_id = l.id
+        WHERE c.enabled = 'Y' AND l.enabled = 'Y'
+        ORDER BY c.id, l.id`
+      );
+
+      // Group locations by client
+      const clientMap = {};
+      for (const row of rows) {
+        if (!clientMap[row.client_id]) {
+          clientMap[row.client_id] = {
+            client_name: row.client_name,
+            locations: []
+          };
+        }
+        clientMap[row.client_id].locations.push({
+          id: row.location_id,
+          organization: row.organization,
+          community_city: row.community_city,
+          address: row.address,
+          latitude: row.latitude,
+          longitude: row.longitude
+        });
+      }
+
+      // Convert map to array
+      const result = Object.values(clientMap);
+
+      res.json(result);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 router.get('/userName/exists/search', async (req, res) => {
   const username = req.query.username || null;
   try {
