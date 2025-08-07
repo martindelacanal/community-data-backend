@@ -3252,7 +3252,7 @@ router.get('/client/locations', verifyToken, async (req, res) => {
         FROM client c
         INNER JOIN client_location cl ON c.id = cl.client_id
         INNER JOIN location l ON cl.location_id = l.id
-        WHERE c.enabled = 'Y' AND l.enabled = 'Y'
+        WHERE c.enabled = 'Y'
         ORDER BY c.id, l.id`
       );
 
