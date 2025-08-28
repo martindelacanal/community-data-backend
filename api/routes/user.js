@@ -7461,190 +7461,138 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
     try {
       const filters = req.body;
       const language = req.query.language || 'en';
-
-      // Manejo de fechas y zonas horarias
       const timeZone = 'America/Los_Angeles';
+
+      // --- 1. Build a query to get a temporary table of filtered user IDs ---
+      const userFilterClauses = [];
+      const userFilterParams = [];
+
+      // Date filters
       const from_date = filters.from_date ? moment.tz(filters.from_date, timeZone).utc().format('YYYY-MM-DD HH:mm:ss') : '1970-01-01 00:00:00';
       const to_date = filters.to_date ? moment.tz(filters.to_date, timeZone).utc().endOf('day').format('YYYY-MM-DD HH:mm:ss') : '2100-01-01 23:59:59';
+      userFilterClauses.push(`(u.creation_date BETWEEN ? AND ? OR EXISTS (SELECT 1 FROM delivery_beneficiary db WHERE db.receiving_user_id = u.id AND db.creation_date BETWEEN ? AND ?))`);
+      userFilterParams.push(from_date, to_date, from_date, to_date);
 
-      const locations = filters.locations || [];
-      const genders = filters.genders || [];
-      const ethnicities = filters.ethnicities || [];
-      const min_age = filters.min_age || 0;
-      const max_age = filters.max_age || 150;
-      const zipcode = filters.zipcode || null;
-      const register_form = filters.register_form || null;
-
-      // Calcular rangos de fechas de nacimiento para edades
-      const today = moment.tz(timeZone).startOf('day');
-      const minBirthDate = today.clone().subtract(max_age, 'years').format('YYYY-MM-DD');
-      const maxBirthDate = today.clone().subtract(min_age, 'years').format('YYYY-MM-DD');
-
-      // Construir cláusulas dinámicas para filtros
-      let whereClauses = [];
-      let params = [];
-
-      whereClauses.push(`u.role_id = 5`);
-
-      // Filtro de fechas
-      whereClauses.push(`(u.creation_date BETWEEN ? AND ? OR db.creation_date BETWEEN ? AND ?)`);
-      params.push(from_date, to_date, from_date, to_date);
-
-      // Filtro de ubicaciones
-      if (locations.length > 0) {
-        whereClauses.push(`(db.location_id IN (${locations.map(() => '?').join(',')}) OR u.first_location_id IN (${locations.map(() => '?').join(',')}))`);
-        params.push(...locations, ...locations);
+      // Location filters
+      if (filters.locations && filters.locations.length > 0) {
+        const locPlaceholders = filters.locations.map(() => '?').join(',');
+        userFilterClauses.push(`(u.first_location_id IN (${locPlaceholders}) OR EXISTS (SELECT 1 FROM delivery_beneficiary db WHERE db.receiving_user_id = u.id AND db.location_id IN (${locPlaceholders})))`);
+        userFilterParams.push(...filters.locations, ...filters.locations);
       }
 
-      // Filtro de género
-      if (genders.length > 0) {
-        whereClauses.push(`u.gender_id IN (${genders.map(() => '?').join(',')})`);
-        params.push(...genders);
+      // Other demographic filters
+      if (filters.genders && filters.genders.length > 0) {
+        userFilterClauses.push(`u.gender_id IN (${filters.genders.map(() => '?').join(',')})`);
+        userFilterParams.push(...filters.genders);
+      }
+      if (filters.ethnicities && filters.ethnicities.length > 0) {
+        userFilterClauses.push(`u.ethnicity_id IN (${filters.ethnicities.map(() => '?').join(',')})`);
+        userFilterParams.push(...filters.ethnicities);
+      }
+      if (filters.zipcode) {
+        userFilterClauses.push(`u.zipcode = ?`);
+        userFilterParams.push(filters.zipcode);
       }
 
-      // Filtro de etnia
-      if (ethnicities.length > 0) {
-        whereClauses.push(`u.ethnicity_id IN (${ethnicities.map(() => '?').join(',')})`);
-        params.push(...ethnicities);
-      }
-
-      // Filtro de edad
+      // Age filters
       if (filters.min_age || filters.max_age) {
-        whereClauses.push(`u.date_of_birth BETWEEN ? AND ?`);
-        params.push(minBirthDate, maxBirthDate);
+        const today = moment.tz(timeZone).startOf('day');
+        const max_age = filters.max_age || 150;
+        const min_age = filters.min_age || 0;
+        const minBirthDate = today.clone().subtract(max_age, 'years').format('YYYY-MM-DD');
+        const maxBirthDate = today.clone().subtract(min_age, 'years').format('YYYY-MM-DD');
+        userFilterClauses.push(`u.date_of_birth BETWEEN ? AND ?`);
+        userFilterParams.push(minBirthDate, maxBirthDate);
       }
 
-      // Filtro de código postal
-      if (zipcode) {
-        whereClauses.push(`u.zipcode = ?`);
-        params.push(zipcode);
-      }
-
-      // Filtro de formulario de registro
-      if (filters.register_form) {
-        const conditions = [];
-        for (const [question_id, content] of Object.entries(register_form)) {
-          if (Array.isArray(content)) {
-            if (content.length > 0) {
-              // Manejar arreglos no vacíos
-              conditions.push(`u.id IN (
-                  SELECT uq.user_id FROM user_question uq
-                  INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
-                  WHERE uq.question_id = ? AND uqa.answer_id IN (${content.map(() => '?').join(',')})
-                )`);
-              params.push(question_id, ...content);
-            }
-            // Si el arreglo está vacío, no agregar ninguna condición
-          } else if (content) {
-            // Manejar valores únicos no nulos/definidos
-            conditions.push(`u.id IN (
-                SELECT uq.user_id FROM user_question uq
-                INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
-                WHERE uq.question_id = ? AND uqa.answer_id = ?
-              )`);
-            params.push(question_id, content);
-          }
-          // Si content es falsy (e.g., null, undefined, vacío), no agregar ninguna condición
-        }
-        if (conditions.length > 0) {
-          whereClauses.push(conditions.join(' AND '));
-        }
-      }
-
-      // Filtro específico para clientes
+      // Client filter
       if (cabecera.role === 'client') {
-        whereClauses.push(`cu.client_id = ?`);
-        params.push(cabecera.client_id);
+        userFilterClauses.push(`EXISTS (SELECT 1 FROM client_user cu WHERE cu.user_id = u.id AND cu.client_id = ?)`);
+        userFilterParams.push(cabecera.client_id);
+      }
+      
+      // Register form (survey) filters
+      if (filters.register_form) {
+        for (const [question_id, content] of Object.entries(filters.register_form)) {
+          if (Array.isArray(content) && content.length > 0) {
+            userFilterClauses.push(`EXISTS (SELECT 1 FROM user_question uq JOIN user_question_answer uqa ON uq.id = uqa.user_question_id WHERE uq.user_id = u.id AND uq.question_id = ? AND uqa.answer_id IN (${content.map(() => '?').join(',')}))`);
+            userFilterParams.push(question_id, ...content);
+          } else if (content) {
+            userFilterClauses.push(`EXISTS (SELECT 1 FROM user_question uq JOIN user_question_answer uqa ON uq.id = uqa.user_question_id WHERE uq.user_id = u.id AND uq.question_id = ? AND uqa.answer_id = ?)`);
+            userFilterParams.push(question_id, content);
+          }
+        }
       }
 
-      // Construir la consulta SQL
-      const query = `
-        SELECT u.id AS user_id,
-               q.id AS question_id,
-               at.id AS answer_type_id,
-               ${language === 'en' ? 'q.name' : 'q.name_es'} AS question,
-               a.id AS answer_id,
-               ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer,
-               uq.answer_text AS answer_text,
-               uq.answer_number AS answer_number
-        FROM user u
-        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        INNER JOIN question q ON q.enabled = 'Y' AND q.answer_type_id IN (3, 4)
-        LEFT JOIN answer_type at ON q.answer_type_id = at.id
-        LEFT JOIN user_question uq ON u.id = uq.user_id AND uq.question_id = q.id
-        LEFT JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
-        LEFT JOIN answer a ON a.id = uqa.answer_id AND a.question_id = q.id
-        LEFT JOIN delivery_beneficiary db ON u.id = db.receiving_user_id
-        WHERE ${whereClauses.join(' AND ')}
-        GROUP BY u.id, q.id, a.id
-        ORDER BY q.id, a.id, u.id
+      const filteredUsersQuery = `
+        SELECT u.id FROM user u
+        WHERE u.role_id = 5 AND ${userFilterClauses.join(' AND ')}
       `;
 
-      const [rows] = await mysqlConnection.promise().query(query, params);
-
-      // Procesamiento de resultados
-      const questionsMap = {};
-
-      for (const row of rows) {
-        if (!questionsMap[row.question_id]) {
-          questionsMap[row.question_id] = {
-            question_id: row.question_id,
-            question: row.question,
-            answers: {}
-          };
-        }
-
-        const question = questionsMap[row.question_id];
-
-        if (row.answer_id) {
-          if (!question.answers[row.answer_id]) {
-            question.answers[row.answer_id] = {
-              answer_id: row.answer_id,
-              answer: row.answer,
-              total: 0
-            };
-          }
-          question.answers[row.answer_id].total += 1;
-        }
-      }
-
-      // Obtener todas las posibles respuestas para cada pregunta
-      const [answerRows] = await mysqlConnection.promise().query(`
-        SELECT q.id AS question_id, 
-               a.id AS answer_id, 
-               ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer
+      // --- 2. Get all possible questions and answers in parallel ---
+      const questionsAndAnswersPromise = mysqlConnection.promise().query(`
+        SELECT 
+          q.id AS question_id,
+          ${language === 'en' ? 'q.name' : 'q.name_es'} AS question,
+          a.id AS answer_id,
+          ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer,
+          q.answer_type_id
         FROM question q
         JOIN answer a ON q.id = a.question_id
         WHERE q.enabled = 'Y' AND q.answer_type_id IN (3, 4)
         ORDER BY q.id, a.id
       `);
 
-      // Asegurarse de que todas las respuestas posibles están incluidas
-      for (const row of answerRows) {
+      // --- 3. Get the actual counts for the filtered users ---
+      const answerCountsPromise = mysqlConnection.promise().query(`
+        SELECT
+          uq.question_id,
+          uqa.answer_id,
+          COUNT(DISTINCT uq.user_id) as total
+        FROM user_question uq
+        JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
+        WHERE uq.user_id IN (${filteredUsersQuery})
+        GROUP BY uq.question_id, uqa.answer_id
+      `, userFilterParams);
+
+      const [[allQuestionsAndAnswers], [answerCounts]] = await Promise.all([
+        questionsAndAnswersPromise,
+        answerCountsPromise
+      ]);
+
+      // --- 4. Process results in memory (much faster) ---
+      const questionsMap = {};
+      
+      // Initialize with all possible answers and a total of 0
+      for (const row of allQuestionsAndAnswers) {
         if (!questionsMap[row.question_id]) {
           questionsMap[row.question_id] = {
             question_id: row.question_id,
             question: row.question,
+            answer_type_id: row.answer_type_id,
             answers: {}
           };
         }
+        questionsMap[row.question_id].answers[row.answer_id] = {
+          answer_id: row.answer_id,
+          answer: row.answer,
+          total: 0
+        };
+      }
 
-        const question = questionsMap[row.question_id];
-
-        if (!question.answers[row.answer_id]) {
-          question.answers[row.answer_id] = {
-            answer_id: row.answer_id,
-            answer: row.answer,
-            total: 0
-          };
+      // Populate with actual counts
+      for (const count of answerCounts) {
+        if (questionsMap[count.question_id] && questionsMap[count.question_id].answers[count.answer_id]) {
+          questionsMap[count.question_id].answers[count.answer_id].total = count.total;
         }
       }
 
-      // Convertir el mapa en una lista
-      const questions = Object.values(questionsMap).map(question => ({
-        question_id: question.question_id,
-        question: question.question,
-        answers: Object.values(question.answers)
+      // Convert map to final array structure
+      const questions = Object.values(questionsMap).map(q => ({
+        question_id: q.question_id,
+        question: q.question,
+        answer_type_id: q.answer_type_id,
+        answers: Object.values(q.answers)
       }));
 
       res.json(questions);
@@ -7657,431 +7605,282 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
   }
 });
 
+/**
+ * Helper: agrega placeholders dinámicos para listas.
+ * Devuelve string "IN (?,?,?)" o cadena vacía si la lista está vacía.
+ */
+function buildIn(list, params) {
+  if (!list || list.length === 0) return '';
+  const placeholders = list.map(_ => '?').join(',');
+  params.push(...list);
+  return ` IN (${placeholders}) `;
+}
+
+/**
+ * Construye las condiciones WHERE comunes y llena params.
+ * Devuelve objeto { whereSql, params, dateRangeParams }.
+ * dateRangeParams contiene [from_date, to_date_exclusive] que se reutiliza en la parte EXISTS.
+ */
+function buildDemographicWhere(cabecera, filters) {
+  const params = [];
+
+  // Normalizar fechas (guardamos inclusive start / exclusive end)
+  let from_date = filters.from_date ? new Date(filters.from_date).toISOString().slice(0, 10) : '1970-01-01';
+  let to_date   = filters.to_date ? new Date(filters.to_date).toISOString().slice(0, 10) : '2100-01-01';
+  // end exclusive (+1 día)
+  const toDateObj = new Date(to_date);
+  toDateObj.setDate(toDateObj.getDate() + 1);
+  const to_date_exclusive = toDateObj.toISOString().slice(0, 10);
+
+  const genders     = Array.isArray(filters.genders) ? filters.genders.filter(x => x !== null && x !== '') : [];
+  const ethnicities = Array.isArray(filters.ethnicities) ? filters.ethnicities.filter(x => x !== null && x !== '') : [];
+  const locations   = Array.isArray(filters.locations) ? filters.locations.filter(x => x !== null && x !== '') : [];
+  const min_age     = filters.min_age ? Number(filters.min_age) : null;
+  const max_age     = filters.max_age ? Number(filters.max_age) : null;
+  const zipcode     = filters.zipcode ? String(filters.zipcode) : null;
+
+  // WHERE base
+  let whereParts = [
+    `u.role_id = 5`,
+    `u.enabled = 'Y'`,
+    // Usuario entra si se creó en el rango O tuvo al menos una entrega en el rango
+    `(
+       (CONVERT_TZ(u.creation_date,'+00:00','America/Los_Angeles') >= ? 
+        AND CONVERT_TZ(u.creation_date,'+00:00','America/Los_Angeles') < ?)
+       OR EXISTS (
+          SELECT 1 FROM delivery_beneficiary db_r
+          WHERE db_r.receiving_user_id = u.id
+            AND CONVERT_TZ(db_r.creation_date,'+00:00','America/Los_Angeles') >= ?
+            AND CONVERT_TZ(db_r.creation_date,'+00:00','America/Los_Angeles') < ?
+       )
+     )`
+  ];
+  params.push(from_date, to_date_exclusive, from_date, to_date_exclusive);
+
+  // Locations (si hay) => (first_location_id IN (...) OR EXISTS entrega en esas locaciones)
+  if (locations.length > 0) {
+    const locPlaceholders = locations.map(_ => '?').join(',');
+    params.push(...locations, ...locations);
+    whereParts.push(`(
+        u.first_location_id IN (${locPlaceholders})
+        OR EXISTS (
+          SELECT 1 FROM delivery_beneficiary db_l
+          WHERE db_l.receiving_user_id = u.id
+            AND db_l.location_id IN (${locPlaceholders})
+        )
+      )`);
+  }
+
+  if (genders.length > 0) {
+    const gPH = genders.map(_ => '?').join(',');
+    params.push(...genders);
+    whereParts.push(`u.gender_id IN (${gPH})`);
+  }
+
+  if (ethnicities.length > 0) {
+    const ePH = ethnicities.map(_ => '?').join(',');
+    params.push(...ethnicities);
+    whereParts.push(`u.ethnicity_id IN (${ePH})`);
+  }
+
+  if (min_age !== null) {
+    whereParts.push(`TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(),'+00:00','America/Los_Angeles'))) >= ?`);
+    params.push(min_age);
+  }
+  if (max_age !== null) {
+    whereParts.push(`TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(),'+00:00','America/Los_Angeles'))) <= ?`);
+    params.push(max_age);
+  }
+
+  if (zipcode) {
+    whereParts.push(`u.zipcode = ?`);
+    params.push(zipcode);
+  }
+
+  if (cabecera.role === 'client') {
+    whereParts.push(`EXISTS (SELECT 1 FROM client_user cu WHERE cu.user_id = u.id AND cu.client_id = ?)`);
+    params.push(cabecera.client_id);
+  }
+
+  return {
+    whereSql: whereParts.join(' AND '),
+    params,
+    dates: { from_date, to_date_exclusive }
+  };
+}
+
+/**
+ * Ejecuta métrica demográfica genérica.
+ * dimensionType: 'gender' | 'ethnicity' | 'household' | 'age'
+ */
+async function demographicMetric(dimensionType, cabecera, filters, language) {
+  const { whereSql, params } = buildDemographicWhere(cabecera, filters);
+
+  let selectExpr = '';
+  let joinExpr   = '';
+  let groupExpr  = '';
+  let orderExpr  = '';
+
+  switch (dimensionType) {
+    case 'gender':
+      selectExpr = language === 'en' ? 'g.name' : 'g.name_es';
+      joinExpr = 'INNER JOIN gender g ON g.id = u.gender_id';
+      groupExpr = 'g.id';
+      orderExpr = 'g.name';
+      break;
+    case 'ethnicity':
+      selectExpr = language === 'en' ? 'e.name' : 'e.name_es';
+      joinExpr = 'INNER JOIN ethnicity e ON e.id = u.ethnicity_id';
+      groupExpr = 'e.id';
+      orderExpr = 'e.name';
+      break;
+    case 'household':
+      selectExpr = 'u.household_size';
+      joinExpr = '';
+      groupExpr = 'u.household_size';
+      orderExpr = 'u.household_size';
+      break;
+    case 'age':
+      // calcular edad en SELECT para agrupar
+      selectExpr = `TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(),'+00:00','America/Los_Angeles')))`;
+      joinExpr = '';
+      groupExpr = selectExpr;
+      orderExpr = selectExpr;
+      break;
+    default:
+      throw new Error('Unsupported dimensionType');
+  }
+
+  const sql = `
+    SELECT ${selectExpr} AS name,
+           COUNT(*) AS total
+    FROM user u
+    ${joinExpr}
+    WHERE ${whereSql}
+    GROUP BY ${groupExpr}
+    ORDER BY ${orderExpr}
+  `;
+
+  const [rows] = await mysqlConnection.promise().query(sql, params);
+
+  if (dimensionType === 'household' || dimensionType === 'age') {
+    // Calcular average y median con las frecuencias agregadas
+    let totalUsers = 0;
+    let weightedSum = 0;
+    const dist = [];
+
+    for (const r of rows) {
+      const numericValue = Number(r.name); // household_size o edad
+      const freq = Number(r.total);
+      totalUsers += freq;
+      weightedSum += numericValue * freq;
+      dist.push({ value: numericValue, freq });
+    }
+
+    const average = totalUsers > 0 ? Number((weightedSum / totalUsers).toFixed(2)) : 0;
+
+    // Mediana ponderada
+    dist.sort((a, b) => a.value - b.value);
+    let cumulative = 0;
+    let median = null;
+    const mid1 = (totalUsers + 1) / 2;
+    const mid2 = (totalUsers % 2 === 0) ? (totalUsers / 2 + 1) : mid1;
+
+    let m1 = null, m2 = null;
+    for (const bucket of dist) {
+      cumulative += bucket.freq;
+      if (m1 === null && cumulative >= mid1) m1 = bucket.value;
+      if (m2 === null && cumulative >= mid2) {
+        m2 = bucket.value;
+        break;
+      }
+    }
+    if (m1 !== null) {
+      median = (m1 + (m2 ?? m1)) / 2;
+    }
+
+    // Convertimos name a string para front consistente
+    for (const r of rows) {
+      r.name = String(r.name);
+    }
+    return { average, median, data: rows };
+  }
+
+  // Para gender / ethnicity sólo devolvemos la lista simple
+  return rows;
+}
+
+/**
+ * Endpoint unificado: /metrics/demographic/gender
+ */
 router.post('/metrics/demographic/gender', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
-    try {
-      const filters = req.body;
-      let from_date = filters.from_date || '1970-01-01';
-      let to_date = filters.to_date || '2100-01-01';
-      const locations = filters.locations || [];
-      const genders = filters.genders || [];
-      const ethnicities = filters.ethnicities || [];
-      const min_age = filters.min_age || 0;
-      const max_age = filters.max_age || 150;
-      const zipcode = filters.zipcode || null;
-
-      // Convertir a formato ISO y obtener solo la fecha
-      if (filters.from_date) {
-        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
-      }
-      if (filters.to_date) {
-        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
-      }
-
-      const language = req.query.language || 'en';
-
-      var query_from_date = '';
-      if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
-      }
-      var query_to_date = '';
-      if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
-      if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
-      }
-      var query_genders = '';
-      if (genders.length > 0) {
-        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
-      }
-      var query_ethnicities = '';
-      if (ethnicities.length > 0) {
-        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
-      }
-      var query_min_age = '';
-      if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
-      }
-      var query_max_age = '';
-      if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
-      }
-      var query_zipcode = '';
-      if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + zipcode;
-      }
-
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
-
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT 
-        ${language === 'en' ? 'g.name' : 'g.name_es'} AS name,
-        COUNT(DISTINCT(u.id)) AS total
-        FROM user u
-        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        INNER JOIN gender AS g ON u.gender_id = g.id
-        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
-        ${query_locations}
-        ${query_genders}
-        ${query_ethnicities}
-        ${query_min_age}
-        ${query_max_age}
-        ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-        GROUP BY g.name`,
-        [from_date, toDate, from_date, toDate, cabecera.client_id]
-      );
-
-      res.json(rows);
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
-    }
-  } else {
-    res.status(403).json('Unauthorized');
+  if (!['admin','client','director'].includes(cabecera.role)) {
+    return res.status(403).json('Unauthorized');
   }
-}
-);
+  try {
+    const language = req.query.language || 'en';
+    const result = await demographicMetric('gender', cabecera, req.body || {}, language);
+    res.json(result);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
 
+/**
+ * Endpoint unificado: /metrics/demographic/ethnicity
+ */
 router.post('/metrics/demographic/ethnicity', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
-    try {
-      const filters = req.body;
-      let from_date = filters.from_date || '1970-01-01';
-      let to_date = filters.to_date || '2100-01-01';
-      const locations = filters.locations || [];
-      const genders = filters.genders || [];
-      const ethnicities = filters.ethnicities || [];
-      const min_age = filters.min_age || 0;
-      const max_age = filters.max_age || 150;
-      const zipcode = filters.zipcode || null;
-
-      // Convertir a formato ISO y obtener solo la fecha
-      if (filters.from_date) {
-        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
-      }
-      if (filters.to_date) {
-        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
-      }
-
-      const language = req.query.language || 'en';
-
-      var query_from_date = '';
-      if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
-      }
-      var query_to_date = '';
-      if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
-      if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
-      }
-      var query_genders = '';
-      if (genders.length > 0) {
-        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
-      }
-      var query_ethnicities = '';
-      if (ethnicities.length > 0) {
-        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
-      }
-      var query_min_age = '';
-      if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
-      }
-      var query_max_age = '';
-      if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
-      }
-      var query_zipcode = '';
-      if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + zipcode;
-      }
-
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
-
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT 
-        ${language === 'en' ? 'e.name' : 'e.name_es'} AS name,
-        COUNT(DISTINCT(u.id)) AS total
-        FROM user u
-        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        INNER JOIN ethnicity AS e ON u.ethnicity_id = e.id
-        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
-        ${query_locations}
-        ${query_genders}
-        ${query_ethnicities}
-        ${query_min_age}
-        ${query_max_age}
-        ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-        GROUP BY e.name`,
-        [from_date, toDate, from_date, toDate, cabecera.client_id]
-      );
-
-      res.json(rows);
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
-    }
-  } else {
-    res.status(403).json('Unauthorized');
+  if (!['admin','client','director'].includes(cabecera.role)) {
+    return res.status(403).json('Unauthorized');
   }
-}
-);
+  try {
+    const language = req.query.language || 'en';
+    const result = await demographicMetric('ethnicity', cabecera, req.body || {}, language);
+    res.json(result);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
 
+/**
+ * Endpoint unificado: /metrics/demographic/household
+ */
 router.post('/metrics/demographic/household', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
-    try {
-      const filters = req.body;
-      let from_date = filters.from_date || '1970-01-01';
-      let to_date = filters.to_date || '2100-01-01';
-      const locations = filters.locations || [];
-      const genders = filters.genders || [];
-      const ethnicities = filters.ethnicities || [];
-      const min_age = filters.min_age || 0;
-      const max_age = filters.max_age || 150;
-      const zipcode = filters.zipcode || null;
-
-      // Convertir a formato ISO y obtener solo la fecha
-      if (filters.from_date) {
-        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
-      }
-      if (filters.to_date) {
-        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
-      }
-
-      const language = req.query.language || 'en';
-
-      var query_from_date = '';
-      if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
-      }
-      var query_to_date = '';
-      if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
-      if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
-      }
-      var query_genders = '';
-      if (genders.length > 0) {
-        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
-      }
-      var query_ethnicities = '';
-      if (ethnicities.length > 0) {
-        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
-      }
-      var query_min_age = '';
-      if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
-      }
-      var query_max_age = '';
-      if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
-      }
-      var query_zipcode = '';
-      if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + zipcode;
-      }
-
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
-
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT 
-        u.household_size AS name,
-        COUNT(DISTINCT(u.id)) AS total
-        FROM user u
-        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 AND u.enabled = 'Y' 
-       AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
-        ${query_locations}
-        ${query_genders}
-        ${query_ethnicities}
-        ${query_min_age}
-        ${query_max_age}
-        ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-        GROUP BY u.household_size
-        ORDER BY u.household_size`,
-        [from_date, toDate, from_date, toDate, cabecera.client_id]
-      );
-
-      // Calcular el promedio
-      let sum = 0;
-      let count = 0;
-      for (const row of rows) {
-        sum += row.name * row.total;
-        count += row.total;
-      }
-      const average = Number((sum / count).toFixed(2));
-
-      // Calcular la mediana
-      rows.sort((a, b) => a.name - b.name);
-      let median;
-      let accumulatedCount = 0;
-      for (const row of rows) {
-        accumulatedCount += row.total;
-        if (accumulatedCount >= count / 2) {
-          median = row.name;
-          break;
-        }
-      }
-
-      // Convertir los números a cadenas
-      for (const row of rows) {
-        row.name = String(row.name);
-      }
-      res.json({ average: average, median: median, data: rows });
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
-    }
-  } else {
-    res.status(403).json('Unauthorized');
+  if (!['admin','client','director'].includes(cabecera.role)) {
+    return res.status(403).json('Unauthorized');
   }
-}
-);
+  try {
+    const language = req.query.language || 'en'; // no se usa, pero mantenemos firma
+    const result = await demographicMetric('household', cabecera, req.body || {}, language);
+    res.json(result);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
 
+/**
+ * Endpoint unificado: /metrics/demographic/age
+ */
 router.post('/metrics/demographic/age', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
-    try {
-      const filters = req.body;
-      let from_date = filters.from_date || '1970-01-01';
-      let to_date = filters.to_date || '2100-01-01';
-      const locations = filters.locations || [];
-      const genders = filters.genders || [];
-      const ethnicities = filters.ethnicities || [];
-      const min_age = filters.min_age || 0;
-      const max_age = filters.max_age || 150;
-      const zipcode = filters.zipcode || null;
-
-      // Convertir a formato ISO y obtener solo la fecha
-      if (filters.from_date) {
-        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
-      }
-      if (filters.to_date) {
-        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
-      }
-
-      const language = req.query.language || 'en';
-
-      var query_from_date = '';
-      if (filters.from_date) {
-        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
-      }
-      var query_to_date = '';
-      if (filters.to_date) {
-        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
-      if (locations.length > 0) {
-        query_locations = 'AND (db.location_id IN (' + locations.join() + ') OR u.first_location_id IN (' + locations.join() + ')) ';
-      }
-      var query_genders = '';
-      if (genders.length > 0) {
-        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
-      }
-      var query_ethnicities = '';
-      if (ethnicities.length > 0) {
-        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
-      }
-      var query_min_age = '';
-      if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
-      }
-      var query_max_age = '';
-      if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
-      }
-      var query_zipcode = '';
-      if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + zipcode;
-      }
-
-      let toDate = new Date(to_date);
-      toDate.setDate(toDate.getDate() + 1); // Añade un día a la fecha final
-
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT 
-        TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS name,
-        COUNT(DISTINCT(u.id)) AS total
-        FROM user u
-        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        LEFT JOIN delivery_beneficiary AS db ON u.id = db.receiving_user_id
-        WHERE u.role_id = 5 AND u.enabled = 'Y' 
-        AND (CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ? 
-        OR u.id IN (SELECT db3.receiving_user_id FROM delivery_beneficiary db3 
-                     WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?))
-        ${query_locations}
-        ${query_genders}
-        ${query_ethnicities}
-        ${query_min_age}
-        ${query_max_age}
-        ${query_zipcode}
-        ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-        GROUP BY name
-        ORDER BY name`,
-        [from_date, toDate, from_date, toDate, cabecera.client_id]
-      );
-
-      // Calcular el promedio
-      let sum = 0;
-      let count = 0;
-      for (const row of rows) {
-        sum += row.name * row.total;
-        count += row.total;
-      }
-      const average = Number((sum / count).toFixed(2));
-
-      // Calcular la mediana
-      let median;
-      let accumulatedCount = 0;
-      for (const row of rows) {
-        accumulatedCount += row.total;
-        if (accumulatedCount >= count / 2) {
-          median = row.name;
-          break;
-        }
-      }
-
-      // Convertir los números a cadenas
-      for (const row of rows) {
-        row.name = String(row.name);
-      }
-
-      res.json({ average: average, median: median, data: rows });
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
-    }
-  } else {
-    res.status(403).json('Unauthorized');
+  if (!['admin','client','director'].includes(cabecera.role)) {
+    return res.status(403).json('Unauthorized');
   }
-}
-);
+  try {
+    const language = req.query.language || 'en'; // no se usa, pero mantenemos firma
+    const result = await demographicMetric('age', cabecera, req.body || {}, language);
+    res.json(result);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
 
 router.post('/metrics/volunteer/gender', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
