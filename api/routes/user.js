@@ -8672,13 +8672,13 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                     OR
                     -- New type of recurring: registered before from_date, first_loc matches (if loc filter), AND no deliveries ANYWHERE before from_date
                     (
-                        CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? 
+                        CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
                         ${query_locations_new_user_first_location} 
                         AND NOT EXISTS (
                             SELECT 1
                             FROM delivery_beneficiary db_no_past
                             WHERE db_no_past.receiving_user_id = u.id
-                              AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < ? 
+                              AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
                         )
                     )
                 )
