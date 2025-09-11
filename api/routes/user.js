@@ -12594,6 +12594,149 @@ router.post('/table/client', verifyToken, async (req, res) => {
   }
 });
 
+router.post('/table/article', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'content_manager') {
+    const language = req.query.language || 'en';
+    const filters = req.body;
+    let from_date = filters.from_date || '1970-01-01';
+    let to_date = filters.to_date || '2100-01-01';
+    const categories = filters.categories || [];
+    const statuses = filters.statuses || [];
+    const priorities = filters.priorities || [];
+    const author_genders = filters.author_genders || [];
+
+    // Convertir a formato ISO y obtener solo la fecha
+    if (filters.from_date) {
+      from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+    }
+    if (filters.to_date) {
+      to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+    }
+
+    var query_from_date = '';
+    if (filters.from_date) {
+      query_from_date = 'AND CONVERT_TZ(a.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+    }
+    var query_to_date = '';
+    if (filters.to_date) {
+      query_to_date = 'AND CONVERT_TZ(a.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+    }
+    
+    var query_categories = '';
+    if (categories.length > 0) {
+      query_categories = 'AND a.category_id IN (' + categories.join(',') + ')';
+    }
+    
+    var query_statuses = '';
+    if (statuses.length > 0) {
+      query_statuses = 'AND a.article_status_id IN (' + statuses.join(',') + ')';
+    }
+    
+    var query_priorities = '';
+    if (priorities.length > 0) {
+      query_priorities = 'AND a.priority IN (' + priorities.join(',') + ')';
+    }
+    
+    var query_author_genders = '';
+    if (author_genders.length > 0) {
+      const genderPlaceholders = author_genders.map(g => `'${g}'`).join(',');
+      query_author_genders = 'AND a.author_gender IN (' + genderPlaceholders + ')';
+    }
+
+    let buscar = req.query.search;
+
+    var page = req.query.page ? Number(req.query.page) : 1;
+
+    if (page < 1) {
+      page = 1;
+    }
+    var resultsPerPage = 10;
+    var start = (page - 1) * resultsPerPage;
+
+    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
+    var queryOrderBy = `${orderBy} ${orderType}`;
+    
+    let havingClause = '';
+    if (buscar) {
+      buscar = '%' + buscar + '%';
+      havingClause = `HAVING (a.id like '${buscar}' or title like '${buscar}' or a.author like '${buscar}' or category like '${buscar}' or status like '${buscar}' or a.priority like '${buscar}' or publication_date like '${buscar}' or creation_date like '${buscar}')`;
+    }
+
+    try {
+      const query = `SELECT
+        a.id,
+        ${language === 'en' ? 'a.title_en' : 'a.title_es'} as title,
+        a.author,
+        ${language === 'en' ? 'c.name_en' : 'c.name_es'} as category,
+        DATE_FORMAT(CONVERT_TZ(a.publication_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as publication_date,
+        ${language === 'en' ? 'ast.name_en' : 'ast.name_es'} as status,
+        COALESCE(a.priority, '') as priority,
+        DATE_FORMAT(CONVERT_TZ(a.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+        FROM article as a
+        LEFT JOIN category as c ON a.category_id = c.id
+        LEFT JOIN article_status as ast ON a.article_status_id = ast.id
+        WHERE 1=1 
+        ${query_from_date}
+        ${query_to_date}
+        ${query_categories}
+        ${query_statuses}
+        ${query_priorities}
+        ${query_author_genders}
+        ${havingClause}
+        ORDER BY ${queryOrderBy}
+        LIMIT ?, ?`
+
+      const [rows] = await mysqlConnection.promise().query(
+        query
+        , [start, resultsPerPage]);
+
+      if (rows.length > 0) {
+        const [countRows] = await mysqlConnection.promise().query(`
+        SELECT COUNT(*) as count
+        FROM (
+          SELECT
+          a.id,
+          ${language === 'en' ? 'a.title_en' : 'a.title_es'} as title,
+          a.author,
+          ${language === 'en' ? 'c.name_en' : 'c.name_es'} as category,
+          DATE_FORMAT(CONVERT_TZ(a.publication_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as publication_date,
+          ${language === 'en' ? 'ast.name_en' : 'ast.name_es'} as status,
+          COALESCE(a.priority, '') as priority,
+          DATE_FORMAT(CONVERT_TZ(a.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
+          FROM article as a
+          LEFT JOIN category as c ON a.category_id = c.id
+          LEFT JOIN article_status as ast ON a.article_status_id = ast.id
+          WHERE 1=1 
+          ${query_from_date}
+          ${query_to_date}
+          ${query_categories}
+          ${query_statuses}
+          ${query_priorities}
+          ${query_author_genders}
+          ${havingClause}
+        ) as subquery
+      `);
+
+        const numOfResults = countRows[0].count;
+        const numOfPages = Math.ceil(numOfResults / resultsPerPage);
+
+        res.json({ results: rows, numOfPages: numOfPages, totalItems: numOfResults, page: page - 1, orderBy: orderBy, orderType: orderType });
+      } else {
+        res.json({ results: rows, numOfPages: 0, totalItems: 0, page: page - 1, orderBy: orderBy, orderType: orderType });
+      }
+
+    } catch (error) {
+      console.log(error);
+      logger.error(error);
+      res.status(500).json('Error interno');
+    }
+  } else {
+    res.status(401).json('No autorizado');
+  }
+});
+
 router.post('/table/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
@@ -13878,6 +14021,9 @@ router.put('/mailchimp/error/enable-disable/:id', verifyToken, async (req, res) 
 // --------------------------------------------------------
 // Article management routes
 // --------------------------------------------------------
+// In-memory cache for signed URLs
+const signedUrlCache = new Map();
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 // Multer configuration for article images
 const articleUpload = multer({ storage: storage }).fields([
@@ -14320,7 +14466,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     // Manage priority (ensure uniqueness and shift if necessary)
     const managedPriority = await managePriority(priority);
-
+    
     // Insert article first to get ID
     const [articleResult] = await mysqlConnection.promise().query(
       `INSERT INTO article (
