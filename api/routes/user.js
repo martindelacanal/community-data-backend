@@ -15235,6 +15235,31 @@ router.get('/article/slug/:slug', async (req, res) => {
   }
 });
 
+// Helper function to convert S3 URLs back to placeholders
+function convertS3UrlsToPlaceholders(content) {
+  try {
+    // Regex to match S3 URLs and extract the S3 key (hash)
+    const s3UrlRegex = /https:\/\/community-data-files\.s3\.us-west-1\.amazonaws\.com\/([a-f0-9]+)\?[^"']*/g;
+    
+    let processedContent = content;
+    let match;
+    
+    while ((match = s3UrlRegex.exec(content)) !== null) {
+      const fullUrl = match[0];
+      const s3Key = match[1];
+      const placeholder = `{{S3_KEY:${s3Key}}}`;
+      
+      // Replace the full URL with the placeholder
+      processedContent = processedContent.replace(fullUrl, placeholder);
+    }
+    
+    return processedContent;
+  } catch (error) {
+    logger.error('Error converting S3 URLs to placeholders:', error);
+    return content; // Return original content if processing fails
+  }
+}
+
 // Update article
 router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -15309,13 +15334,17 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     // Manage priority (ensure uniqueness and shift if necessary, excluding current article)
     const managedPriority = await managePriority(priority, id);
 
+    // Convert S3 URLs back to placeholders before processing
+    const contentEnglishWithPlaceholders = convertS3UrlsToPlaceholders(contentEnglish);
+    const contentSpanishWithPlaceholders = convertS3UrlsToPlaceholders(contentSpanish);
+
     // Process content images (convert base64 to S3 URLs)
-    let processedContentEnglish = contentEnglish;
-    let processedContentSpanish = contentSpanish;
+    let processedContentEnglish = contentEnglishWithPlaceholders;
+    let processedContentSpanish = contentSpanishWithPlaceholders;
 
     try {
-      processedContentEnglish = await processContentImages(contentEnglish, id, 'en');
-      processedContentSpanish = await processContentImages(contentSpanish, id, 'es');
+      processedContentEnglish = await processContentImages(contentEnglishWithPlaceholders, id, 'en');
+      processedContentSpanish = await processContentImages(contentSpanishWithPlaceholders, id, 'es');
 
       // Clean up orphaned content images
       await cleanupOrphanedContentImages(id, processedContentEnglish, processedContentSpanish);
