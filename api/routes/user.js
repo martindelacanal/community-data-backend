@@ -15684,12 +15684,11 @@ router.get('/filters', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/article/status', verifyToken, async (req, res) => {
+router.get('/article_status', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
     try {
       const { lang = 'en' } = req.query;
-
       const query = `
         SELECT 
           id,
@@ -15703,7 +15702,6 @@ router.get('/article/status', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         res.status(200).json(rows);
       } else {
-        console.log('rows', rows);
         res.status(404).json('article status not found');
       }
     } catch (err) {
