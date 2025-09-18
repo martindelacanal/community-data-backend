@@ -12596,7 +12596,7 @@ router.post('/table/client', verifyToken, async (req, res) => {
 
 router.post('/table/article', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'content_manager') {
+  if (cabecera.role === 'admin') {
     const language = req.query.language || 'en';
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
@@ -14434,7 +14434,7 @@ function cleanExpiredCache() {
 router.post('/article', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin' && cabecera.role !== 'content_manager') {
+  if (cabecera.role !== 'admin') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -15239,7 +15239,7 @@ router.get('/article/slug/:slug', async (req, res) => {
 router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin' && cabecera.role !== 'content_manager') {
+  if (cabecera.role !== 'admin') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -15522,7 +15522,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 router.delete('/article/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin' && cabecera.role !== 'content_manager') {
+  if (cabecera.role !== 'admin') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -15587,7 +15587,7 @@ router.delete('/article/:id', verifyToken, async (req, res) => {
 router.post('/article/upload-image', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin' && cabecera.role !== 'content_manager') {
+  if (cabecera.role !== 'admin') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -15624,7 +15624,7 @@ router.post('/article/upload-image', verifyToken, articleUpload, async (req, res
 
 router.get('/categories', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' && cabecera.role !== 'content_manager') {
+  if (cabecera.role === 'admin') {
     try {
       const { lang = 'en' } = req.query; // Idioma por defecto: inglés
 
@@ -15655,7 +15655,7 @@ router.get('/categories', verifyToken, async (req, res) => {
 
 router.get('/filters', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' && cabecera.role !== 'content_manager') {
+  if (cabecera.role === 'admin') {
     try {
       const { lang = 'en' } = req.query; // Idioma por defecto: inglés
 
@@ -15686,7 +15686,7 @@ router.get('/filters', verifyToken, async (req, res) => {
 
 router.get('/article/status', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' && cabecera.role !== 'content_manager') {
+  if (cabecera.role === 'admin') {
     try {
       const { lang = 'en' } = req.query;
 
@@ -15703,6 +15703,7 @@ router.get('/article/status', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         res.status(200).json(rows);
       } else {
+        console.log('rows', rows);
         res.status(404).json('article status not found');
       }
     } catch (err) {
