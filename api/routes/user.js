@@ -164,73 +164,116 @@ router.get('/refresh-token', verifyToken, (req, res) => {
 function formatDateForMailchimp(dateString) {
   if (!dateString) return '';
 
+  // Si es un objeto Date, convertirlo a string YYYY-MM-DD
+  if (dateString instanceof Date) {
+    dateString = dateString.toISOString().slice(0, 10);
+  }
+  
+  // Si no es string después de la conversión, devolver vacío
+  if (typeof dateString !== 'string') {
+    return '';
+  }
+
   // Asumiendo el string viene en formato YYYY-MM-DD
   const [year, month, day] = dateString.split('-');
   return `${month.padStart(2, '0')}/${day.padStart(2, '0')}`;
 }
 
+// Función de validación antes del envío
+function validateMailchimpData(userData) {
+  const errors = [];
+
+  if (!userData.email || userData.email.trim() === '') {
+    errors.push('Email is required');
+  }
+
+  if (userData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userData.email)) {
+    errors.push('Invalid email format');
+  }
+
+  return errors;
+}
+
 async function addSubscriberToMailchimp(userData) {
   try {
-    // (1) Prepara el número de teléfono en formato E.164
-    //     en caso de que lo quieras normalizar. Por ejemplo:
-    const cleanPhone = userData.phone
-      ? `+1${userData.phone.replace(/\D/g, '')}`
-      : '';
+    if (!userData.email || userData.email.trim() === '') {
+      throw new Error('Email is required for Mailchimp subscription');
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(userData.email)) {
+      throw new Error('Invalid email format');
+    }
 
-    // (2) Llama a la API de Mailchimp agregando 'sms_phone_number'
-    //     y 'sms_subscription_status' en el body principal
-    const response = await mailchimp.lists.addListMember(mailchimpAudienceId, {
-      // email_address: userData.email || `no-email-${Date.now()}@placeholder.com`,
-      email_address: userData.email || ``,
-      // status: userData.email ? 'subscribed' : 'unsubscribed',
-      status: userData.email ? 'subscribed' : '',
+    // Validación estricta NANP para habilitar SMS
+    const normalizePhone = (p) => (p || '').replace(/\D/g, '');
+    const isValidUSSmsPhone = (digits) => {
+      // 10 dígitos, primer dígito (area code) 2-9, primer dígito del central office (posición 4) 2-9
+      return /^[2-9][0-9]{2}[2-9][0-9]{6}$/.test(digits);
+    };
 
-      // Aquí agregas el número al campo nativo de SMS
-      sms_phone_number: cleanPhone,
-      sms_subscription_status: cleanPhone ? 'subscribed' : '',
+    let cleanPhone = '';
+    let isValidPhoneForSms = false;
+    if (userData.phone) {
+      const phoneDigits = normalizePhone(userData.phone);
+      if (phoneDigits.length === 10 && isValidUSSmsPhone(phoneDigits)) {
+        cleanPhone = `+1${phoneDigits}`;
+        isValidPhoneForSms = true;
+      } else {
+        console.log(`[Mailchimp] Phone present pero no válido para SMS (${userData.phone}) -> se omite SMSPHONE`);
+      }
+    }
 
-      // merge_fields para otros datos (nombre, apellido, etc.)
+    const hasValidAddress = userData.address && userData.address.trim() !== '';
+
+    const payload = {
+      email_address: userData.email.trim(),
+      status: 'subscribed',
       merge_fields: {
         FNAME: userData.firstname || '',
         LNAME: userData.lastname || '',
-        PHONE: userData.phone || '', // Este es tu merge field de “PHONE”
-        SMSPHONE: cleanPhone,
-        // SMSPHONE ya no tiene utilidad si queremos usar el nativo sms_phone_number.
-        ADDRESS: {
-          addr1: ',',
-          addr2: '',
-          city: ',',
-          state: 'CA',
-          zip: userData.zipcode || '',
-          country: 'USA'
-        },
+        PHONE: userData.phone || '',
         BIRTHDAY: formatDateForMailchimp(userData.dateOfBirth),
         MMERGE8: userData.gender || '',
         MMERGE9: userData.ethnicity || '',
         MMERGE10: userData.otherEthnicity || '',
-        EMAIL_CONSENT: userData.email ? 'yes' : 'no'
-      },
+        EMAIL_CONSENT: 'yes'
+      }
+    };
 
-      // Si lo deseas, puedes omitir sms_marketing_permission o dejarlo
-      // para forzar el “opt-in”. Depende de si tu cuenta de Mailchimp
-      // requiere un “double opt-in” específico para SMS.
-      // sms_marketing_permission: {
-      //   enabled: true,
-      //   company: "MAHI International, Inc.",
-      //   prefix: "+1"
-      // }
-    });
+    if (hasValidAddress) {
+      payload.merge_fields.ADDRESS = {
+        addr1: userData.address.trim(),
+        addr2: '',
+        city: userData.city || '',
+        state: 'CA',
+        zip: userData.zipcode || '',
+        country: 'USA'
+      };
+    }
 
-    // console.log("response", response);
+    // Solo agregar campos SMS si pasó la validación NANP
+    if (isValidPhoneForSms) {
+      payload.sms_phone_number = cleanPhone;
+      payload.sms_subscription_status = 'subscribed';
+      payload.merge_fields.SMSPHONE = cleanPhone;
+    }
+
+    console.log('Mailchimp payload for', userData.email, ':', JSON.stringify(payload, null, 2));
+    const response = await mailchimp.lists.addListMember(mailchimpAudienceId, payload);
     return response;
   } catch (err) {
-    // console.log(err);
+    console.error('Mailchimp error for email:', userData.email, 'Error details:', {
+      message: err.message,
+      status: err.status,
+      title: err.title,
+      detail: err.detail,
+      response: err.response?.body ? JSON.stringify(err.response.body) : 'No response body'
+    });
     throw err;
   }
 }
 
 router.post('/signup', async (req, res) => {
-  // const cabecera = JSON.parse(req.data.data);
   console.log(req.body);
 
   firstForm = req.body.firstForm;
@@ -368,28 +411,59 @@ router.post('/signup', async (req, res) => {
 
     // Después del commit exitoso, procesar Mailchimp (fuera de la transacción)
     try {
-      // Obtener nombres de género y etnicidad
-      const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', [gender]);
-      const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', [ethnicity]);
-
-      const gender_name = rowsGender && rowsGender[0]?.name || '';
-      const ethnicity_name = rowsEthnicity && rowsEthnicity[0]?.name || '';
-
-      await addSubscriberToMailchimp({
+      // Validar datos antes del envío a Mailchimp
+      const mailchimpData = {
         email: email,
         firstname: firstname,
         lastname: lastname,
         phone: phone,
         zipcode: zipcode,
         dateOfBirth: dateOfBirth,
-        gender: gender_name,
-        ethnicity: ethnicity_name,
+        gender: '',
+        ethnicity: '',
         otherEthnicity: otherEthnicity
-      });
+      };
+
+      // Solo proceder si tenemos un email válido
+      const validationErrors = validateMailchimpData(mailchimpData);
+
+      if (validationErrors.length > 0) {
+        console.log('Skipping Mailchimp for user', user_id, 'Validation errors:', validationErrors);
+        // No marcar como error si no hay email, simplemente no enviar
+        return;
+      }
+
+      // Obtener nombres de género y etnicidad
+      const [rowsGender] = await mysqlConnection.promise().query('SELECT name FROM gender WHERE id = ?', [gender]);
+      const [rowsEthnicity] = await mysqlConnection.promise().query('SELECT name FROM ethnicity WHERE id = ?', [ethnicity]);
+
+      mailchimpData.gender = rowsGender && rowsGender[0]?.name || '';
+      mailchimpData.ethnicity = rowsEthnicity && rowsEthnicity[0]?.name || '';
+
+      await addSubscriberToMailchimp(mailchimpData);
+
+      console.log('✓ User', user_id, 'successfully sent to Mailchimp');
 
     } catch (mailchimpError) {
-      // Actualizar usuario para marcar error de Mailchimp
-      await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
+      console.error('Mailchimp error details:', {
+        user_id: user_id,
+        email: email,
+        error: mailchimpError.message,
+        status: mailchimpError.status,
+        title: mailchimpError.title
+      });
+
+      // Solo marcar como error si no es un email duplicado o un error esperado
+      const isDuplicateError = mailchimpError.status === 400 &&
+        (mailchimpError.title?.includes('Member Exists') ||
+          mailchimpError.title?.includes('Invalid Resource'));
+
+      if (!isDuplicateError) {
+        // Marcar error solo para errores inesperados
+        await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
+      } else {
+        console.log('Duplicate email in Mailchimp for user', user_id, '- not marking as error');
+      }
     }
 
   } catch (err) {
@@ -404,6 +478,117 @@ router.post('/signup', async (req, res) => {
     if (connection) {
       connection.release();
     }
+  }
+});
+
+router.post('/mailchimp/retry-failed', async (req, res) => {
+  
+  try {
+    // Obtener usuarios con errores de Mailchimp
+    const [failedUsers] = await mysqlConnection.promise().query(`
+      SELECT 
+        u.id,
+        u.firstname,
+        u.lastname,
+        u.email,
+        u.phone,
+        u.zipcode,
+        DATE_FORMAT(u.date_of_birth, '%Y-%m-%d') as date_of_birth,
+        u.other_ethnicity,
+        g.name AS gender_name,
+        e.name AS ethnicity_name,
+        l.community_city as city
+      FROM user u
+      LEFT JOIN gender g ON u.gender_id = g.id
+      LEFT JOIN ethnicity e ON u.ethnicity_id = e.id
+      LEFT JOIN location l ON u.location_id = l.id
+      WHERE u.mailchimp_error = 'Y' 
+        AND u.email IS NOT NULL 
+        AND u.email != ''
+        AND u.role_id = 5
+        AND u.enabled = 'Y'
+    `);
+    
+    console.log('Failed users data:', JSON.stringify(failedUsers, null, 2));
+    
+    if (failedUsers.length === 0) {
+      return res.status(200).json({
+        message: 'No users found with Mailchimp errors',
+        total: 0,
+        success: 0,
+        errors: 0
+      });
+    }
+
+    let successCount = 0;
+    let errorCount = 0;
+    const errors = [];
+
+    console.log(`Processing ${failedUsers.length} users with Mailchimp errors...`);
+
+    for (const user of failedUsers) {
+      try {
+        console.log('Processing user:', user.id, user.email);
+        
+        // Limpiar datos antes de enviar
+        const mailchimpData = {
+          email: user.email,
+          firstname: (user.firstname || '').trim(),
+          lastname: (user.lastname || '').trim(),
+          phone: (user.phone || '').trim(),
+          zipcode: (user.zipcode || '').trim(),
+          address: '', // Valor vacío ya que no existe en la tabla
+          city: (user.city || '').trim(),
+          dateOfBirth: user.date_of_birth, // Ya es string YYYY-MM-DD
+          gender: (user.gender_name || '').trim(),
+          ethnicity: (user.ethnicity_name || '').trim(),
+          otherEthnicity: (user.other_ethnicity || '').trim()
+        };
+
+        console.log('Cleaned mailchimp data:', JSON.stringify(mailchimpData, null, 2));
+
+        // Intentar enviar a Mailchimp usando la función existente
+        await addSubscriberToMailchimp(mailchimpData);
+
+        // Si fue exitoso, actualizar el flag de error
+        await mysqlConnection.promise().query(
+          'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
+          [user.id]
+        );
+
+        successCount++;
+        console.log(`✓ User ${user.id} (${user.email}) successfully sent to Mailchimp`);
+
+      } catch (mailchimpError) {
+        errorCount++;
+        const errorMessage = `User ${user.id} (${user.email}): ${mailchimpError.message}`;
+        errors.push(errorMessage);
+        console.log(`✗ ${errorMessage}`);
+        
+        // Log adicional para debugging
+        if (mailchimpError.response?.body) {
+          console.log('Mailchimp response body:', JSON.stringify(mailchimpError.response.body));
+        }
+
+        // Mantener el flag de error
+        await mysqlConnection.promise().query(
+          'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
+          [user.id]
+        );
+      }
+    }
+
+    res.status(200).json({
+      message: 'Mailchimp retry process completed',
+      total: failedUsers.length,
+      success: successCount,
+      errors: errorCount,
+      errorDetails: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (err) {
+    console.error('Error in mailchimp retry process:', err);
+    res.status(500).json('Internal server error');
   }
 });
 
@@ -15240,19 +15425,19 @@ function convertS3UrlsToPlaceholders(content) {
   try {
     // Regex to match S3 URLs and extract the S3 key (hash)
     const s3UrlRegex = /https:\/\/community-data-files\.s3\.us-west-1\.amazonaws\.com\/([a-f0-9]+)\?[^"']*/g;
-    
+
     let processedContent = content;
     let match;
-    
+
     while ((match = s3UrlRegex.exec(content)) !== null) {
       const fullUrl = match[0];
       const s3Key = match[1];
       const placeholder = `{{S3_KEY:${s3Key}}}`;
-      
+
       // Replace the full URL with the placeholder
       processedContent = processedContent.replace(fullUrl, placeholder);
     }
-    
+
     return processedContent;
   } catch (error) {
     logger.error('Error converting S3 URLs to placeholders:', error);
