@@ -168,7 +168,7 @@ function formatDateForMailchimp(dateString) {
   if (dateString instanceof Date) {
     dateString = dateString.toISOString().slice(0, 10);
   }
-  
+
   // Si no es string después de la conversión, devolver vacío
   if (typeof dateString !== 'string') {
     return '';
@@ -270,6 +270,32 @@ async function addSubscriberToMailchimp(userData) {
       response: err.response?.body ? JSON.stringify(err.response.body) : 'No response body'
     });
     throw err;
+  }
+}
+
+function isMailchimpMemberExistsError(err) {
+  try {
+    let body = null;
+
+    // Caso SDK: err.response?.body puede ser objeto o string
+    if (err?.response?.body) {
+      body = typeof err.response.body === 'string'
+        ? JSON.parse(err.response.body)
+        : err.response.body;
+    } else if (typeof err.response === 'string') {
+      // Caso donde guardaste err.response como string JSON
+      body = JSON.parse(err.response);
+    }
+
+    if (!body) return false;
+
+    if (body.title === 'Member Exists') return true;
+
+    if (body.detail && /already a list member/i.test(body.detail)) return true;
+
+    return false;
+  } catch (_) {
+    return false;
   }
 }
 
@@ -445,24 +471,39 @@ router.post('/signup', async (req, res) => {
       console.log('✓ User', user_id, 'successfully sent to Mailchimp');
 
     } catch (mailchimpError) {
-      console.error('Mailchimp error details:', {
-        user_id: user_id,
-        email: email,
-        error: mailchimpError.message,
-        status: mailchimpError.status,
-        title: mailchimpError.title
-      });
+      const isAlreadySubscribed = isMailchimpMemberExistsError(mailchimpError);
 
-      // Solo marcar como error si no es un email duplicado o un error esperado
-      const isDuplicateError = mailchimpError.status === 400 &&
-        (mailchimpError.title?.includes('Member Exists') ||
-          mailchimpError.title?.includes('Invalid Resource'));
-
-      if (!isDuplicateError) {
-        // Marcar error solo para errores inesperados
-        await mysqlConnection.promise().query('UPDATE user SET mailchimp_error = "Y" WHERE id = ?', [user_id]);
+      if (isAlreadySubscribed) {
+        await mysqlConnection.promise().query(
+          'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
+          [user.id]
+        );
+        successCount++;
+        console.log(`✓ User ${user.id} (${user.email}) already exists in Mailchimp - marked as success`);
       } else {
-        console.log('Duplicate email in Mailchimp for user', user_id, '- not marking as error');
+        errorCount++;
+        let rawBody;
+        try {
+          rawBody = mailchimpError?.response?.body
+            ? (typeof mailchimpError.response.body === 'string'
+              ? mailchimpError.response.body
+              : JSON.stringify(mailchimpError.response.body))
+            : (typeof mailchimpError.response === 'string'
+              ? mailchimpError.response
+              : null);
+        } catch { rawBody = null; }
+
+        const errorMessage = `User ${user.id} (${user.email}): ${mailchimpError.message || 'Mailchimp error'}`;
+        errors.push(errorMessage);
+        console.log(`✗ ${errorMessage}`);
+        if (rawBody) {
+          console.log('Mailchimp response body:', rawBody);
+        }
+
+        await mysqlConnection.promise().query(
+          'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
+          [user.id]
+        );
       }
     }
 
@@ -482,7 +523,7 @@ router.post('/signup', async (req, res) => {
 });
 
 router.post('/mailchimp/retry-failed', async (req, res) => {
-  
+
   try {
     // Obtener usuarios con errores de Mailchimp
     const [failedUsers] = await mysqlConnection.promise().query(`
@@ -508,9 +549,9 @@ router.post('/mailchimp/retry-failed', async (req, res) => {
         AND u.role_id = 5
         AND u.enabled = 'Y'
     `);
-    
+
     console.log('Failed users data:', JSON.stringify(failedUsers, null, 2));
-    
+
     if (failedUsers.length === 0) {
       return res.status(200).json({
         message: 'No users found with Mailchimp errors',
@@ -529,7 +570,7 @@ router.post('/mailchimp/retry-failed', async (req, res) => {
     for (const user of failedUsers) {
       try {
         console.log('Processing user:', user.id, user.email);
-        
+
         // Limpiar datos antes de enviar
         const mailchimpData = {
           email: user.email,
@@ -560,22 +601,40 @@ router.post('/mailchimp/retry-failed', async (req, res) => {
         console.log(`✓ User ${user.id} (${user.email}) successfully sent to Mailchimp`);
 
       } catch (mailchimpError) {
-        errorCount++;
-        const errorMessage = `User ${user.id} (${user.email}): ${mailchimpError.message}`;
-        errors.push(errorMessage);
-        console.log(`✗ ${errorMessage}`);
-        
-        // Log adicional para debugging
-        if (mailchimpError.response?.body) {
-          console.log('Mailchimp response body:', JSON.stringify(mailchimpError.response.body));
-        }
+        // Usar la función auxiliar para detectar si el miembro ya existe
+        const isAlreadySubscribed = isMailchimpMemberExistsError(mailchimpError);
 
-        // Mantener el flag de error
-        await mysqlConnection.promise().query(
-          'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
-          [user.id]
-        );
+        if (isAlreadySubscribed) {
+          // Si el email ya está suscrito, considerarlo como éxito
+          await mysqlConnection.promise().query(
+            'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
+            [user.id]
+          );
+
+          successCount++;
+          console.log(`✓ User ${user.id} (${user.email}) already exists in Mailchimp - marked as success`);
+        } else {
+          // Si es un error real, mantenerlo como error
+          errorCount++;
+          const errorMessage = `User ${user.id} (${user.email}): ${mailchimpError.message}`;
+          errors.push(errorMessage);
+          console.log(`✗ ${errorMessage}`);
+
+          // Log adicional para debugging
+          if (mailchimpError.response?.body) {
+            console.log('Mailchimp response body:', JSON.stringify(mailchimpError.response.body));
+          } else if (mailchimpError.response) {
+            console.log('Mailchimp response:', mailchimpError.response);
+          }
+
+          // Mantener el flag de error
+          await mysqlConnection.promise().query(
+            'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
+            [user.id]
+          );
+        }
       }
+
     }
 
     res.status(200).json({
