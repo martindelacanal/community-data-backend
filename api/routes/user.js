@@ -194,7 +194,7 @@ function validateMailchimpData(userData) {
   return errors;
 }
 
-async function addSubscriberToMailchimp(userData) {
+async function addSubscriberToMailchimp(userData, retryWithoutSms = false) {
   try {
     if (!userData.email || userData.email.trim() === '') {
       throw new Error('Email is required for Mailchimp subscription');
@@ -204,16 +204,20 @@ async function addSubscriberToMailchimp(userData) {
       throw new Error('Invalid email format');
     }
 
-    // Validación estricta NANP para habilitar SMS
-    const normalizePhone = (p) => (p || '').replace(/\D/g, '');
-    const isValidUSSmsPhone = (digits) => {
-      // 10 dígitos, primer dígito (area code) 2-9, primer dígito del central office (posición 4) 2-9
-      return /^[2-9][0-9]{2}[2-9][0-9]{6}$/.test(digits);
-    };
-
+    // Validación estricta NANP para habilitar SMS (solo si no es reintento)
     let cleanPhone = '';
     let isValidPhoneForSms = false;
-    if (userData.phone) {
+
+    if (!retryWithoutSms && userData.phone) {
+      const normalizePhone = (p) => (p || '').replace(/\D/g, '');
+      const isValidUSSmsPhone = (digits) => {
+        // 10 dígitos.
+        // Area Code (NPA): [2-9] para el primer dígito, [0-8] para el segundo, [0-9] para el tercero.
+        // Central Office (NXX): [2-9] para el primer dígito, [0-9] para los dos siguientes.
+        // No pueden ser N11, x9x. Esta es una aproximación robusta.
+        return /^[2-9][0-8][0-9][2-9][0-9]{2}[0-9]{4}$/.test(digits);
+      };
+
       const phoneDigits = normalizePhone(userData.phone);
       if (phoneDigits.length === 10 && isValidUSSmsPhone(phoneDigits)) {
         cleanPhone = `+1${phoneDigits}`;
@@ -251,8 +255,8 @@ async function addSubscriberToMailchimp(userData) {
       };
     }
 
-    // Solo agregar campos SMS si pasó la validación NANP
-    if (isValidPhoneForSms) {
+    // Solo agregar campos SMS si pasó la validación NANP y no es reintento
+    if (isValidPhoneForSms && !retryWithoutSms) {
       payload.sms_phone_number = cleanPhone;
       payload.sms_subscription_status = 'subscribed';
       payload.merge_fields.SMSPHONE = cleanPhone;
@@ -270,6 +274,30 @@ async function addSubscriberToMailchimp(userData) {
       response: err.response?.body ? JSON.stringify(err.response.body) : 'No response body'
     });
     throw err;
+  }
+}
+
+function isInvalidPhoneNumberError(err) {
+  try {
+    if (err.status !== 400) return false;
+
+    let body = null;
+    if (err?.response?.body) {
+      body = typeof err.response.body === 'string'
+        ? JSON.parse(err.response.body)
+        : err.response.body;
+    } else if (typeof err.response === 'string') {
+      body = JSON.parse(err.response);
+    }
+
+    if (!body || !Array.isArray(body.errors)) return false;
+
+    return body.errors.some(e =>
+      (e.field === 'sms_phone_number' || e.field === 'SMSPHONE') &&
+      (/phone number/i.test(e.message) || /valid US phone/i.test(e.message))
+    );
+  } catch (_) {
+    return false;
   }
 }
 
@@ -455,7 +483,6 @@ router.post('/signup', async (req, res) => {
 
       if (validationErrors.length > 0) {
         console.log('Skipping Mailchimp for user', user_id, 'Validation errors:', validationErrors);
-        // No marcar como error si no hay email, simplemente no enviar
         return;
       }
 
@@ -468,42 +495,52 @@ router.post('/signup', async (req, res) => {
 
       await addSubscriberToMailchimp(mailchimpData);
 
+      // Marcar como exitoso
+      await mysqlConnection.promise().query(
+        'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
+        [user_id]
+      );
+
       console.log('✓ User', user_id, 'successfully sent to Mailchimp');
 
     } catch (mailchimpError) {
       const isAlreadySubscribed = isMailchimpMemberExistsError(mailchimpError);
+      const isPhoneError = isInvalidPhoneNumberError(mailchimpError);
 
       if (isAlreadySubscribed) {
         await mysqlConnection.promise().query(
           'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
-          [user.id]
+          [user_id]
         );
-        successCount++;
-        console.log(`✓ User ${user.id} (${user.email}) already exists in Mailchimp - marked as success`);
-      } else {
-        errorCount++;
-        let rawBody;
+        console.log(`✓ User ${user_id} (${email}) already exists in Mailchimp - marked as success`);
+      } else if (isPhoneError) {
+        // Reintentar sin campos de SMS
+        console.log(`📞 User ${user_id} (${email}) has invalid phone for Mailchimp SMS, retrying without SMS fields...`);
         try {
-          rawBody = mailchimpError?.response?.body
-            ? (typeof mailchimpError.response.body === 'string'
-              ? mailchimpError.response.body
-              : JSON.stringify(mailchimpError.response.body))
-            : (typeof mailchimpError.response === 'string'
-              ? mailchimpError.response
-              : null);
-        } catch { rawBody = null; }
+          await addSubscriberToMailchimp(mailchimpData, true); // retryWithoutSms = true
 
-        const errorMessage = `User ${user.id} (${user.email}): ${mailchimpError.message || 'Mailchimp error'}`;
-        errors.push(errorMessage);
-        console.log(`✗ ${errorMessage}`);
-        if (rawBody) {
-          console.log('Mailchimp response body:', rawBody);
+          // Marcar como exitoso
+          await mysqlConnection.promise().query(
+            'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
+            [user_id]
+          );
+
+          console.log(`✓ User ${user_id} (${email}) successfully sent to Mailchimp without SMS fields`);
+        } catch (retryError) {
+          // Si el reintento también falla, marcar como error
+          await mysqlConnection.promise().query(
+            'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
+            [user_id]
+          );
+          console.log(`✗ User ${user_id} (${email}) failed even without SMS: ${retryError.message}`);
         }
-
+      } else {
+        // Otros errores, marcar como error
         await mysqlConnection.promise().query(
           'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
-          [user.id]
+          [user_id]
         );
+        console.log(`✗ User ${user_id} (${email}): ${mailchimpError.message}`);
       }
     }
 
@@ -568,24 +605,23 @@ router.post('/mailchimp/retry-failed', async (req, res) => {
     console.log(`Processing ${failedUsers.length} users with Mailchimp errors...`);
 
     for (const user of failedUsers) {
+      // Mover la declaración de mailchimpData fuera del try para que esté disponible en el catch
+      const mailchimpData = {
+        email: user.email,
+        firstname: (user.firstname || '').trim(),
+        lastname: (user.lastname || '').trim(),
+        phone: (user.phone || '').trim(),
+        zipcode: (user.zipcode || '').trim(),
+        address: '',
+        city: (user.city || '').trim(),
+        dateOfBirth: user.date_of_birth,
+        gender: (user.gender_name || '').trim(),
+        ethnicity: (user.ethnicity_name || '').trim(),
+        otherEthnicity: (user.other_ethnicity || '').trim()
+      };
+
       try {
         console.log('Processing user:', user.id, user.email);
-
-        // Limpiar datos antes de enviar
-        const mailchimpData = {
-          email: user.email,
-          firstname: (user.firstname || '').trim(),
-          lastname: (user.lastname || '').trim(),
-          phone: (user.phone || '').trim(),
-          zipcode: (user.zipcode || '').trim(),
-          address: '', // Valor vacío ya que no existe en la tabla
-          city: (user.city || '').trim(),
-          dateOfBirth: user.date_of_birth, // Ya es string YYYY-MM-DD
-          gender: (user.gender_name || '').trim(),
-          ethnicity: (user.ethnicity_name || '').trim(),
-          otherEthnicity: (user.other_ethnicity || '').trim()
-        };
-
         console.log('Cleaned mailchimp data:', JSON.stringify(mailchimpData, null, 2));
 
         // Intentar enviar a Mailchimp usando la función existente
@@ -601,18 +637,41 @@ router.post('/mailchimp/retry-failed', async (req, res) => {
         console.log(`✓ User ${user.id} (${user.email}) successfully sent to Mailchimp`);
 
       } catch (mailchimpError) {
-        // Usar la función auxiliar para detectar si el miembro ya existe
         const isAlreadySubscribed = isMailchimpMemberExistsError(mailchimpError);
+        const isPhoneError = isInvalidPhoneNumberError(mailchimpError);
 
         if (isAlreadySubscribed) {
-          // Si el email ya está suscrito, considerarlo como éxito
           await mysqlConnection.promise().query(
             'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
             [user.id]
           );
-
           successCount++;
           console.log(`✓ User ${user.id} (${user.email}) already exists in Mailchimp - marked as success`);
+        } else if (isPhoneError) {
+          // Reintentar sin campos de SMS
+          console.log(`📞 User ${user.id} (${user.email}) has invalid phone for Mailchimp SMS, retrying without SMS fields...`);
+          try {
+            await addSubscriberToMailchimp(mailchimpData, true); // retryWithoutSms = true
+
+            await mysqlConnection.promise().query(
+              'UPDATE user SET mailchimp_error = "N" WHERE id = ?',
+              [user.id]
+            );
+
+            successCount++;
+            console.log(`✓ User ${user.id} (${user.email}) successfully sent to Mailchimp without SMS fields`);
+          } catch (retryError) {
+            // Si el reintento también falla, mantener como error
+            errorCount++;
+            const errorMessage = `User ${user.id} (${user.email}): Failed even without SMS - ${retryError.message}`;
+            errors.push(errorMessage);
+            console.log(`✗ ${errorMessage}`);
+
+            await mysqlConnection.promise().query(
+              'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
+              [user.id]
+            );
+          }
         } else {
           // Si es un error real, mantenerlo como error
           errorCount++;
@@ -620,14 +679,6 @@ router.post('/mailchimp/retry-failed', async (req, res) => {
           errors.push(errorMessage);
           console.log(`✗ ${errorMessage}`);
 
-          // Log adicional para debugging
-          if (mailchimpError.response?.body) {
-            console.log('Mailchimp response body:', JSON.stringify(mailchimpError.response.body));
-          } else if (mailchimpError.response) {
-            console.log('Mailchimp response:', mailchimpError.response);
-          }
-
-          // Mantener el flag de error
           await mysqlConnection.promise().query(
             'UPDATE user SET mailchimp_error = "Y" WHERE id = ?',
             [user.id]
