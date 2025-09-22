@@ -16217,10 +16217,11 @@ router.get('/tags', verifyToken, async (req, res) => {
     try {
       const { lang = 'en', search } = req.query;
 
+      
       // Construir condición de búsqueda si se proporciona el parámetro search
       let searchCondition = '';
       const queryParams = [];
-
+      
       if (search) {
         const searchTerm = `%${search}%`;
         searchCondition = `WHERE (name_en LIKE ? OR name_es LIKE ? OR slug LIKE ?)`;
