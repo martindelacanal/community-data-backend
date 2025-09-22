@@ -14854,6 +14854,174 @@ async function getTagsForArticles(articleIds) {
   return tagsMap;
 }
 
+// Helper function to convert S3 URLs back to placeholders
+function convertS3UrlsToPlaceholders(content) {
+  try {
+    // Regex to match S3 URLs and extract the S3 key (hash)
+    const s3UrlRegex = /https:\/\/community-data-files\.s3\.us-west-1\.amazonaws\.com\/([a-f0-9]+)\?[^"']*/g;
+
+    let processedContent = content;
+    let match;
+
+    while ((match = s3UrlRegex.exec(content)) !== null) {
+      const fullUrl = match[0];
+      const s3Key = match[1];
+      const placeholder = `{{S3_KEY:${s3Key}}}`;
+
+      // Replace the full URL with the placeholder
+      processedContent = processedContent.replace(fullUrl, placeholder);
+    }
+
+    return processedContent;
+  } catch (error) {
+    logger.error('Error converting S3 URLs to placeholders:', error);
+    return content; // Return original content if processing fails
+  }
+}
+
+// ...existing code...
+
+// Helper function to process audience targeting
+async function processAudienceTargeting(articleId, genderIds, ethnicityIds, locationIds, ageRanges) {
+  try {
+    // Insert article genders
+    if (genderIds && Array.isArray(genderIds) && genderIds.length > 0) {
+      const genderValues = genderIds.map(genderId => [articleId, parseInt(genderId)]);
+      await mysqlConnection.promise().query(
+        'INSERT INTO article_gender (article_id, gender_id) VALUES ?',
+        [genderValues]
+      );
+    }
+
+    // Insert article ethnicities
+    if (ethnicityIds && Array.isArray(ethnicityIds) && ethnicityIds.length > 0) {
+      const ethnicityValues = ethnicityIds.map(ethnicityId => [articleId, parseInt(ethnicityId)]);
+      await mysqlConnection.promise().query(
+        'INSERT INTO article_ethnicity (article_id, ethnicity_id) VALUES ?',
+        [ethnicityValues]
+      );
+    }
+
+    // Insert article locations
+    if (locationIds && Array.isArray(locationIds) && locationIds.length > 0) {
+      const locationValues = locationIds.map(locationId => [articleId, parseInt(locationId)]);
+      await mysqlConnection.promise().query(
+        'INSERT INTO article_location (article_id, location_id) VALUES ?',
+        [locationValues]
+      );
+    }
+
+    // Insert article age ranges
+    if (ageRanges && Array.isArray(ageRanges) && ageRanges.length > 0) {
+      const ageRangeValues = ageRanges.map(range => [
+        articleId, 
+        parseInt(range.min), 
+        parseInt(range.max)
+      ]);
+      await mysqlConnection.promise().query(
+        'INSERT INTO article_age_range (article_id, min_age, max_age) VALUES ?',
+        [ageRangeValues]
+      );
+    }
+  } catch (error) {
+    logger.error('Error processing audience targeting:', error);
+    throw error;
+  }
+}
+
+// Helper function to get audience targeting for articles
+async function getAudienceTargetingForArticles(articleIds) {
+  if (!articleIds || articleIds.length === 0) {
+    return {
+      gendersMap: new Map(),
+      ethnicitiesMap: new Map(),
+      locationsMap: new Map(),
+      ageRangesMap: new Map()
+    };
+  }
+
+  const placeholders = articleIds.map(() => '?').join(',');
+
+  // Get genders
+  const [genders] = await mysqlConnection.promise().query(
+    `SELECT ag.article_id, g.id, g.name_en, g.name_es
+     FROM article_gender ag
+     INNER JOIN gender g ON ag.gender_id = g.id
+     WHERE ag.article_id IN (${placeholders})`,
+    articleIds
+  );
+
+  // Get ethnicities
+  const [ethnicities] = await mysqlConnection.promise().query(
+    `SELECT ae.article_id, e.id, e.name_en, e.name_es
+     FROM article_ethnicity ae
+     INNER JOIN ethnicity e ON ae.ethnicity_id = e.id
+     WHERE ae.article_id IN (${placeholders})`,
+    articleIds
+  );
+
+  // Get locations
+  const [locations] = await mysqlConnection.promise().query(
+    `SELECT al.article_id, l.id, l.community_city
+     FROM article_location al
+     INNER JOIN location l ON al.location_id = l.id
+     WHERE al.article_id IN (${placeholders})`,
+    articleIds
+  );
+
+  // Get age ranges
+  const [ageRanges] = await mysqlConnection.promise().query(
+    `SELECT article_id, min_age, max_age
+     FROM article_age_range
+     WHERE article_id IN (${placeholders})`,
+    articleIds
+  );
+
+  // Group by article_id
+  const gendersMap = new Map();
+  const ethnicitiesMap = new Map();
+  const locationsMap = new Map();
+  const ageRangesMap = new Map();
+
+  genders.forEach(gender => {
+    if (!gendersMap.has(gender.article_id)) {
+      gendersMap.set(gender.article_id, []);
+    }
+    gendersMap.get(gender.article_id).push(gender.id);
+  });
+
+  ethnicities.forEach(ethnicity => {
+    if (!ethnicitiesMap.has(ethnicity.article_id)) {
+      ethnicitiesMap.set(ethnicity.article_id, []);
+    }
+    ethnicitiesMap.get(ethnicity.article_id).push(ethnicity.id);
+  });
+
+  locations.forEach(location => {
+    if (!locationsMap.has(location.article_id)) {
+      locationsMap.set(location.article_id, []);
+    }
+    locationsMap.get(location.article_id).push(location.id);
+  });
+
+  ageRanges.forEach(range => {
+    if (!ageRangesMap.has(range.article_id)) {
+      ageRangesMap.set(range.article_id, []);
+    }
+    ageRangesMap.get(range.article_id).push({
+      min: range.min_age,
+      max: range.max_age
+    });
+  });
+
+  return {
+    gendersMap,
+    ethnicitiesMap,
+    locationsMap,
+    ageRangesMap
+  };
+}
+
 // Create article
 router.post('/article', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -14868,7 +15036,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       contentEnglish, contentSpanish, author, author_gender, date,
       categoryIds, filter, article_status_id, priority,
       imageCaptionEnglish, imageCaptionSpanish, priority_filter_id,
-      tags
+      tags, genderIds, ethnicityIds, locationIds, ageRanges
     } = req.body;
 
     // Validate required fields
@@ -14879,7 +15047,6 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     // Validate categoryIds array
     let parsedCategoryIds;
     try {
-      // If categoryIds is a string, try to parse it
       if (typeof categoryIds === 'string') {
         parsedCategoryIds = JSON.parse(categoryIds);
       } else {
@@ -14897,7 +15064,6 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     // Validate filter array
     let parsedFilterIds;
     try {
-      // If filter is a string, try to parse it
       if (typeof filter === 'string') {
         parsedFilterIds = JSON.parse(filter);
       } else {
@@ -14907,7 +15073,6 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       return res.status(400).json('Invalid filter format');
     }
 
-    // Ensure it's an array or empty array if not provided
     const filterIds = parsedFilterIds && Array.isArray(parsedFilterIds) ? parsedFilterIds : [];
 
     // Validate priority_filter_id if provided
@@ -14929,6 +15094,18 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     const tagArray = parsedTags && Array.isArray(parsedTags) ? parsedTags : [];
 
+    // Parse audience targeting fields
+    let parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges;
+    
+    try {
+      parsedGenderIds = typeof genderIds === 'string' ? JSON.parse(genderIds) : genderIds;
+      parsedEthnicityIds = typeof ethnicityIds === 'string' ? JSON.parse(ethnicityIds) : ethnicityIds;
+      parsedLocationIds = typeof locationIds === 'string' ? JSON.parse(locationIds) : locationIds;
+      parsedAgeRanges = typeof ageRanges === 'string' ? JSON.parse(ageRanges) : ageRanges;
+    } catch (error) {
+      return res.status(400).json('Invalid audience targeting format');
+    }
+
     // Generate slugs
     const slugEn = generateSlug(titleEnglish);
     const slugEs = generateSlug(titleSpanish);
@@ -14938,6 +15115,9 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     // Manage priority (ensure uniqueness and shift if necessary)
     const managedPriority = await managePriority(priority);
+
+    // Process tags (create new ones if needed)
+    const processedTagIds = await processArticleTags(tagArray);
 
     // Start transaction for atomic operations
     const connection = await mysqlConnection.promise().getConnection();
@@ -14989,6 +15169,9 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
           [tagValues]
         );
       }
+
+      // Insert audience targeting
+      await processAudienceTargeting(articleId, parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges);
 
       await connection.commit();
 
@@ -15061,7 +15244,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
         }
       }
 
-      // Get category, filter, and tag information for response
+      // Get category, filter, tag, and audience information for response
       const [categories] = await mysqlConnection.promise().query(
         `SELECT c.id, c.name_en, c.name_es 
          FROM category c 
@@ -15081,6 +15264,9 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       // Get tags for response
       const tagsMap = await getTagsForArticles([articleId]);
       const articleTags = tagsMap.get(articleId) || [];
+
+      // Get audience targeting for response
+      const audienceData = await getAudienceTargetingForArticles([articleId]);
 
       // Get priority_filter_id from filters
       const priorityFilter = filters.find(f => f.priority === 'Y');
@@ -15115,6 +15301,10 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
           nameSpanish: filt.name_es
         })),
         tags: articleTags,
+        genderIds: audienceData.gendersMap.get(articleId) || [],
+        ethnicityIds: audienceData.ethnicitiesMap.get(articleId) || [],
+        locationIds: audienceData.locationsMap.get(articleId) || [],
+        ageRanges: audienceData.ageRangesMap.get(articleId) || [],
         priority_filter_id: priorityFilterId,
         priority: managedPriority,
         article_status_id: parseInt(article_status_id) || 1,
@@ -15212,11 +15402,12 @@ router.get('/article', async (req, res) => {
 
     const [articles] = await mysqlConnection.promise().query(query, [parseInt(limit), offset]);
 
-    // Get categories, filters, and tags for all articles in single queries
+    // Get categories, filters, tags, and audience data for all articles in single queries
     const articleIds = articles.map(article => article.id);
     let categoriesMap = new Map();
     let filtersMap = new Map();
     let tagsMap = new Map();
+    let audienceData = { gendersMap: new Map(), ethnicitiesMap: new Map(), locationsMap: new Map(), ageRangesMap: new Map() };
 
     if (articleIds.length > 0) {
       // Get all categories for these articles
@@ -15271,6 +15462,9 @@ router.get('/article', async (req, res) => {
 
       // Get tags for all articles
       tagsMap = await getTagsForArticles(articleIds);
+
+      // Get audience targeting for all articles
+      audienceData = await getAudienceTargetingForArticles(articleIds);
     }
 
     // Collect all S3 keys for batch processing
@@ -15319,7 +15513,11 @@ router.get('/article', async (req, res) => {
         categoryIds: articleCategories.map(cat => cat.id),
         filters: articleFilters,
         filterIds: articleFilters.map(filter => filter.id),
-        tags: articleTags, // Add tags to response
+        tags: articleTags,
+        genderIds: audienceData.gendersMap.get(article.id) || [],
+        ethnicityIds: audienceData.ethnicitiesMap.get(article.id) || [],
+        locationIds: audienceData.locationsMap.get(article.id) || [],
+        ageRanges: audienceData.ageRangesMap.get(article.id) || [],
         priority: article.priority,
         article_status_id: article.article_status_id,
         statusNameEnglish: article.statusNameEnglish,
@@ -15441,6 +15639,9 @@ router.get('/article/:id', async (req, res) => {
     const tagsMap = await getTagsForArticles([article.id]);
     const articleTags = tagsMap.get(article.id) || [];
 
+    // Get audience targeting for response
+    const audienceData = await getAudienceTargetingForArticles([article.id]);
+
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterId = priorityFilter ? priorityFilter.id : null;
@@ -15505,6 +15706,10 @@ router.get('/article/:id', async (req, res) => {
         nameSpanish: filter.nameSpanish
       })),
       tags: articleTags,
+      genderIds: audienceData.gendersMap.get(article.id) || [],
+      ethnicityIds: audienceData.ethnicitiesMap.get(article.id) || [],
+      locationIds: audienceData.locationsMap.get(article.id) || [],
+      ageRanges: audienceData.ageRangesMap.get(article.id) || [],
       filterIds: filters.map(filter => filter.id),
       priority_filter_id: priorityFilterId,
       priority: article.priority,
@@ -15608,6 +15813,9 @@ router.get('/article/slug/:slug', async (req, res) => {
     const tagsMap = await getTagsForArticles([article.id]);
     const articleTags = tagsMap.get(article.id) || [];
 
+    // Get audience targeting for response
+    const audienceData = await getAudienceTargetingForArticles([article.id]);
+
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterId = priorityFilter ? priorityFilter.id : null;
@@ -15672,6 +15880,10 @@ router.get('/article/slug/:slug', async (req, res) => {
         nameSpanish: filter.nameSpanish
       })),
       tags: articleTags,
+      genderIds: audienceData.gendersMap.get(article.id) || [],
+      ethnicityIds: audienceData.ethnicitiesMap.get(article.id) || [],
+      locationIds: audienceData.locationsMap.get(article.id) || [],
+      ageRanges: audienceData.ageRangesMap.get(article.id) || [],
       filterIds: filters.map(filter => filter.id),
       priority_filter_id: priorityFilterId,
       priority: article.priority,
@@ -15704,31 +15916,6 @@ router.get('/article/slug/:slug', async (req, res) => {
   }
 });
 
-// Helper function to convert S3 URLs back to placeholders
-function convertS3UrlsToPlaceholders(content) {
-  try {
-    // Regex to match S3 URLs and extract the S3 key (hash)
-    const s3UrlRegex = /https:\/\/community-data-files\.s3\.us-west-1\.amazonaws\.com\/([a-f0-9]+)\?[^"']*/g;
-
-    let processedContent = content;
-    let match;
-
-    while ((match = s3UrlRegex.exec(content)) !== null) {
-      const fullUrl = match[0];
-      const s3Key = match[1];
-      const placeholder = `{{S3_KEY:${s3Key}}}`;
-
-      // Replace the full URL with the placeholder
-      processedContent = processedContent.replace(fullUrl, placeholder);
-    }
-
-    return processedContent;
-  } catch (error) {
-    logger.error('Error converting S3 URLs to placeholders:', error);
-    return content; // Return original content if processing fails
-  }
-}
-
 // Update article
 router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -15744,7 +15931,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       contentEnglish, contentSpanish, author, author_gender, date,
       categoryIds, filter, article_status_id, priority,
       imageCaptionEnglish, imageCaptionSpanish, priority_filter_id,
-      tags // Add tags parameter
+      tags, genderIds, ethnicityIds, locationIds, ageRanges
     } = req.body;
 
     // Check if article exists
@@ -15805,6 +15992,18 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     const tagArray = parsedTags && Array.isArray(parsedTags) ? parsedTags : [];
 
+    // Parse audience targeting fields
+    let parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges;
+    
+    try {
+      parsedGenderIds = typeof genderIds === 'string' ? JSON.parse(genderIds) : genderIds;
+      parsedEthnicityIds = typeof ethnicityIds === 'string' ? JSON.parse(ethnicityIds) : ethnicityIds;
+      parsedLocationIds = typeof locationIds === 'string' ? JSON.parse(locationIds) : locationIds;
+      parsedAgeRanges = typeof ageRanges === 'string' ? JSON.parse(ageRanges) : ageRanges;
+    } catch (error) {
+      return res.status(400).json('Invalid audience targeting format');
+    }
+
     // Generate new slugs if titles changed
     const slugEn = generateSlug(titleEnglish);
     const slugEs = generateSlug(titleSpanish);
@@ -15858,10 +16057,14 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         ]
       );
 
-      // Delete existing categories, filters, and tags
+      // Delete existing categories, filters, tags, and audience targeting
       await connection.query('DELETE FROM article_category WHERE article_id = ?', [id]);
       await connection.query('DELETE FROM article_filter WHERE article_id = ?', [id]);
       await connection.query('DELETE FROM article_tags WHERE article_id = ?', [id]);
+      await connection.query('DELETE FROM article_gender WHERE article_id = ?', [id]);
+      await connection.query('DELETE FROM article_ethnicity WHERE article_id = ?', [id]);
+      await connection.query('DELETE FROM article_location WHERE article_id = ?', [id]);
+      await connection.query('DELETE FROM article_age_range WHERE article_id = ?', [id]);
 
       // Insert new categories
       if (parsedCategoryIds.length > 0) {
@@ -15893,6 +16096,9 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         );
       }
 
+      // Insert new audience targeting
+      await processAudienceTargeting(id, parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges);
+
       await connection.commit();
 
     } catch (transactionError) {
@@ -15902,7 +16108,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       connection.release();
     }
 
-    // ...existing code for preview images...
+    // Handle preview images...
     let imageEnglishUrl = null;
     let imageSpanishUrl = null;
 
@@ -15972,7 +16178,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       }
     }
 
-    // Get updated category, filter, and tag information for response
+    // Get updated category, filter, tag, and audience information for response
     const [categories] = await mysqlConnection.promise().query(
       `SELECT c.id, c.name_en, c.name_es 
        FROM category c 
@@ -15992,6 +16198,9 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     // Get tags for response
     const tagsMap = await getTagsForArticles([id]);
     const articleTags = tagsMap.get(parseInt(id)) || [];
+
+    // Get audience targeting for response
+    const audienceData = await getAudienceTargetingForArticles([parseInt(id)]);
 
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
@@ -16024,7 +16233,11 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         nameEnglish: filt.name_en,
         nameSpanish: filt.name_es
       })),
-      tags: articleTags, // Add tags to response
+      tags: articleTags,
+      genderIds: audienceData.gendersMap.get(parseInt(id)) || [],
+      ethnicityIds: audienceData.ethnicitiesMap.get(parseInt(id)) || [],
+      locationIds: audienceData.locationsMap.get(parseInt(id)) || [],
+      ageRanges: audienceData.ageRangesMap.get(parseInt(id)) || [],
       priority_filter_id: priorityFilterIdResponse,
       priority: managedPriority,
       article_status_id: parseInt(article_status_id) || 1,
