@@ -12899,6 +12899,11 @@ router.post('/table/article', verifyToken, async (req, res) => {
     const statuses = filters.statuses || [];
     const priorities = filters.priorities || [];
     const author_genders = filters.author_genders || [];
+    const locations = filters.locations || [];
+    const genders = filters.genders || [];
+    const ethnicities = filters.ethnicities || [];
+    const min_age = filters.min_age || null;
+    const max_age = filters.max_age || null;
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -12931,6 +12936,53 @@ router.post('/table/article', verifyToken, async (req, res) => {
     if (author_genders.length > 0) {
       const genderPlaceholders = author_genders.map(g => `'${g}'`).join(',');
       query_author_genders = 'AND a.author_gender IN (' + genderPlaceholders + ')';
+    }
+
+    // Nuevos filtros de targeting
+    var query_locations = '';
+    if (locations.length > 0) {
+      query_locations = 'AND EXISTS (SELECT 1 FROM article_location al WHERE al.article_id = a.id AND al.location_id IN (' + locations.join(',') + '))';
+    }
+
+    var query_genders = '';
+    if (genders.length > 0) {
+      query_genders = 'AND EXISTS (SELECT 1 FROM article_gender ag WHERE ag.article_id = a.id AND ag.gender_id IN (' + genders.join(',') + '))';
+    }
+
+    var query_ethnicities = '';
+    if (ethnicities.length > 0) {
+      query_ethnicities = 'AND EXISTS (SELECT 1 FROM article_ethnicity ae WHERE ae.article_id = a.id AND ae.ethnicity_id IN (' + ethnicities.join(',') + '))';
+    }
+
+    var query_age_range = '';
+    if (min_age !== null || max_age !== null) {
+      if (min_age !== null && max_age !== null) {
+        // Si se proporcionan ambos valores, buscar artículos donde el rango de edad se superponga
+        query_age_range = `AND EXISTS (
+          SELECT 1 FROM article_age_range aar 
+          WHERE aar.article_id = a.id 
+          AND (
+            (aar.min_age <= ${max_age} AND aar.max_age >= ${min_age})
+            OR (aar.min_age IS NULL AND aar.max_age >= ${min_age})
+            OR (aar.max_age IS NULL AND aar.min_age <= ${max_age})
+            OR (aar.min_age IS NULL AND aar.max_age IS NULL)
+          )
+        )`;
+      } else if (min_age !== null) {
+        // Solo edad mínima: buscar artículos donde el rango incluya o sea mayor a min_age
+        query_age_range = `AND EXISTS (
+          SELECT 1 FROM article_age_range aar 
+          WHERE aar.article_id = a.id 
+          AND (aar.max_age >= ${min_age} OR aar.max_age IS NULL)
+        )`;
+      } else if (max_age !== null) {
+        // Solo edad máxima: buscar artículos donde el rango incluya o sea menor a max_age
+        query_age_range = `AND EXISTS (
+          SELECT 1 FROM article_age_range aar 
+          WHERE aar.article_id = a.id 
+          AND (aar.min_age <= ${max_age} OR aar.min_age IS NULL)
+        )`;
+      }
     }
 
     let buscar = req.query.search;
@@ -12970,6 +13022,10 @@ router.post('/table/article', verifyToken, async (req, res) => {
         ${query_statuses}
         ${query_priorities}
         ${query_author_genders}
+        ${query_locations}
+        ${query_genders}
+        ${query_ethnicities}
+        ${query_age_range}
         ${havingClause}
         ORDER BY ${queryOrderBy}
         LIMIT ?, ?`
@@ -12998,6 +13054,10 @@ router.post('/table/article', verifyToken, async (req, res) => {
           ${query_statuses}
           ${query_priorities}
           ${query_author_genders}
+          ${query_locations}
+          ${query_genders}
+          ${query_ethnicities}
+          ${query_age_range}
           ${havingClause}
         ) as subquery
       `);
@@ -14944,7 +15004,7 @@ async function getAudienceTargetingForArticles(articleIds) {
 
   // Get genders
   const [genders] = await mysqlConnection.promise().query(
-    `SELECT ag.article_id, g.id, g.name_en, g.name_es
+    `SELECT ag.article_id, g.id, g.name as name_en, g.name_es
      FROM article_gender ag
      INNER JOIN gender g ON ag.gender_id = g.id
      WHERE ag.article_id IN (${placeholders})`,
@@ -14953,7 +15013,7 @@ async function getAudienceTargetingForArticles(articleIds) {
 
   // Get ethnicities
   const [ethnicities] = await mysqlConnection.promise().query(
-    `SELECT ae.article_id, e.id, e.name_en, e.name_es
+    `SELECT ae.article_id, e.id, e.name as name_en, e.name_es
      FROM article_ethnicity ae
      INNER JOIN ethnicity e ON ae.ethnicity_id = e.id
      WHERE ae.article_id IN (${placeholders})`,
