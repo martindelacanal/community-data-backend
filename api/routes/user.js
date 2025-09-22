@@ -16217,11 +16217,10 @@ router.get('/tags', verifyToken, async (req, res) => {
     try {
       const { lang = 'en', search } = req.query;
 
-      
       // Construir condición de búsqueda si se proporciona el parámetro search
       let searchCondition = '';
       const queryParams = [];
-      
+
       if (search) {
         const searchTerm = `%${search}%`;
         searchCondition = `WHERE (name_en LIKE ? OR name_es LIKE ? OR slug LIKE ?)`;
@@ -16244,6 +16243,7 @@ router.get('/tags', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(query, queryParams);
 
       if (rows.length > 0) {
+        console.log(rows)
         res.status(200).json(rows);
       } else {
         res.status(200).json([]); // Devolver array vacío en lugar de 404 para mejor UX
