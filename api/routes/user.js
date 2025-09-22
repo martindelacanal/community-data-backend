@@ -14596,7 +14596,7 @@ async function replaceS3KeysWithSignedUrls(content) {
 }
 
 // Helper function to manage article priorities (1-8, unique values)
-async function managePriority(newPriority, excludeArticleId = null) {
+async function managePriority(newPriority, excludeArticleId = null, connection = null) {
   try {
     // If no priority is set, return null
     if (!newPriority || newPriority < 1 || newPriority > 8) {
@@ -14608,7 +14608,7 @@ async function managePriority(newPriority, excludeArticleId = null) {
     // Get the current priority of the article being updated (if any)
     let currentPriority = null;
     if (excludeArticleId) {
-      const [currentArticle] = await mysqlConnection.promise().query(
+      const [currentArticle] = await (connection || mysqlConnection.promise()).query(
         'SELECT priority FROM article WHERE id = ?',
         [excludeArticleId]
       );
@@ -14626,62 +14626,49 @@ async function managePriority(newPriority, excludeArticleId = null) {
       existingParams.push(excludeArticleId);
     }
 
-    const [existingArticle] = await mysqlConnection.promise().query(existingQuery, existingParams);
+    const [existingArticle] = await (connection || mysqlConnection.promise()).query(existingQuery, existingParams);
 
     // If priority doesn't exist, we can use it directly
     if (existingArticle.length === 0) {
       return priority;
     }
 
-    // Start a transaction for atomic priority updates
-    const connection = await mysqlConnection.promise().getConnection();
-    await connection.beginTransaction();
+    // Use the provided connection instead of creating a new transaction
+    const queryConnection = connection || mysqlConnection.promise();
 
-    try {
-      // Case 1: Creating new article or article without previous priority
-      if (!excludeArticleId || currentPriority === null) {
+    // Case 1: Creating new article or article without previous priority
+    if (!excludeArticleId || currentPriority === null) {
+      // Get all articles with priority >= newPriority and shift them down
+      const [articlesToShift] = await queryConnection.query(
+        'SELECT id, priority FROM article WHERE priority >= ? AND priority IS NOT NULL ORDER BY priority DESC',
+        [priority]
+      );
 
-        // Get all articles with priority >= newPriority and shift them down
-        const [articlesToShift] = await connection.query(
-          'SELECT id, priority FROM article WHERE priority >= ? AND priority IS NOT NULL ORDER BY priority DESC',
-          [priority]
+      for (const article of articlesToShift) {
+        await queryConnection.query(
+          'UPDATE article SET priority = ? WHERE id = ?',
+          [article.priority + 1, article.id]
         );
-
-        for (const article of articlesToShift) {
-          await connection.query(
-            'UPDATE article SET priority = ? WHERE id = ?',
-            [article.priority + 1, article.id]
-          );
-        }
       }
-      // Case 2: Article is moving from one priority to another
-      else {
-
-        if (currentPriority < priority) {
-          // Moving down: shift articles between currentPriority+1 and newPriority up
-          await connection.query(
-            'UPDATE article SET priority = priority - 1 WHERE priority > ? AND priority <= ? AND id != ?',
-            [currentPriority, priority, excludeArticleId]
-          );
-        } else if (currentPriority > priority) {
-          // Moving up: shift articles between newPriority and currentPriority-1 down
-          await connection.query(
-            'UPDATE article SET priority = priority + 1 WHERE priority >= ? AND priority < ? AND id != ?',
-            [priority, currentPriority, excludeArticleId]
-          );
-        }
-        // If currentPriority === priority, no shifts needed (shouldn't happen due to earlier check)
-      }
-
-      await connection.commit();
-      connection.release();
-      return priority;
-
-    } catch (shiftError) {
-      await connection.rollback();
-      connection.release();
-      throw shiftError;
     }
+    // Case 2: Article is moving from one priority to another
+    else {
+      if (currentPriority < priority) {
+        // Moving down: shift articles between currentPriority+1 and newPriority up
+        await queryConnection.query(
+          'UPDATE article SET priority = priority - 1 WHERE priority > ? AND priority <= ? AND id != ?',
+          [currentPriority, priority, excludeArticleId]
+        );
+      } else if (currentPriority > priority) {
+        // Moving up: shift articles between newPriority and currentPriority-1 down
+        await queryConnection.query(
+          'UPDATE article SET priority = priority + 1 WHERE priority >= ? AND priority < ? AND id != ?',
+          [priority, currentPriority, excludeArticleId]
+        );
+      }
+    }
+
+    return priority;
 
   } catch (error) {
     logger.error('Error managing article priority:', error);
@@ -14939,47 +14926,47 @@ function convertS3UrlsToPlaceholders(content) {
   }
 }
 
-// ...existing code...
-
 // Helper function to process audience targeting
-async function processAudienceTargeting(articleId, genderIds, ethnicityIds, locationIds, ageRanges) {
+async function processAudienceTargeting(articleId, genderIds, ethnicityIds, locationIds, ageRanges, connection = null) {
   try {
-    // Insert article genders
+    const queryConnection = connection || mysqlConnection.promise();
+
+    // Insert article genders usando REPLACE para evitar conflictos
     if (genderIds && Array.isArray(genderIds) && genderIds.length > 0) {
       const genderValues = genderIds.map(genderId => [articleId, parseInt(genderId)]);
-      await mysqlConnection.promise().query(
-        'INSERT INTO article_gender (article_id, gender_id) VALUES ?',
+      await queryConnection.query(
+        'REPLACE INTO article_gender (article_id, gender_id) VALUES ?',
         [genderValues]
       );
     }
 
-    // Insert article ethnicities
+    // Insert article ethnicities usando REPLACE
     if (ethnicityIds && Array.isArray(ethnicityIds) && ethnicityIds.length > 0) {
       const ethnicityValues = ethnicityIds.map(ethnicityId => [articleId, parseInt(ethnicityId)]);
-      await mysqlConnection.promise().query(
-        'INSERT INTO article_ethnicity (article_id, ethnicity_id) VALUES ?',
+      await queryConnection.query(
+        'REPLACE INTO article_ethnicity (article_id, ethnicity_id) VALUES ?',
         [ethnicityValues]
       );
     }
 
-    // Insert article locations
+    // Insert article locations usando REPLACE
     if (locationIds && Array.isArray(locationIds) && locationIds.length > 0) {
       const locationValues = locationIds.map(locationId => [articleId, parseInt(locationId)]);
-      await mysqlConnection.promise().query(
-        'INSERT INTO article_location (article_id, location_id) VALUES ?',
+      await queryConnection.query(
+        'REPLACE INTO article_location (article_id, location_id) VALUES ?',
         [locationValues]
       );
     }
 
-    // Insert article age ranges
+    // Insert article age ranges usando REPLACE
     if (ageRanges && Array.isArray(ageRanges) && ageRanges.length > 0) {
       const ageRangeValues = ageRanges.map(range => [
-        articleId, 
-        parseInt(range.min), 
+        articleId,
+        parseInt(range.min),
         parseInt(range.max)
       ]);
-      await mysqlConnection.promise().query(
-        'INSERT INTO article_age_range (article_id, min_age, max_age) VALUES ?',
+      await queryConnection.query(
+        'REPLACE INTO article_age_range (article_id, min_age, max_age) VALUES ?',
         [ageRangeValues]
       );
     }
@@ -15156,7 +15143,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     // Parse audience targeting fields
     let parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges;
-    
+
     try {
       parsedGenderIds = typeof genderIds === 'string' ? JSON.parse(genderIds) : genderIds;
       parsedEthnicityIds = typeof ethnicityIds === 'string' ? JSON.parse(ethnicityIds) : ethnicityIds;
@@ -15984,6 +15971,9 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     return res.status(401).json('Unauthorized');
   }
 
+  // Start a single transaction at the beginning
+  const connection = await mysqlConnection.promise().getConnection();
+
   try {
     const { id } = req.params;
     const {
@@ -15994,13 +15984,16 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       tags, genderIds, ethnicityIds, locationIds, ageRanges
     } = req.body;
 
+    await connection.beginTransaction();
+
     // Check if article exists
-    const [existingArticle] = await mysqlConnection.promise().query(
+    const [existingArticle] = await connection.query(
       'SELECT id FROM article WHERE id = ?',
       [id]
     );
 
     if (existingArticle.length === 0) {
+      await connection.rollback();
       return res.status(404).json('Article not found');
     }
 
@@ -16013,10 +16006,12 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         parsedCategoryIds = categoryIds;
       }
     } catch (error) {
+      await connection.rollback();
       return res.status(400).json('Invalid categoryIds format');
     }
 
     if (!parsedCategoryIds || !Array.isArray(parsedCategoryIds) || parsedCategoryIds.length === 0) {
+      await connection.rollback();
       return res.status(400).json('At least one category is required');
     }
 
@@ -16028,6 +16023,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         parsedFilterIds = filter;
       }
     } catch (error) {
+      await connection.rollback();
       return res.status(400).json('Invalid filter format');
     }
 
@@ -16035,6 +16031,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     // Validate priority_filter_id if provided
     if (priority_filter_id && !filterIds.includes(parseInt(priority_filter_id))) {
+      await connection.rollback();
       return res.status(400).json('priority_filter_id must be included in the filter array');
     }
 
@@ -16047,6 +16044,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         parsedTags = tags;
       }
     } catch (error) {
+      await connection.rollback();
       return res.status(400).json('Invalid tags format');
     }
 
@@ -16054,13 +16052,14 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     // Parse audience targeting fields
     let parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges;
-    
+
     try {
       parsedGenderIds = typeof genderIds === 'string' ? JSON.parse(genderIds) : genderIds;
       parsedEthnicityIds = typeof ethnicityIds === 'string' ? JSON.parse(ethnicityIds) : ethnicityIds;
       parsedLocationIds = typeof locationIds === 'string' ? JSON.parse(locationIds) : locationIds;
       parsedAgeRanges = typeof ageRanges === 'string' ? JSON.parse(ageRanges) : ageRanges;
     } catch (error) {
+      await connection.rollback();
       return res.status(400).json('Invalid audience targeting format');
     }
 
@@ -16071,8 +16070,8 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     // Format publication date
     const publicationDate = new Date(date).toISOString().slice(0, 19).replace('T', ' ');
 
-    // Manage priority (ensure uniqueness and shift if necessary, excluding current article)
-    const managedPriority = await managePriority(priority, id);
+    // Manage priority using the same connection
+    const managedPriority = await managePriority(priority, id, connection);
 
     // Process tags (create new ones if needed)
     const processedTagIds = await processArticleTags(tagArray);
@@ -16097,76 +16096,66 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       // Continue with article update even if image processing fails
     }
 
-    // Start transaction for atomic operations
-    const connection = await mysqlConnection.promise().getConnection();
-    await connection.beginTransaction();
+    // DELETE operations first (in specific order to avoid FK constraint issues)
+    await connection.query('DELETE FROM article_age_range WHERE article_id = ?', [id]);
+    await connection.query('DELETE FROM article_location WHERE article_id = ?', [id]);
+    await connection.query('DELETE FROM article_ethnicity WHERE article_id = ?', [id]);
+    await connection.query('DELETE FROM article_gender WHERE article_id = ?', [id]);
+    await connection.query('DELETE FROM article_tags WHERE article_id = ?', [id]);
+    await connection.query('DELETE FROM article_filter WHERE article_id = ?', [id]);
+    await connection.query('DELETE FROM article_category WHERE article_id = ?', [id]);
 
-    try {
-      // Update article with processed content
+    // Update main article record
+    await connection.query(
+      `UPDATE article SET 
+        title_en = ?, title_es = ?, subtitle_en = ?, subtitle_es = ?,
+        content_en = ?, content_es = ?, author = ?, author_gender = ?, publication_date = ?,
+        priority = ?, article_status_id = ?,
+        slug_en = ?, slug_es = ?, modification_date = CURRENT_TIMESTAMP
+      WHERE id = ?`,
+      [
+        titleEnglish, titleSpanish, subtitleEnglish || null, subtitleSpanish || null,
+        processedContentEnglish, processedContentSpanish, author, author_gender, publicationDate,
+        managedPriority, article_status_id || 1, slugEn, slugEs, id
+      ]
+    );
+
+    // INSERT operations (in specific order)
+    // Insert new categories
+    if (parsedCategoryIds.length > 0) {
+      const categoryValues = parsedCategoryIds.map(categoryId => [id, parseInt(categoryId)]);
       await connection.query(
-        `UPDATE article SET 
-          title_en = ?, title_es = ?, subtitle_en = ?, subtitle_es = ?,
-          content_en = ?, content_es = ?, author = ?, author_gender = ?, publication_date = ?,
-          priority = ?, article_status_id = ?,
-          slug_en = ?, slug_es = ?, modification_date = CURRENT_TIMESTAMP
-        WHERE id = ?`,
-        [
-          titleEnglish, titleSpanish, subtitleEnglish || null, subtitleSpanish || null,
-          processedContentEnglish, processedContentSpanish, author, author_gender, publicationDate,
-          managedPriority, article_status_id || 1, slugEn, slugEs, id
-        ]
+        'INSERT INTO article_category (article_id, category_id) VALUES ?',
+        [categoryValues]
       );
-
-      // Delete existing categories, filters, tags, and audience targeting
-      await connection.query('DELETE FROM article_category WHERE article_id = ?', [id]);
-      await connection.query('DELETE FROM article_filter WHERE article_id = ?', [id]);
-      await connection.query('DELETE FROM article_tags WHERE article_id = ?', [id]);
-      await connection.query('DELETE FROM article_gender WHERE article_id = ?', [id]);
-      await connection.query('DELETE FROM article_ethnicity WHERE article_id = ?', [id]);
-      await connection.query('DELETE FROM article_location WHERE article_id = ?', [id]);
-      await connection.query('DELETE FROM article_age_range WHERE article_id = ?', [id]);
-
-      // Insert new categories
-      if (parsedCategoryIds.length > 0) {
-        const categoryValues = parsedCategoryIds.map(categoryId => [id, parseInt(categoryId)]);
-        await connection.query(
-          'INSERT INTO article_category (article_id, category_id) VALUES ?',
-          [categoryValues]
-        );
-      }
-
-      // Insert new filters if provided
-      if (filterIds.length > 0) {
-        const filterValues = filterIds.map(filterId => {
-          const isPriorityFilter = priority_filter_id && parseInt(filterId) === parseInt(priority_filter_id);
-          return [id, parseInt(filterId), isPriorityFilter ? 'Y' : 'N'];
-        });
-        await connection.query(
-          'INSERT INTO article_filter (article_id, filter_id, priority) VALUES ?',
-          [filterValues]
-        );
-      }
-
-      // Insert new tags if provided
-      if (processedTagIds.length > 0) {
-        const tagValues = processedTagIds.map(tagId => [id, tagId]);
-        await connection.query(
-          'INSERT INTO article_tags (article_id, tag_id) VALUES ?',
-          [tagValues]
-        );
-      }
-
-      // Insert new audience targeting
-      await processAudienceTargeting(id, parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges);
-
-      await connection.commit();
-
-    } catch (transactionError) {
-      await connection.rollback();
-      throw transactionError;
-    } finally {
-      connection.release();
     }
+
+    // Insert new filters if provided
+    if (filterIds.length > 0) {
+      const filterValues = filterIds.map(filterId => {
+        const isPriorityFilter = priority_filter_id && parseInt(filterId) === parseInt(priority_filter_id);
+        return [id, parseInt(filterId), isPriorityFilter ? 'Y' : 'N'];
+      });
+      await connection.query(
+        'INSERT INTO article_filter (article_id, filter_id, priority) VALUES ?',
+        [filterValues]
+      );
+    }
+
+    // Insert new tags if provided
+    if (processedTagIds.length > 0) {
+      const tagValues = processedTagIds.map(tagId => [id, tagId]);
+      await connection.query(
+        'INSERT INTO article_tags (article_id, tag_id) VALUES ?',
+        [tagValues]
+      );
+    }
+
+    // Insert new audience targeting using the connection
+    await processAudienceTargeting(id, parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges, connection);
+
+    // Commit the transaction
+    await connection.commit();
 
     // Handle preview images...
     let imageEnglishUrl = null;
@@ -16311,9 +16300,12 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     res.json(response);
 
   } catch (error) {
+    await connection.rollback();
     console.error('Error updating article:', error);
     logger.error('Error updating article:', error);
     res.status(500).json('Internal server error');
+  } finally {
+    connection.release();
   }
 });
 
