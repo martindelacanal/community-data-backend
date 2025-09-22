@@ -16243,7 +16243,6 @@ router.get('/tags', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(query, queryParams);
 
       if (rows.length > 0) {
-        console.log(rows)
         res.status(200).json(rows);
       } else {
         res.status(200).json([]); // Devolver array vacío en lugar de 404 para mejor UX
