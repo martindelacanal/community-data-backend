@@ -15160,17 +15160,17 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     // Format publication date
     const publicationDate = new Date(date).toISOString().slice(0, 19).replace('T', ' ');
 
-    // Manage priority (ensure uniqueness and shift if necessary)
-    const managedPriority = await managePriority(priority);
-
-    // Process tags (create new ones if needed)
-    const processedTagIds = await processArticleTags(tagArray);
-
     // Start transaction for atomic operations
     const connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
 
     try {
+      // Manage priority (ensure uniqueness and shift if necessary) - DENTRO de la transacción
+      const managedPriority = await managePriority(priority, null, connection);
+
+      // Process tags (create new ones if needed)
+      const processedTagIds = await processArticleTags(tagArray);
+
       // Insert article first to get ID
       const [articleResult] = await connection.query(
         `INSERT INTO article (
@@ -15217,12 +15217,12 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
         );
       }
 
-      // Insert audience targeting
-      await processAudienceTargeting(articleId, parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges);
+      // Insert audience targeting - PASAR la conexión
+      await processAudienceTargeting(articleId, parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges, connection);
 
       await connection.commit();
 
-      // Process content images (convert base64 to S3 URLs)
+      // Process content images (convert base64 to S3 URLs) - DESPUÉS del commit
       let processedContentEnglish = contentEnglish;
       let processedContentSpanish = contentSpanish;
 
@@ -15242,9 +15242,10 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
         // Continue with article creation even if image processing fails
       }
 
+      // Upload preview images if provided
       let imageEnglishUrl = null;
       let imageSpanishUrl = null;
-      // Upload preview images if provided
+
       if (req.files?.imageEnglish) {
         try {
           // Delete existing English preview image if any
