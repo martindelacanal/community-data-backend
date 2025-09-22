@@ -14725,6 +14725,135 @@ function cleanExpiredCache() {
   }
 }
 
+// Helper function to generate slug from tag name
+function generateTagSlug(name) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+    .replace(/\s+/g, '-') // Replace spaces with hyphens
+    .replace(/-+/g, '-') // Replace multiple hyphens with single
+    .trim()
+    .substring(0, 100); // Limit length
+}
+
+// Helper function to create or get existing tags
+async function processArticleTags(tags) {
+  if (!tags || !Array.isArray(tags) || tags.length === 0) {
+    return [];
+  }
+
+  const processedTags = [];
+
+  for (const tag of tags) {
+    try {
+      let tagId;
+
+      if (tag.id) {
+        // Tag already exists, verify it exists in database
+        const [existingTag] = await mysqlConnection.promise().query(
+          'SELECT id FROM tags WHERE id = ?',
+          [tag.id]
+        );
+
+        if (existingTag.length > 0) {
+          tagId = tag.id;
+        } else {
+          // Tag ID provided but doesn't exist, create new one
+          tagId = await createNewTag(tag.nameEnglish, tag.nameSpanish);
+        }
+      } else {
+        // Check if tag with same names already exists
+        const [existingTag] = await mysqlConnection.promise().query(
+          'SELECT id FROM tags WHERE name_en = ? AND name_es = ?',
+          [tag.nameEnglish, tag.nameSpanish]
+        );
+
+        if (existingTag.length > 0) {
+          tagId = existingTag[0].id;
+        } else {
+          // Create new tag
+          tagId = await createNewTag(tag.nameEnglish, tag.nameSpanish);
+        }
+      }
+
+      processedTags.push(tagId);
+    } catch (tagError) {
+      logger.error(`Error processing tag: ${JSON.stringify(tag)}`, tagError);
+      // Continue with other tags even if one fails
+    }
+  }
+
+  return processedTags;
+}
+
+// Helper function to create a new tag
+async function createNewTag(nameEnglish, nameSpanish) {
+  const slug = generateTagSlug(nameEnglish);
+
+  // Ensure slug is unique
+  let finalSlug = slug;
+  let counter = 1;
+
+  while (true) {
+    const [existingSlug] = await mysqlConnection.promise().query(
+      'SELECT id FROM tags WHERE slug = ?',
+      [finalSlug]
+    );
+
+    if (existingSlug.length === 0) {
+      break;
+    }
+
+    finalSlug = `${slug}-${counter}`;
+    counter++;
+  }
+
+  const [result] = await mysqlConnection.promise().query(
+    'INSERT INTO tags (name_en, name_es, slug) VALUES (?, ?, ?)',
+    [nameEnglish, nameSpanish, finalSlug]
+  );
+
+  return result.insertId;
+}
+
+// Helper function to get tags for articles
+async function getTagsForArticles(articleIds) {
+  if (!articleIds || articleIds.length === 0) {
+    return new Map();
+  }
+
+  const [tags] = await mysqlConnection.promise().query(
+    `SELECT 
+      at.article_id,
+      t.id,
+      t.name_en as nameEnglish,
+      t.name_es as nameSpanish,
+      t.slug,
+      DATE_FORMAT(CONVERT_TZ(t.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creationDate
+    FROM article_tags at
+    INNER JOIN tags t ON at.tag_id = t.id
+    WHERE at.article_id IN (${articleIds.map(() => '?').join(',')})
+    ORDER BY t.name_en`,
+    articleIds
+  );
+
+  const tagsMap = new Map();
+  tags.forEach(tag => {
+    if (!tagsMap.has(tag.article_id)) {
+      tagsMap.set(tag.article_id, []);
+    }
+    tagsMap.get(tag.article_id).push({
+      id: tag.id,
+      nameEnglish: tag.nameEnglish,
+      nameSpanish: tag.nameSpanish,
+      slug: tag.slug,
+      creationDate: tag.creationDate
+    });
+  });
+
+  return tagsMap;
+}
+
 // Create article
 router.post('/article', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -14738,7 +14867,8 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       titleEnglish, titleSpanish, subtitleEnglish, subtitleSpanish,
       contentEnglish, contentSpanish, author, author_gender, date,
       categoryIds, filter, article_status_id, priority,
-      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id
+      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id,
+      tags
     } = req.body;
 
     // Validate required fields
@@ -14784,6 +14914,20 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     if (priority_filter_id && !filterIds.includes(parseInt(priority_filter_id))) {
       return res.status(400).json('priority_filter_id must be included in the filter array');
     }
+
+    // Parse and validate tags
+    let parsedTags;
+    try {
+      if (typeof tags === 'string') {
+        parsedTags = JSON.parse(tags);
+      } else {
+        parsedTags = tags;
+      }
+    } catch (error) {
+      return res.status(400).json('Invalid tags format');
+    }
+
+    const tagArray = parsedTags && Array.isArray(parsedTags) ? parsedTags : [];
 
     // Generate slugs
     const slugEn = generateSlug(titleEnglish);
@@ -14834,6 +14978,15 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
         await connection.query(
           'INSERT INTO article_filter (article_id, filter_id, priority) VALUES ?',
           [filterValues]
+        );
+      }
+
+      // Insert article tags if provided
+      if (processedTagIds.length > 0) {
+        const tagValues = processedTagIds.map(tagId => [articleId, tagId]);
+        await connection.query(
+          'INSERT INTO article_tags (article_id, tag_id) VALUES ?',
+          [tagValues]
         );
       }
 
@@ -14908,7 +15061,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
         }
       }
 
-      // Get category and filter information for response
+      // Get category, filter, and tag information for response
       const [categories] = await mysqlConnection.promise().query(
         `SELECT c.id, c.name_en, c.name_es 
          FROM category c 
@@ -14924,6 +15077,10 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
          WHERE af.article_id = ?`,
         [articleId]
       );
+
+      // Get tags for response
+      const tagsMap = await getTagsForArticles([articleId]);
+      const articleTags = tagsMap.get(articleId) || [];
 
       // Get priority_filter_id from filters
       const priorityFilter = filters.find(f => f.priority === 'Y');
@@ -14957,6 +15114,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
           nameEnglish: filt.name_en,
           nameSpanish: filt.name_es
         })),
+        tags: articleTags,
         priority_filter_id: priorityFilterId,
         priority: managedPriority,
         article_status_id: parseInt(article_status_id) || 1,
@@ -15054,10 +15212,11 @@ router.get('/article', async (req, res) => {
 
     const [articles] = await mysqlConnection.promise().query(query, [parseInt(limit), offset]);
 
-    // Get categories for all articles in a single query
+    // Get categories, filters, and tags for all articles in single queries
     const articleIds = articles.map(article => article.id);
     let categoriesMap = new Map();
     let filtersMap = new Map();
+    let tagsMap = new Map();
 
     if (articleIds.length > 0) {
       // Get all categories for these articles
@@ -15109,6 +15268,9 @@ router.get('/article', async (req, res) => {
           nameSpanish: filter.filterNameSpanish
         });
       });
+
+      // Get tags for all articles
+      tagsMap = await getTagsForArticles(articleIds);
     }
 
     // Collect all S3 keys for batch processing
@@ -15141,6 +15303,7 @@ router.get('/article', async (req, res) => {
     const formattedArticles = articles.map((article) => {
       const articleCategories = categoriesMap.get(article.id) || [];
       const articleFilters = filtersMap.get(article.id) || [];
+      const articleTags = tagsMap.get(article.id) || [];
 
       return {
         id: article.id,
@@ -15156,6 +15319,7 @@ router.get('/article', async (req, res) => {
         categoryIds: articleCategories.map(cat => cat.id),
         filters: articleFilters,
         filterIds: articleFilters.map(filter => filter.id),
+        tags: articleTags, // Add tags to response
         priority: article.priority,
         article_status_id: article.article_status_id,
         statusNameEnglish: article.statusNameEnglish,
@@ -15273,6 +15437,10 @@ router.get('/article/:id', async (req, res) => {
       [id]
     );
 
+    // Get tags for response
+    const tagsMap = await getTagsForArticles([article.id]);
+    const articleTags = tagsMap.get(article.id) || [];
+
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterId = priorityFilter ? priorityFilter.id : null;
@@ -15336,6 +15504,7 @@ router.get('/article/:id', async (req, res) => {
         nameEnglish: filter.nameEnglish,
         nameSpanish: filter.nameSpanish
       })),
+      tags: articleTags,
       filterIds: filters.map(filter => filter.id),
       priority_filter_id: priorityFilterId,
       priority: article.priority,
@@ -15435,6 +15604,10 @@ router.get('/article/slug/:slug', async (req, res) => {
       [article.id]
     );
 
+    // Get tags for response
+    const tagsMap = await getTagsForArticles([article.id]);
+    const articleTags = tagsMap.get(article.id) || [];
+
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterId = priorityFilter ? priorityFilter.id : null;
@@ -15498,6 +15671,7 @@ router.get('/article/slug/:slug', async (req, res) => {
         nameEnglish: filter.nameEnglish,
         nameSpanish: filter.nameSpanish
       })),
+      tags: articleTags,
       filterIds: filters.map(filter => filter.id),
       priority_filter_id: priorityFilterId,
       priority: article.priority,
@@ -15569,7 +15743,8 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       titleEnglish, titleSpanish, subtitleEnglish, subtitleSpanish,
       contentEnglish, contentSpanish, author, author_gender, date,
       categoryIds, filter, article_status_id, priority,
-      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id
+      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id,
+      tags // Add tags parameter
     } = req.body;
 
     // Check if article exists
@@ -15585,7 +15760,6 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     // Validate categoryIds array
     let parsedCategoryIds;
     try {
-      // If categoryIds is a string, try to parse it
       if (typeof categoryIds === 'string') {
         parsedCategoryIds = JSON.parse(categoryIds);
       } else {
@@ -15601,7 +15775,6 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     let parsedFilterIds;
     try {
-      // If filter is a string, try to parse it
       if (typeof filter === 'string') {
         parsedFilterIds = JSON.parse(filter);
       } else {
@@ -15611,13 +15784,26 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       return res.status(400).json('Invalid filter format');
     }
 
-    // Ensure it's an array or empty array if not provided
     const filterIds = parsedFilterIds && Array.isArray(parsedFilterIds) ? parsedFilterIds : [];
 
     // Validate priority_filter_id if provided
     if (priority_filter_id && !filterIds.includes(parseInt(priority_filter_id))) {
       return res.status(400).json('priority_filter_id must be included in the filter array');
     }
+
+    // Parse and validate tags
+    let parsedTags;
+    try {
+      if (typeof tags === 'string') {
+        parsedTags = JSON.parse(tags);
+      } else {
+        parsedTags = tags;
+      }
+    } catch (error) {
+      return res.status(400).json('Invalid tags format');
+    }
+
+    const tagArray = parsedTags && Array.isArray(parsedTags) ? parsedTags : [];
 
     // Generate new slugs if titles changed
     const slugEn = generateSlug(titleEnglish);
@@ -15628,6 +15814,9 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     // Manage priority (ensure uniqueness and shift if necessary, excluding current article)
     const managedPriority = await managePriority(priority, id);
+
+    // Process tags (create new ones if needed)
+    const processedTagIds = await processArticleTags(tagArray);
 
     // Convert S3 URLs back to placeholders before processing
     const contentEnglishWithPlaceholders = convertS3UrlsToPlaceholders(contentEnglish);
@@ -15669,9 +15858,10 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         ]
       );
 
-      // Delete existing categories and filters
+      // Delete existing categories, filters, and tags
       await connection.query('DELETE FROM article_category WHERE article_id = ?', [id]);
       await connection.query('DELETE FROM article_filter WHERE article_id = ?', [id]);
+      await connection.query('DELETE FROM article_tags WHERE article_id = ?', [id]);
 
       // Insert new categories
       if (parsedCategoryIds.length > 0) {
@@ -15694,6 +15884,15 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         );
       }
 
+      // Insert new tags if provided
+      if (processedTagIds.length > 0) {
+        const tagValues = processedTagIds.map(tagId => [id, tagId]);
+        await connection.query(
+          'INSERT INTO article_tags (article_id, tag_id) VALUES ?',
+          [tagValues]
+        );
+      }
+
       await connection.commit();
 
     } catch (transactionError) {
@@ -15703,13 +15902,12 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       connection.release();
     }
 
+    // ...existing code for preview images...
     let imageEnglishUrl = null;
     let imageSpanishUrl = null;
 
-    // Handle new preview images
     if (req.files?.imageEnglish) {
       try {
-        // Delete existing English preview image if any
         await mysqlConnection.promise().query(
           'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_en"',
           [id]
@@ -15732,7 +15930,6 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     if (req.files?.imageSpanish) {
       try {
-        // Delete existing Spanish preview image if any
         await mysqlConnection.promise().query(
           'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_es"',
           [id]
@@ -15775,7 +15972,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       }
     }
 
-    // Get updated category and filter information for response
+    // Get updated category, filter, and tag information for response
     const [categories] = await mysqlConnection.promise().query(
       `SELECT c.id, c.name_en, c.name_es 
        FROM category c 
@@ -15791,6 +15988,10 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
        WHERE af.article_id = ?`,
       [id]
     );
+
+    // Get tags for response
+    const tagsMap = await getTagsForArticles([id]);
+    const articleTags = tagsMap.get(parseInt(id)) || [];
 
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
@@ -15823,6 +16024,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         nameEnglish: filt.name_en,
         nameSpanish: filt.name_es
       })),
+      tags: articleTags, // Add tags to response
       priority_filter_id: priorityFilterIdResponse,
       priority: managedPriority,
       article_status_id: parseInt(article_status_id) || 1,
@@ -15998,6 +16200,52 @@ router.get('/filters', verifyToken, async (req, res) => {
         res.status(200).json(rows);
       } else {
         res.status(404).json('filters not found');
+      }
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+// Get all tags
+router.get('/tags', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin') {
+    try {
+      const { lang = 'en', search } = req.query;
+
+      // Construir condición de búsqueda si se proporciona el parámetro search
+      let searchCondition = '';
+      const queryParams = [];
+
+      if (search) {
+        const searchTerm = `%${search}%`;
+        searchCondition = `WHERE (name_en LIKE ? OR name_es LIKE ? OR slug LIKE ?)`;
+        queryParams.push(searchTerm, searchTerm, searchTerm);
+      }
+
+      const query = `
+        SELECT 
+          id,
+          ${lang === 'en' ? 'name_en' : 'name_es'} AS name,
+          name_en as nameEnglish,
+          name_es as nameSpanish,
+          slug,
+          DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creationDate
+        FROM tags
+        ${searchCondition}
+        ORDER BY name ASC
+      `;
+
+      const [rows] = await mysqlConnection.promise().query(query, queryParams);
+
+      if (rows.length > 0) {
+        res.status(200).json(rows);
+      } else {
+        res.status(200).json([]); // Devolver array vacío en lugar de 404 para mejor UX
       }
     } catch (err) {
       console.log(err);
