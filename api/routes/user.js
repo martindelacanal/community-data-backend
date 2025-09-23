@@ -15422,6 +15422,83 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
   }
 });
 
+// Get public articles with pagination (for frontend public consumption)
+router.get('/article/public', async (req, res) => {
+  try {
+    const { language = 'en', page = 1, limit = 6 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    // Validate language parameter
+    if (!['en', 'es'].includes(language)) {
+      return res.status(400).json({ error: 'Invalid language. Must be "en" or "es"' });
+    }
+
+    // Get total count of published articles
+    const [countResult] = await mysqlConnection.promise().query(
+      'SELECT COUNT(*) as total FROM article WHERE article_status_id = 2'
+    );
+    const total = countResult[0].total;
+
+    // Main query to get public articles with required data
+    const query = `
+      SELECT 
+        a.id,
+        ${language === 'en' ? 'a.title_en' : 'a.title_es'} as title,
+        ${language === 'en' ? 'a.slug_en' : 'a.slug_es'} as slug,
+        ai.s3_key as image_s3_key,
+        ${language === 'en' ? 'f.name_en' : 'f.name_es'} as filterName
+      FROM article a
+      LEFT JOIN article_images ai ON a.id = ai.article_id 
+        AND ai.image_type = ${language === 'en' ? "'preview_en'" : "'preview_es'"}
+      LEFT JOIN article_filter af ON a.id = af.article_id AND af.priority = 'Y'
+      LEFT JOIN filter f ON af.filter_id = f.id
+      WHERE a.article_status_id = 2
+      ORDER BY a.priority ASC, a.publication_date DESC, a.creation_date DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const [articles] = await mysqlConnection.promise().query(query, [parseInt(limit), offset]);
+
+    // Collect all S3 keys for batch processing
+    const s3Keys = articles
+      .filter(article => article.image_s3_key)
+      .map(article => article.image_s3_key);
+
+    // Generate all signed URLs in parallel
+    const signedUrls = await getSignedUrlsForImages(s3Keys);
+
+    // Create a map of S3 keys to signed URLs
+    const urlMap = new Map();
+    s3Keys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        urlMap.set(key, signedUrls[index]);
+      }
+    });
+
+    // Format response
+    const formattedArticles = articles.map(article => ({
+      imageUrl: article.image_s3_key ? urlMap.get(article.image_s3_key) || '' : '',
+      filterName: article.filterName || '',
+      title: article.title || '',
+      slug: article.slug || ''
+    }));
+
+    const response = {
+      articles: formattedArticles,
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    };
+    
+    res.json(response);
+
+  } catch (error) {
+    console.error('Error fetching public articles:', error);
+    logger.error('Error fetching public articles:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get articles with pagination (OPTIMIZED - no content, only preview data)
 router.get('/article', async (req, res) => {
   try {
