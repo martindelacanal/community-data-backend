@@ -963,7 +963,9 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         const emails = rows_emails.map(row => row.email);
 
         // Send the email
-        sendTicketEmail(formData, productsWithNames, req.files, emails);
+        if (emails.length > 0) {
+          sendTicketEmail(formData, productsWithNames, req.files, emails);
+        }
         return;
       } else {
         res.status(400).json('Donation ticket image is required');
