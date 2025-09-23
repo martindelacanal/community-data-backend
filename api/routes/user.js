@@ -985,17 +985,21 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
       const id = req.params.id || null;
       formulario = JSON.parse(req.body.form);
 
-      if (req.files.length > 0) {
-        var [rows_files] = await mysqlConnection
+      // Handle selective image deletion
+      const deleted_image_ids = formulario.deleted_image_ids || [];
+      
+      // Delete specific images if requested
+      if (deleted_image_ids.length > 0) {
+        // Get files to delete from S3
+        const [rows_files_to_delete] = await mysqlConnection
           .promise()
           .execute(
-            "SELECT file FROM donation_ticket_image WHERE donation_ticket_id = ?",
-            [id]
+            "SELECT file FROM donation_ticket_image WHERE id IN (" + deleted_image_ids.map(() => '?').join(',') + ")",
+            deleted_image_ids
           );
 
-        if (rows_files.length > 0) {
-          var filesParaEliminar = [];
-          params = {
+        if (rows_files_to_delete.length > 0) {
+          const params = {
             Bucket: bucketName,
             Delete: {
               Objects: [],
@@ -1003,55 +1007,57 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
             },
           };
 
-          // Agregar todos los archivos a filesParaEliminar
-          for (let row of rows_files) {
+          // Add files to delete from S3
+          for (let row of rows_files_to_delete) {
             if (row.file !== null && row.file !== "" && row.file !== undefined) {
-              filesParaEliminar.push(row.file);
+              params.Delete.Objects.push({
+                Key: row.file,
+              });
             }
           }
 
-          // Agregar todos los archivos a params.Delete.Objects
-          for (let file of filesParaEliminar) {
-            params.Delete.Objects.push({
-              Key: file,
-            });
-          }
           try {
-
             if (params.Delete.Objects.length > 0) {
-              command = new DeleteObjectsCommand(params);
+              const command = new DeleteObjectsCommand(params);
               await s3.send(command);
             }
 
-            // Eliminar todos los archivos de la base de datos
+            // Delete specific images from database
             await mysqlConnection.promise().execute(
-              "DELETE FROM donation_ticket_image WHERE donation_ticket_id = ?",
-              [id]
+              "DELETE FROM donation_ticket_image WHERE id IN (" + deleted_image_ids.map(() => '?').join(',') + ")",
+              deleted_image_ids
             );
-
-            for (let i = 0; i < req.files.length; i++) {
-              // renombrar cada archivo con un nombre aleatorio
-              req.files[i].filename = randomImageName();
-              const paramsLogo = {
-                Bucket: bucketName,
-                Key: req.files[i].filename,
-                Body: req.files[i].buffer,
-                ContentType: req.files[i].mimetype,
-              };
-              const commandLogo = new PutObjectCommand(paramsLogo);
-              const uploadLogo = await s3.send(commandLogo);
-              await mysqlConnection.promise().query(
-                'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
-                [id, req.files[i].filename]
-              );
-            }
           } catch (error) {
             console.log(error);
             logger.error(error);
-            return res.status(500).json('Could not upload image');
+            return res.status(500).json('Could not delete selected images');
           }
-        } else {
-          res.status(500).send("Error interno");
+        }
+      }
+
+      // Upload new images if provided
+      if (req.files && req.files.length > 0) {
+        try {
+          for (let i = 0; i < req.files.length; i++) {
+            // renombrar cada archivo con un nombre aleatorio
+            req.files[i].filename = randomImageName();
+            const paramsLogo = {
+              Bucket: bucketName,
+              Key: req.files[i].filename,
+              Body: req.files[i].buffer,
+              ContentType: req.files[i].mimetype,
+            };
+            const commandLogo = new PutObjectCommand(paramsLogo);
+            const uploadLogo = await s3.send(commandLogo);
+            await mysqlConnection.promise().query(
+              'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
+              [id, req.files[i].filename]
+            );
+          }
+        } catch (error) {
+          console.log(error);
+          logger.error(error);
+          return res.status(500).json('Could not upload new images');
         }
       }
       const donation_id = formulario.donation_id || null;
@@ -1263,6 +1269,38 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
               note: row.note,
               creation_date: row.creation_date
             });
+          }
+        }
+
+        // Fetch images with public S3 URLs
+        const [rows_images] = await mysqlConnection.promise().query(
+          `SELECT id, file FROM donation_ticket_image WHERE donation_ticket_id = ?`,
+          [id]
+        );
+
+        newTicket.images = [];
+        if (rows_images.length > 0) {
+          for (let image of rows_images) {
+            try {
+              const getObjectParams = {
+                Bucket: bucketName,
+                Key: image.file
+              };
+              const command = new GetObjectCommand(getObjectParams);
+              const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // URL expires in 1 hour
+              
+              newTicket.images.push({
+                id: image.id,
+                url: url
+              });
+            } catch (error) {
+              console.log('Error generating signed URL for image:', image.file, error);
+              // Still add the image with a placeholder or skip it
+              newTicket.images.push({
+                id: image.id,
+                url: null
+              });
+            }
           }
         }
 
