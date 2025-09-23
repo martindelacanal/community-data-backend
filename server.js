@@ -424,26 +424,40 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
 
     let allClientLocations = [];
     try {
-        [allClientLocations] = await mysqlConnection.promise().query(
-            `SELECT l.id, l.community_city as name FROM location l JOIN client_location cl ON l.id = cl.location_id WHERE cl.client_id = ? ORDER BY l.id`,
-            [client_id]
-        );
+        let locationQuery = `SELECT l.id, l.community_city as name FROM location l JOIN client_location cl ON l.id = cl.location_id WHERE cl.client_id = ?`;
+        
+        // Excluir Compton (location_id = 32) para Molina (client_id = 2)
+        if (parseInt(client_id) === 2) {
+            locationQuery += ` AND l.id != 32`;
+        }
+        
+        locationQuery += ` ORDER BY l.id`;
+        
+        [allClientLocations] = await mysqlConnection.promise().query(locationQuery, [client_id]);
     } catch (error) {
         logger.error(`Error fetching locations for client_id ${client_id}:`, error);
     }
 
     const newPerLocationMap = {};
     try {
-        const [newLocRows] = await mysqlConnection.promise().query(
-            `SELECT
+        let newPerLocationQuery = `SELECT
                 u.first_location_id AS location_id,
                 COUNT(DISTINCT u.id) AS new_count
             FROM user u
             JOIN client_user cu ON u.id = cu.user_id AND cu.client_id = ?
             JOIN client_location cl ON u.first_location_id = cl.location_id AND cl.client_id = ?
             WHERE u.role_id = 5
-              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
-            GROUP BY u.first_location_id;`,
+              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?`;
+        
+        // Excluir Compton (location_id = 32) para Molina (client_id = 2)
+        if (parseInt(client_id) === 2) {
+            newPerLocationQuery += ` AND u.first_location_id != 32`;
+        }
+        
+        newPerLocationQuery += ` GROUP BY u.first_location_id;`;
+        
+        const [newLocRows] = await mysqlConnection.promise().query(
+            newPerLocationQuery,
             [client_id, client_id, from_date_db_start, to_date_db_end]
         );
         newLocRows.forEach(row => { newPerLocationMap[row.location_id] = row.new_count; });
@@ -461,8 +475,8 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
             from_date_db_start,
             from_date_db_start
         ];
-        const [recLocRows] = await mysqlConnection.promise().query(
-            `SELECT
+        
+        let recurringPerLocationQuery = `SELECT
                 db_range.location_id,
                 COUNT(DISTINCT u.id) AS recurring_count
             FROM user u
@@ -470,8 +484,14 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
             INNER JOIN delivery_beneficiary db_range ON u.id = db_range.receiving_user_id
             INNER JOIN client_location cl_range ON db_range.location_id = cl_range.location_id AND cl_range.client_id = ?
             WHERE u.role_id = 5 AND u.enabled = 'Y'
-              AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
-              AND (
+              AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?`;
+        
+        // Excluir Compton (location_id = 32) para Molina (client_id = 2)
+        if (parseInt(client_id) === 2) {
+            recurringPerLocationQuery += ` AND db_range.location_id != 32`;
+        }
+        
+        recurringPerLocationQuery += ` AND (
                   EXISTS (
                       SELECT 1
                       FROM delivery_beneficiary db_prev
@@ -495,7 +515,10 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
                       )
                   )
               )
-            GROUP BY db_range.location_id;`,
+            GROUP BY db_range.location_id;`;
+        
+        const [recLocRows] = await mysqlConnection.promise().query(
+            recurringPerLocationQuery,
             recurringPerLocationParams
         );
         recLocRows.forEach(row => { recurringPerLocationMap[row.location_id] = row.recurring_count; });
