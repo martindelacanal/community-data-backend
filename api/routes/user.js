@@ -14998,17 +14998,32 @@ async function processAudienceTargeting(articleId, genderIds, ethnicityIds, loca
       );
     }
 
-    // Insert article age ranges usando REPLACE
+    // Insert article age ranges usando REPLACE with validation
     if (ageRanges && Array.isArray(ageRanges) && ageRanges.length > 0) {
-      const ageRangeValues = ageRanges.map(range => [
-        articleId,
-        parseInt(range.min),
-        parseInt(range.max)
-      ]);
-      await queryConnection.query(
-        'REPLACE INTO article_age_range (article_id, min_age, max_age) VALUES ?',
-        [ageRangeValues]
-      );
+      // Filter out invalid age ranges and validate values
+      const validAgeRanges = ageRanges.filter(range => {
+        const minAge = parseInt(range.min);
+        const maxAge = parseInt(range.max);
+        
+        // Check if both values are valid numbers and within reasonable range
+        return !isNaN(minAge) && !isNaN(maxAge) && 
+               minAge >= 0 && maxAge >= 0 && 
+               minAge <= 150 && maxAge <= 150 &&
+               minAge <= maxAge;
+      });
+
+      if (validAgeRanges.length > 0) {
+        const ageRangeValues = validAgeRanges.map(range => [
+          articleId,
+          parseInt(range.min),
+          parseInt(range.max)
+        ]);
+        
+        await queryConnection.query(
+          'REPLACE INTO article_age_range (article_id, min_age, max_age) VALUES ?',
+          [ageRangeValues]
+        );
+      }
     }
   } catch (error) {
     logger.error('Error processing audience targeting:', error);
