@@ -989,7 +989,7 @@ router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
 
       // Handle selective image deletion
       const deleted_image_ids = formulario.deleted_image_ids || [];
-      
+
       // Delete specific images if requested
       if (deleted_image_ids.length > 0) {
         // Get files to delete from S3
@@ -1290,7 +1290,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
               };
               const command = new GetObjectCommand(getObjectParams);
               const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // URL expires in 1 hour
-              
+
               newTicket.images.push({
                 id: image.id,
                 url: url
@@ -2578,9 +2578,30 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
         if (receiving_user_id) {
           // if (receiving_location_id === location_id) {
           // actualizar location_id y client_id del user beneficiary
-          const [rows2_update_user] = await mysqlConnection.promise().query(
-            'update user set location_id = ?, client_id = ? where id = ?', [location_id, client_id, receiving_user_id]
+          // Verificar si el usuario se registró hoy y no tiene delivery aprobado
+          const [check_user_conditions] = await mysqlConnection.promise().query(
+            `SELECT 
+                DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles')) as registered_today,
+                (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
+              FROM user WHERE id = ?`,
+            [receiving_user_id, receiving_user_id]
           );
+
+          let update_query = 'update user set location_id = ?, client_id = ?';
+          let update_params = [location_id, client_id];
+
+          // Si se registró hoy y no tiene delivery aprobado, también actualizar first_location_id
+          if (check_user_conditions.length > 0 &&
+            check_user_conditions[0].registered_today === 1 &&
+            check_user_conditions[0].has_approved_delivery === 0) {
+            update_query += ', first_location_id = ?';
+            update_params.push(location_id);
+          }
+
+          update_query += ' where id = ?';
+          update_params.push(receiving_user_id);
+
+          const [rows2_update_user] = await mysqlConnection.promise().query(update_query, update_params);
           // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
           // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
           // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
@@ -2723,9 +2744,30 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
       }
       if (receiving_user_phone && receiving_user_id) {
         // actualizar location_id y client_id del user beneficiary
-        const [rows2_update_user] = await mysqlConnection.promise().query(
-          'update user set location_id = ?, client_id = ? where id = ?', [location_id, client_id, receiving_user_id]
+        // Verificar si el usuario se registró hoy y no tiene delivery aprobado
+        const [check_user_conditions] = await mysqlConnection.promise().query(
+          `SELECT 
+              DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles')) as registered_today,
+              (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
+            FROM user WHERE id = ?`,
+          [receiving_user_id, receiving_user_id]
         );
+
+        let update_query = 'update user set location_id = ?, client_id = ?';
+        let update_params = [location_id, client_id];
+
+        // Si se registró hoy y no tiene delivery aprobado, también actualizar first_location_id
+        if (check_user_conditions.length > 0 &&
+          check_user_conditions[0].registered_today === 1 &&
+          check_user_conditions[0].has_approved_delivery === 0) {
+          update_query += ', first_location_id = ?';
+          update_params.push(location_id);
+        }
+
+        update_query += ' where id = ?';
+        update_params.push(receiving_user_id);
+
+        const [rows2_update_user] = await mysqlConnection.promise().query(update_query, update_params);
         // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
         // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
         // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
@@ -15004,12 +15046,12 @@ async function processAudienceTargeting(articleId, genderIds, ethnicityIds, loca
       const validAgeRanges = ageRanges.filter(range => {
         const minAge = parseInt(range.min);
         const maxAge = parseInt(range.max);
-        
+
         // Check if both values are valid numbers and within reasonable range
-        return !isNaN(minAge) && !isNaN(maxAge) && 
-               minAge >= 0 && maxAge >= 0 && 
-               minAge <= 150 && maxAge <= 150 &&
-               minAge <= maxAge;
+        return !isNaN(minAge) && !isNaN(maxAge) &&
+          minAge >= 0 && maxAge >= 0 &&
+          minAge <= 150 && maxAge <= 150 &&
+          minAge <= maxAge;
       });
 
       if (validAgeRanges.length > 0) {
@@ -15018,7 +15060,7 @@ async function processAudienceTargeting(articleId, genderIds, ethnicityIds, loca
           parseInt(range.min),
           parseInt(range.max)
         ]);
-        
+
         await queryConnection.query(
           'REPLACE INTO article_age_range (article_id, min_age, max_age) VALUES ?',
           [ageRangeValues]
@@ -15504,7 +15546,7 @@ router.get('/article/public', async (req, res) => {
       page: parseInt(page),
       limit: parseInt(limit)
     };
-    
+
     res.json(response);
 
   } catch (error) {
