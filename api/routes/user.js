@@ -9060,6 +9060,7 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                     SELECT 1
                     FROM delivery_beneficiary db_same_day
                     WHERE db_same_day.receiving_user_id = u_reg.id
+                      AND db_same_day.delivering_user_id IS NOT NULL
                       AND DATE(CONVERT_TZ(db_same_day.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(u_reg.creation_date, '+00:00', 'America/Los_Angeles'))
                   )
                 ), 0
