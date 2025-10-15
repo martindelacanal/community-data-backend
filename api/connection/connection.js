@@ -18,7 +18,11 @@ const mysqlConnection = mysql.createPool({
   database: process.env.DB_DATABASE,
   port: process.env.DB_PORT,
   multipleStatements: true,
-  decimalNumbers: true
+  decimalNumbers: true,
+  // Increase timeouts for large content operations
+  connectTimeout: 60000, // 60 seconds to establish connection
+  waitForConnections: true,
+  queueLimit: 0
 });
 
 // mysqlConnection.connect( err => {
@@ -35,12 +39,12 @@ mysqlConnection.on("connection", connection => {
   console.log("Database connected!");
 
   connection.on("error", err => {
-        console.error(new Date(), "MySQL error", err.code);
-    });
-
-    connection.on("close", err => {
-        console.error(new Date(), "MySQL close", err);
-    });
+    console.error(new Date(), "MySQL error", err.code);
+  });
+  
+  connection.on("close", () => {
+    console.log("Database connection closed");
+  });
 });
 
 module.exports = mysqlConnection;

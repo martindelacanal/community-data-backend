@@ -14452,7 +14452,15 @@ const signedUrlCache = new Map();
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 // Multer configuration for article images
-const articleUpload = multer({ storage: storage }).fields([
+const articleUpload = multer({ 
+  storage: storage,
+  limits: {
+    fieldSize: 50 * 1024 * 1024, // 50MB for text fields (HTML content with base64 images)
+    fileSize: 10 * 1024 * 1024,  // 10MB for uploaded files
+    fields: 50,                   // Max number of non-file fields
+    files: 10                     // Max number of file fields
+  }
+}).fields([
   { name: 'imageEnglish', maxCount: 1 },
   { name: 'imageSpanish', maxCount: 1 },
   { name: 'image', maxCount: 1 } // For content images
@@ -15176,6 +15184,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
   }
 
   try {
+    console.log("req.body :", req.body);
     const {
       titleEnglish, titleSpanish, subtitleEnglish, subtitleSpanish,
       contentEnglish, contentSpanish, author, author_gender, date,
@@ -15258,18 +15267,11 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     // Format publication date
     const publicationDate = new Date(date).toISOString().slice(0, 19).replace('T', ' ');
 
-    // Start transaction for atomic operations
+    // PASO 1: Create article WITHOUT content first (to get ID)
     const connection = await mysqlConnection.promise().getConnection();
-    await connection.beginTransaction();
-
+    
+    let articleId;
     try {
-      // Manage priority (ensure uniqueness and shift if necessary) - DENTRO de la transacción
-      const managedPriority = await managePriority(priority, null, connection);
-
-      // Process tags (create new ones if needed)
-      const processedTagIds = await processArticleTags(tagArray);
-
-      // Insert article first to get ID
       const [articleResult] = await connection.query(
         `INSERT INTO article (
           title_en, title_es, subtitle_en, subtitle_es, content_en, content_es,
@@ -15278,12 +15280,58 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           titleEnglish, titleSpanish, subtitleEnglish || null, subtitleSpanish || null,
-          contentEnglish, contentSpanish, author, author_gender, publicationDate,
-          managedPriority, article_status_id || 1, slugEn, slugEs
+          '', '', // Empty content initially
+          author, author_gender, publicationDate,
+          null, article_status_id || 1, slugEn, slugEs // Priority will be set later
         ]
       );
 
-      const articleId = articleResult.insertId;
+      articleId = articleResult.insertId;
+    } catch (insertError) {
+      connection.release();
+      throw insertError;
+    }
+
+    // PASO 2: Process content images OUTSIDE of transaction (can take time)
+    let processedContentEnglish = contentEnglish;
+    let processedContentSpanish = contentSpanish;
+
+    try {
+      logger.info(`Processing content images for article ${articleId}...`);
+      processedContentEnglish = await processContentImages(contentEnglish, articleId, 'en');
+      processedContentSpanish = await processContentImages(contentSpanish, articleId, 'es');
+      logger.info(`Content images processed successfully for article ${articleId}`);
+    } catch (contentImageError) {
+      logger.error('Error processing content images:', contentImageError);
+      // Delete the article if image processing fails critically
+      await connection.query('DELETE FROM article WHERE id = ?', [articleId]);
+      connection.release();
+      throw new Error('Failed to process article images');
+    }
+
+    // PASO 3: Start transaction for metadata and update content
+    await connection.beginTransaction();
+
+    let managedPriority = null;
+
+    try {
+      // Update article with processed content
+      await connection.query(
+        'UPDATE article SET content_en = ?, content_es = ? WHERE id = ?',
+        [processedContentEnglish, processedContentSpanish, articleId]
+      );
+
+      // Manage priority (ensure uniqueness and shift if necessary)
+      managedPriority = await managePriority(priority, articleId, connection);
+      
+      // Update priority
+      await connection.query(
+        'UPDATE article SET priority = ? WHERE id = ?',
+        [managedPriority, articleId]
+      );
+
+      // Process tags (create new ones if needed)
+      const processedTagIds = await processArticleTags(tagArray);
 
       // Insert article categories
       if (parsedCategoryIds.length > 0) {
@@ -15319,159 +15367,146 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       await processAudienceTargeting(articleId, parsedGenderIds, parsedEthnicityIds, parsedLocationIds, parsedAgeRanges, connection);
 
       await connection.commit();
-
-      // Process content images (convert base64 to S3 URLs) - DESPUÉS del commit
-      let processedContentEnglish = contentEnglish;
-      let processedContentSpanish = contentSpanish;
-
-      try {
-        processedContentEnglish = await processContentImages(contentEnglish, articleId, 'en');
-        processedContentSpanish = await processContentImages(contentSpanish, articleId, 'es');
-
-        // Update article with processed content (only if images were processed)
-        if (processedContentEnglish !== contentEnglish || processedContentSpanish !== contentSpanish) {
-          await mysqlConnection.promise().query(
-            'UPDATE article SET content_en = ?, content_es = ? WHERE id = ?',
-            [processedContentEnglish, processedContentSpanish, articleId]
-          );
-        }
-      } catch (contentImageError) {
-        logger.error('Error processing content images:', contentImageError);
-        // Continue with article creation even if image processing fails
-      }
-
-      // Upload preview images if provided
-      let imageEnglishUrl = null;
-      let imageSpanishUrl = null;
-
-      if (req.files?.imageEnglish) {
-        try {
-          // Delete existing English preview image if any
-          await mysqlConnection.promise().query(
-            'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_en"',
-            [articleId]
-          );
-
-          const uploadResult = await uploadArticleImage(
-            req.files.imageEnglish[0],
-            articleId,
-            'preview_en',
-            '',
-            '',
-            imageCaptionEnglish || '',
-            ''
-          );
-          imageEnglishUrl = await getSignedUrlForImage(uploadResult.s3_key);
-        } catch (previewImageError) {
-          logger.error('Error uploading English preview image:', previewImageError);
-        }
-      }
-
-      if (req.files?.imageSpanish) {
-        try {
-          // Delete existing Spanish preview image if any
-          await mysqlConnection.promise().query(
-            'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_es"',
-            [articleId]
-          );
-
-          const uploadResult = await uploadArticleImage(
-            req.files.imageSpanish[0],
-            articleId,
-            'preview_es',
-            '',
-            '',
-            '',
-            imageCaptionSpanish || ''
-          );
-          imageSpanishUrl = await getSignedUrlForImage(uploadResult.s3_key);
-        } catch (previewImageError) {
-          logger.error('Error uploading Spanish preview image:', previewImageError);
-        }
-      }
-
-      // Get category, filter, tag, and audience information for response
-      const [categories] = await mysqlConnection.promise().query(
-        `SELECT c.id, c.name_en, c.name_es 
-         FROM category c 
-         INNER JOIN article_category ac ON c.id = ac.category_id 
-         WHERE ac.article_id = ?`,
-        [articleId]
-      );
-
-      const [filters] = await mysqlConnection.promise().query(
-        `SELECT f.id, f.name_en, f.name_es, af.priority 
-         FROM filter f 
-         INNER JOIN article_filter af ON f.id = af.filter_id 
-         WHERE af.article_id = ?`,
-        [articleId]
-      );
-
-      // Get tags for response
-      const tagsMap = await getTagsForArticles([articleId]);
-      const articleTags = tagsMap.get(articleId) || [];
-
-      // Get audience targeting for response
-      const audienceData = await getAudienceTargetingForArticles([articleId]);
-
-      // Get priority_filter_id from filters
-      const priorityFilter = filters.find(f => f.priority === 'Y');
-      const priorityFilterId = priorityFilter ? priorityFilter.id : null;
-
-      // Replace S3 key placeholders with signed URLs in content for response
-      const contentEnglishWithUrls = await replaceS3KeysWithSignedUrls(processedContentEnglish);
-      const contentSpanishWithUrls = await replaceS3KeysWithSignedUrls(processedContentSpanish);
-
-      // Return created article with processed content
-      const response = {
-        id: articleId,
-        titleEnglish,
-        titleSpanish,
-        subtitleEnglish: subtitleEnglish || null,
-        subtitleSpanish: subtitleSpanish || null,
-        contentEnglish: contentEnglishWithUrls,
-        contentSpanish: contentSpanishWithUrls,
-        author,
-        author_gender,
-        date: publicationDate,
-        categoryIds: parsedCategoryIds.map(id => parseInt(id)),
-        categories: categories.map(cat => ({
-          id: cat.id,
-          nameEnglish: cat.name_en,
-          nameSpanish: cat.name_es
-        })),
-        filter: filterIds.map(id => parseInt(id)),
-        filters: filters.map(filt => ({
-          id: filt.id,
-          nameEnglish: filt.name_en,
-          nameSpanish: filt.name_es
-        })),
-        tags: articleTags,
-        genderIds: audienceData.gendersMap.get(articleId) || [],
-        ethnicityIds: audienceData.ethnicitiesMap.get(articleId) || [],
-        locationIds: audienceData.locationsMap.get(articleId) || [],
-        ageRanges: audienceData.ageRangesMap.get(articleId) || [],
-        priority_filter_id: priorityFilterId,
-        priority: managedPriority,
-        article_status_id: parseInt(article_status_id) || 1,
-        imageEnglishUrl,
-        imageSpanishUrl,
-        imageCaptionEnglish: imageCaptionEnglish || null,
-        imageCaptionSpanish: imageCaptionSpanish || null,
-        slugEnglish: slugEn,
-        slugSpanish: slugEs,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-
-      res.status(201).json(response);
+      connection.release();
 
     } catch (transactionError) {
       await connection.rollback();
-      throw transactionError;
-    } finally {
       connection.release();
+      logger.error('Transaction error:', transactionError);
+      // Delete the article and all related data
+      try {
+        await mysqlConnection.promise().query('DELETE FROM article WHERE id = ?', [articleId]);
+      } catch (cleanupError) {
+        logger.error('Error cleaning up after failed transaction:', cleanupError);
+      }
+      throw transactionError;
     }
+
+    // PASO 4: Upload preview images AFTER transaction (outside transaction)
+    let imageEnglishUrl = null;
+    let imageSpanishUrl = null;
+
+    if (req.files?.imageEnglish) {
+      try {
+        // Delete existing English preview image if any
+        await mysqlConnection.promise().query(
+          'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_en"',
+          [articleId]
+        );
+
+        const uploadResult = await uploadArticleImage(
+          req.files.imageEnglish[0],
+          articleId,
+          'preview_en',
+          '',
+          '',
+          imageCaptionEnglish || '',
+          ''
+        );
+        imageEnglishUrl = await getSignedUrlForImage(uploadResult.s3_key);
+      } catch (previewImageError) {
+        logger.error('Error uploading English preview image:', previewImageError);
+      }
+    }
+
+    if (req.files?.imageSpanish) {
+      try {
+        // Delete existing Spanish preview image if any
+        await mysqlConnection.promise().query(
+          'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_es"',
+          [articleId]
+        );
+
+        const uploadResult = await uploadArticleImage(
+          req.files.imageSpanish[0],
+          articleId,
+          'preview_es',
+          '',
+          '',
+          '',
+          imageCaptionSpanish || ''
+        );
+        imageSpanishUrl = await getSignedUrlForImage(uploadResult.s3_key);
+      } catch (previewImageError) {
+        logger.error('Error uploading Spanish preview image:', previewImageError);
+      }
+    }
+
+    // Get category, filter, tag, and audience information for response
+    const [categories] = await mysqlConnection.promise().query(
+      `SELECT c.id, c.name_en, c.name_es 
+       FROM category c 
+       INNER JOIN article_category ac ON c.id = ac.category_id 
+       WHERE ac.article_id = ?`,
+      [articleId]
+    );
+
+    const [filters] = await mysqlConnection.promise().query(
+      `SELECT f.id, f.name_en, f.name_es, af.priority 
+       FROM filter f 
+       INNER JOIN article_filter af ON f.id = af.filter_id 
+       WHERE af.article_id = ?`,
+      [articleId]
+    );
+
+    // Get tags for response
+    const tagsMap = await getTagsForArticles([articleId]);
+    const articleTags = tagsMap.get(articleId) || [];
+
+    // Get audience targeting for response
+    const audienceData = await getAudienceTargetingForArticles([articleId]);
+
+    // Get priority_filter_id from filters
+    const priorityFilter = filters.find(f => f.priority === 'Y');
+    const priorityFilterId = priorityFilter ? priorityFilter.id : null;
+
+    // Replace S3 key placeholders with signed URLs in content for response
+    const contentEnglishWithUrls = await replaceS3KeysWithSignedUrls(processedContentEnglish);
+    const contentSpanishWithUrls = await replaceS3KeysWithSignedUrls(processedContentSpanish);
+
+    // Return created article with processed content
+    const response = {
+      id: articleId,
+      titleEnglish,
+      titleSpanish,
+      subtitleEnglish: subtitleEnglish || null,
+      subtitleSpanish: subtitleSpanish || null,
+      contentEnglish: contentEnglishWithUrls,
+      contentSpanish: contentSpanishWithUrls,
+      author,
+      author_gender,
+      date: publicationDate,
+      categoryIds: parsedCategoryIds.map(id => parseInt(id)),
+      categories: categories.map(cat => ({
+        id: cat.id,
+        nameEnglish: cat.name_en,
+        nameSpanish: cat.name_es
+      })),
+      filter: filterIds.map(id => parseInt(id)),
+      filters: filters.map(filt => ({
+        id: filt.id,
+        nameEnglish: filt.name_en,
+        nameSpanish: filt.name_es
+      })),
+      tags: articleTags,
+      genderIds: audienceData.gendersMap.get(articleId) || [],
+      ethnicityIds: audienceData.ethnicitiesMap.get(articleId) || [],
+      locationIds: audienceData.locationsMap.get(articleId) || [],
+      ageRanges: audienceData.ageRangesMap.get(articleId) || [],
+      priority_filter_id: priorityFilterId,
+      priority: managedPriority,
+      article_status_id: parseInt(article_status_id) || 1,
+      imageEnglishUrl,
+      imageSpanishUrl,
+      imageCaptionEnglish: imageCaptionEnglish || null,
+      imageCaptionSpanish: imageCaptionSpanish || null,
+      slugEnglish: slugEn,
+      slugSpanish: slugEs,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    res.status(201).json(response);
 
   } catch (error) {
     console.error('Error creating article:', error);
