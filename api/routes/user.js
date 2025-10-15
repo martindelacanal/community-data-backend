@@ -1518,6 +1518,8 @@ router.get('/new/location/:id', verifyToken, async (req, res) => {
         l.organization,
         l.community_city,
         l.address,
+        l.description_en,
+        l.description_es,
         GROUP_CONCAT(DISTINCT cl.client_id) as client_ids,
         CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates
         from location as l
@@ -1552,6 +1554,8 @@ router.post('/new/location', verifyToken, async (req, res) => {
       const organization = formulario.organization || null;
       const community_city = formulario.community_city || null;
       const address = formulario.address || null;
+      const description_en = formulario.description_en || null;
+      const description_es = formulario.description_es || null;
       const coordinates = formulario.coordinates || null;
       const client_ids = formulario.client_ids || [];
       // separate coordinates into longitude and latitude and eliminate spaces
@@ -1561,9 +1565,9 @@ router.post('/new/location', verifyToken, async (req, res) => {
       const point = `POINT(${latitude} ${longitude})`;
 
       const [rows] = await mysqlConnection.promise().query(
-        `INSERT INTO location (organization, community_city, address, coordinates)
-        VALUES (?, ?, ?, ST_GeomFromText(?))`,
-        [organization, community_city, address, point]
+        `INSERT INTO location (organization, community_city, address, description_en, description_es, coordinates)
+        VALUES (?, ?, ?, ?, ?, ST_GeomFromText(?))`,
+        [organization, community_city, address, description_en, description_es, point]
       );
 
       if (rows.affectedRows > 0) {
@@ -1600,6 +1604,8 @@ router.put('/new/location/:id', verifyToken, async (req, res) => {
       const organization = formulario.organization || null;
       const community_city = formulario.community_city || null;
       const address = formulario.address || null;
+      const description_en = formulario.description_en || null;
+      const description_es = formulario.description_es || null;
       const coordinates = formulario.coordinates || null;
       const client_ids = formulario.client_ids || [];
       // separate coordinates into longitude and latitude and eliminate spaces
@@ -1609,8 +1615,8 @@ router.put('/new/location/:id', verifyToken, async (req, res) => {
       const point = `POINT(${latitude} ${longitude})`;
 
       const [rows] = await mysqlConnection.promise().query(
-        `UPDATE location SET organization = ?, community_city = ?, address = ?, coordinates = ST_GeomFromText(?) WHERE id = ?`,
-        [organization, community_city, address, point, id]
+        `UPDATE location SET organization = ?, community_city = ?, address = ?, description_en = ?, description_es = ?, coordinates = ST_GeomFromText(?) WHERE id = ?`,
+        [organization, community_city, address, description_en, description_es, point, id]
       );
 
       if (rows.affectedRows > 0) {
@@ -13522,6 +13528,10 @@ router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
     try {
       const { idLocation } = req.params;
+      const { lang = 'en' } = req.query;
+
+    // Validate language parameter
+    const language = ['en', 'es'].includes(lang) ? lang : 'en';
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT l.id,
@@ -13529,6 +13539,7 @@ router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
             l.community_city,
             GROUP_CONCAT(DISTINCT client.short_name SEPARATOR ', ') as partner,
             l.address,
+            ${language === 'en' ? 'l.description_en' : 'l.description_es'} as description,
             l.enabled,
             CONCAT(ST_Y(l.coordinates), ', ', ST_X(l.coordinates)) as coordinates, 
             DATE_FORMAT(CONVERT_TZ(l.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
@@ -13549,6 +13560,7 @@ router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
         location["community_city"] = rows[0].community_city;
         location["partner"] = rows[0].partner;
         location["address"] = rows[0].address;
+        location["description"] = rows[0].description;
         location["enabled"] = rows[0].enabled;
         location["coordinates"] = rows[0].coordinates; // coordenadas: latitud, longitud como google maps
         location["creation_date"] = rows[0].creation_date;
@@ -17003,8 +17015,8 @@ router.get('/calendar/events', async (req, res) => {
   try {
     const { fromToday, daysLimit, month, year, location_id, lang = 'en' } = req.query;
 
-    // // Validate language parameter
-    // const language = ['en', 'es'].includes(lang) ? lang : 'en';
+    // Validate language parameter
+    const language = ['en', 'es'].includes(lang) ? lang : 'en';
 
     let whereConditions = ['ce.enabled = "Y"'];
     let queryParams = [];
