@@ -16989,4 +16989,256 @@ function verifyTokenOptional(req, res, next) {
   }
 }
 
+// ============ CALENDAR EVENTS ENDPOINTS ============
+
+// GET /calendar/events - Get all calendar events with optional filters
+// Query params:
+// - fromToday: 'true' to get events from today onwards
+// - daysLimit: number of days from today (requires fromToday=true)
+// - month: month number (1-12) for monthly pagination
+// - year: year (YYYY) for monthly pagination
+// - location_id: filter by specific location
+// - lang: 'en' or 'es' (default: 'en')
+router.get('/calendar/events', async (req, res) => {
+  try {
+    const { fromToday, daysLimit, month, year, location_id, lang = 'en' } = req.query;
+
+    // // Validate language parameter
+    // const language = ['en', 'es'].includes(lang) ? lang : 'en';
+
+    let whereConditions = ['ce.enabled = "Y"'];
+    let queryParams = [];
+
+    // Filter by location if provided
+    if (location_id) {
+      whereConditions.push('ce.location_id = ?');
+      queryParams.push(location_id);
+    }
+
+    // Filter by date range: from today onwards with optional days limit
+    if (fromToday === 'true') {
+      whereConditions.push('ce.date >= CURDATE()');
+      
+      if (daysLimit && !isNaN(daysLimit)) {
+        whereConditions.push('ce.date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)');
+        queryParams.push(parseInt(daysLimit));
+      }
+    }
+    // Filter by specific month and year (calendar pagination)
+    else if (month && year) {
+      const monthNum = parseInt(month);
+      const yearNum = parseInt(year);
+
+      if (monthNum < 1 || monthNum > 12) {
+        return res.status(400).json('Invalid month. Must be between 1 and 12');
+      }
+
+      whereConditions.push('MONTH(ce.date) = ? AND YEAR(ce.date) = ?');
+      queryParams.push(monthNum, yearNum);
+    }
+    // Filter by only year if provided without month
+    else if (year && !month) {
+      const yearNum = parseInt(year);
+      whereConditions.push('YEAR(ce.date) = ?');
+      queryParams.push(yearNum);
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    // ${language === 'en' ? 'l.description_en' : 'l.description_es'} as description,
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT 
+        ce.id,
+        ce.date,
+        ce.time,
+        ce.location_id,
+        l.organization as location_name,
+        l.community_city as location_city,
+        l.address as location_address,
+        ce.creation_date as created_at,
+        ce.modification_date as updated_at
+      FROM calendar_event ce
+      INNER JOIN location l ON ce.location_id = l.id
+      WHERE ${whereClause}
+      ORDER BY ce.date ASC, ce.time ASC`,
+      queryParams
+    );
+
+    res.json(rows);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /calendar/events/:id - Get single event detail (PUBLIC - no auth required)
+// Query params:
+// - lang: 'en' or 'es' (default: 'en')
+router.get('/calendar/events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { lang = 'en' } = req.query;
+
+    // Validate language parameter
+    const language = ['en', 'es'].includes(lang) ? lang : 'en';
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT 
+        ce.id,
+        ce.date,
+        ce.time,
+        ${language === 'en' ? 'l.description_en' : 'l.description_es'} as description,
+        ce.location_id,
+        l.organization as location_name,
+        l.community_city as location_city,
+        l.address as location_address,
+        ce.creation_date as created_at,
+        ce.modification_date as updated_at
+      FROM calendar_event ce
+      INNER JOIN location l ON ce.location_id = l.id
+      WHERE ce.id = ? AND ce.enabled = "Y"
+      LIMIT 1`,
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    
+    res.json(rows[0]);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /calendar/events - Create a new calendar event
+router.post('/calendar/events', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
+    const { date, time, location_id, description_en, description_es } = req.body;
+
+    if (!date || !time || !location_id) {
+      return res.status(400).json('Missing required fields: date, time, location_id');
+    }
+
+    try {
+      // Insert the new event
+      const [result] = await mysqlConnection.promise().query(
+        'INSERT INTO calendar_event (date, time, location_id, description_en, description_es) VALUES (?, ?, ?, ?, ?)',
+        [date, time, location_id, description_en || null, description_es || null]
+      );
+
+      // Get the created event with location details
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          ce.id,
+          ce.date,
+          ce.time,
+          ce.description_en,
+          ce.description_es,
+          ce.location_id,
+          l.organization as location_name,
+          l.community_city as location_city,
+          l.address as location_address,
+          ce.creation_date as created_at,
+          ce.modification_date as updated_at
+        FROM calendar_event ce
+        INNER JOIN location l ON ce.location_id = l.id
+        WHERE ce.id = ?`,
+        [result.insertId]
+      );
+
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+// PUT /calendar/events/:id - Update a calendar event
+router.put('/calendar/events/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
+    const { id } = req.params;
+    const { date, time, location_id, description_en, description_es } = req.body;
+
+    if (!date || !time || !location_id) {
+      return res.status(400).json('Missing required fields: date, time, location_id');
+    }
+
+    try {
+      // Update the event
+      const [result] = await mysqlConnection.promise().query(
+        'UPDATE calendar_event SET date = ?, time = ?, location_id = ?, description_en = ?, description_es = ? WHERE id = ? AND enabled = "Y"',
+        [date, time, location_id, description_en || null, description_es || null, id]
+      );
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json('Event not found');
+      }
+
+      // Get the updated event with location details
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          ce.id,
+          ce.date,
+          ce.time,
+          ce.description_en,
+          ce.description_es,
+          ce.location_id,
+          l.organization as location_name,
+          l.community_city as location_city,
+          l.address as location_address,
+          ce.creation_date as created_at,
+          ce.modification_date as updated_at
+        FROM calendar_event ce
+        INNER JOIN location l ON ce.location_id = l.id
+        WHERE ce.id = ?`,
+        [id]
+      );
+
+      res.json(rows[0]);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
+// DELETE /calendar/events/:id - Delete a calendar event (soft delete)
+router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
+    const { id } = req.params;
+
+    try {
+      // Soft delete the event
+      const [result] = await mysqlConnection.promise().query(
+        'UPDATE calendar_event SET enabled = "N" WHERE id = ? AND enabled = "Y"',
+        [id]
+      );
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json('Event not found');
+      }
+
+      res.json({ 
+        message: 'Event deleted successfully', 
+        deleted_id: parseInt(id) 
+      });
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(401).json('Unauthorized');
+  }
+});
+
 module.exports = router;
