@@ -16589,14 +16589,13 @@ router.post('/article/upload-image', verifyToken, articleUpload, async (req, res
   }
 });
 
-router.get('/categories', verifyToken, async (req, res) => {
-  const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
-    try {
-      const { lang = 'en' } = req.query; // Idioma por defecto: inglés
+router.get('/categories', async (req, res) => {
 
-      // Consulta SQL que incluye filtrado por idioma si tienes campos multiidioma
-      const query = `
+  try {
+    const { lang = 'en' } = req.query; // Idioma por defecto: inglés
+
+    // Consulta SQL que incluye filtrado por idioma si tienes campos multiidioma
+    const query = `
       SELECT 
       id,
       ${lang === 'en' ? 'name_en' : 'name_es'} AS name
@@ -16604,30 +16603,27 @@ router.get('/categories', verifyToken, async (req, res) => {
       ORDER BY name ASC
     `;
 
-      const [rows] = await mysqlConnection.promise().query(query, [lang]);
+    const [rows] = await mysqlConnection.promise().query(query, [lang]);
 
-      if (rows.length > 0) {
-        res.status(200).json(rows);
-      } else {
-        res.status(404).json('categories not found');
-      }
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
+    if (rows.length > 0) {
+      res.status(200).json(rows);
+    } else {
+      res.status(404).json('categories not found');
     }
-  } else {
-    res.status(401).json('Unauthorized');
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
   }
+
 });
 
-router.get('/filters', verifyToken, async (req, res) => {
-  const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
-    try {
-      const { lang = 'en' } = req.query; // Idioma por defecto: inglés
+router.get('/filters', async (req, res) => {
 
-      // Consulta SQL que incluye filtrado por idioma si tienes campos multiidioma
-      const query = `
+  try {
+    const { lang = 'en' } = req.query; // Idioma por defecto: inglés
+
+    // Consulta SQL que incluye filtrado por idioma si tienes campos multiidioma
+    const query = `
       SELECT 
       id,
       ${lang === 'en' ? 'name_en' : 'name_es'} AS name
@@ -16635,20 +16631,18 @@ router.get('/filters', verifyToken, async (req, res) => {
       ORDER BY name ASC
     `;
 
-      const [rows] = await mysqlConnection.promise().query(query, [lang]);
+    const [rows] = await mysqlConnection.promise().query(query, [lang]);
 
-      if (rows.length > 0) {
-        res.status(200).json(rows);
-      } else {
-        res.status(404).json('filters not found');
-      }
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
+    if (rows.length > 0) {
+      res.status(200).json(rows);
+    } else {
+      res.status(404).json('filters not found');
     }
-  } else {
-    res.status(401).json('Unauthorized');
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
   }
+
 });
 
 // Get all tags
