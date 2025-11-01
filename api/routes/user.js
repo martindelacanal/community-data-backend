@@ -17612,6 +17612,22 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
       getSchedulesForResources(resourceIds)
     ]);
 
+    // Collect all S3 keys for batch processing
+    const s3Keys = resources
+      .filter(resource => resource.image_url)
+      .map(resource => resource.image_url);
+
+    // Generate all signed URLs in parallel
+    const signedUrls = await getSignedUrlsForImages(s3Keys);
+
+    // Create a map of S3 keys to signed URLs
+    const urlMap = new Map();
+    s3Keys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        urlMap.set(key, signedUrls[index]);
+      }
+    });
+
     // Format response
     const formattedResources = resources.map(resource => {
       const resourceSchedules = schedulesMap.get(resource.id) || [];
@@ -17632,7 +17648,7 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         phoneNumber: resource.phone_number,
         email: resource.email,
         website: resource.website,
-        imageUrl: resource.image_url,
+        imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
         isActive: resource.is_active === 1 || resource.is_active === true,
         isOpen: status.isOpen,
         currentStatus: status.currentStatus,
@@ -17713,6 +17729,12 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
     const resourceSchedules = schedulesMap.get(resource.id) || [];
     const status = calculateCurrentStatus(resourceSchedules, 'en');
 
+    // Generate signed URL for image if exists
+    let imageUrl = null;
+    if (resource.image_url) {
+      imageUrl = await getSignedUrlForImage(resource.image_url);
+    }
+
     const formattedResource = {
       id: resource.id,
       titleEnglish: resource.title_english,
@@ -17728,7 +17750,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
-      imageUrl: resource.image_url,
+      imageUrl: imageUrl,
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: status.isOpen,
       currentStatus: status.currentStatus,
@@ -17740,7 +17762,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       services: servicesMap.get(resource.id) || [],
       schedules: resourceSchedules
     };
-
+    
     res.json(formattedResource);
 
   } catch (err) {
@@ -17877,6 +17899,12 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       getSchedulesForResources([resourceId])
     ]);
 
+    // Generate signed URL for image if exists
+    let imageUrl = null;
+    if (resource.image_url) {
+      imageUrl = await getSignedUrlForImage(resource.image_url);
+    }
+
     const formattedResource = {
       id: resource.id,
       titleEnglish: resource.title_english,
@@ -17892,7 +17920,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
-      imageUrl: resource.image_url,
+      imageUrl: imageUrl,
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: resource.is_open === 1 || resource.is_open === true,
       createdAt: resource.created_at,
@@ -18056,6 +18084,12 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
     const resourceSchedules = schedulesMap.get(resource.id) || [];
     const status = calculateCurrentStatus(resourceSchedules, 'en');
 
+    // Generate signed URL for image if exists
+    let imageUrl = null;
+    if (resource.image_url) {
+      imageUrl = await getSignedUrlForImage(resource.image_url);
+    }
+
     const formattedResource = {
       id: resource.id,
       titleEnglish: resource.title_english,
@@ -18071,7 +18105,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
-      imageUrl: resource.image_url,
+      imageUrl: imageUrl,
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: status.isOpen,
       currentStatus: status.currentStatus,
@@ -18119,7 +18153,7 @@ router.delete('/trusted-resources/:id', verifyToken, async (req, res) => {
     // Delete from S3 if image exists
     if (resources[0].image_url) {
       try {
-        const imageKey = resources[0].image_url.split('/').pop();
+        const imageKey = resources[0].image_url; // Already stored as S3 key
         const deleteCommand = new DeleteObjectCommand({
           Bucket: bucketName,
           Key: imageKey
@@ -18180,7 +18214,7 @@ router.post('/trusted-resources/:id/image', verifyToken, trustedResourceUpload, 
     // Delete old image from S3 if exists
     if (resources[0].image_url) {
       try {
-        const oldImageKey = resources[0].image_url.split('/').pop();
+        const oldImageKey = resources[0].image_url; // Already stored as S3 key
         const deleteCommand = new DeleteObjectCommand({
           Bucket: bucketName,
           Key: oldImageKey
@@ -18202,14 +18236,14 @@ router.post('/trusted-resources/:id/image', verifyToken, trustedResourceUpload, 
 
     await s3.send(putCommand);
 
-    // Generate the image URL
-    const imageUrl = `https://${bucketName}.s3.${bucketRegion}.amazonaws.com/${imageName}`;
-
-    // Update database
+    // Store only the S3 key (hash) in database
     await mysqlConnection.promise().query(
       'UPDATE trusted_resources SET image_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [imageUrl, id]
+      [imageName, id]
     );
+
+    // Generate signed URL for response
+    const imageUrl = await getSignedUrlForImage(imageName);
 
     res.json({ imageUrl });
 
@@ -18246,7 +18280,7 @@ router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
 
     // Delete from S3
     try {
-      const imageKey = resources[0].image_url.split('/').pop();
+      const imageKey = resources[0].image_url; // Already stored as S3 key
       const deleteCommand = new DeleteObjectCommand({
         Bucket: bucketName,
         Key: imageKey
@@ -18366,6 +18400,22 @@ router.get('/trusted-resources/public', async (req, res) => {
       getSchedulesForResources(resourceIds)
     ]);
 
+    // Collect all S3 keys for batch processing
+    const s3Keys = resources
+      .filter(resource => resource.image_url)
+      .map(resource => resource.image_url);
+
+    // Generate all signed URLs in parallel
+    const signedUrls = await getSignedUrlsForImages(s3Keys);
+
+    // Create a map of S3 keys to signed URLs
+    const urlMap = new Map();
+    s3Keys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        urlMap.set(key, signedUrls[index]);
+      }
+    });
+
     // Format response
     const formattedResources = resources.map(resource => {
       const schedules = schedulesMap.get(resource.id) || [];
@@ -18383,7 +18433,7 @@ router.get('/trusted-resources/public', async (req, res) => {
         phoneNumber: resource.phone_number,
         email: resource.email,
         website: resource.website,
-        imageUrl: resource.image_url,
+        imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
         isOpen: status.isOpen,
         filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
         prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
@@ -18453,6 +18503,12 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
     const schedules = schedulesMap.get(resource.id) || [];
     const status = calculateCurrentStatus(schedules, lang);
 
+    // Generate signed URL for image if exists
+    let imageUrl = null;
+    if (resource.image_url) {
+      imageUrl = await getSignedUrlForImage(resource.image_url);
+    }
+
     const formattedResource = {
       id: resource.id,
       title: resource.title,
@@ -18465,7 +18521,7 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
-      imageUrl: resource.image_url,
+      imageUrl: imageUrl,
       isOpen: status.isOpen,
       filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
       prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
