@@ -17386,9 +17386,14 @@ async function getSchedulesForResources(resourceIds) {
 
 // Helper function to calculate current status and today's hours
 function calculateCurrentStatus(schedules, language = 'en') {
-  const now = new Date();
-  const currentDay = now.getDay(); // 0-6 (0 = Sunday)
-  const currentTime = now.getHours() * 60 + now.getMinutes(); // minutes since midnight
+  // Get current time in Los Angeles timezone
+  const nowUTC = new Date();
+  const losAngelesTime = new Date(nowUTC.toLocaleString('en-US', { 
+    timeZone: 'America/Los_Angeles' 
+  }));
+  
+  const currentDay = losAngelesTime.getDay(); // 0-6 (0 = Sunday)
+  const currentTime = losAngelesTime.getHours() * 60 + losAngelesTime.getMinutes(); // minutes since midnight
 
   const todaySchedule = schedules.find(s => s.dayOfWeek === currentDay);
 
@@ -17567,7 +17572,8 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         tr.information_english,
         tr.information_spanish,
         tr.address,
-        tr.coordinates,
+        ST_Y(tr.coordinates) as latitude,
+        ST_X(tr.coordinates) as longitude,
         tr.phone_number,
         tr.email,
         tr.website,
@@ -17607,29 +17613,38 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
     ]);
 
     // Format response
-    const formattedResources = resources.map(resource => ({
-      id: resource.id,
-      titleEnglish: resource.title_english,
-      titleSpanish: resource.title_spanish,
-      descriptionEnglish: resource.description_english,
-      descriptionSpanish: resource.description_spanish,
-      informationEnglish: resource.information_english,
-      informationSpanish: resource.information_spanish,
-      address: resource.address,
-      coordinates: resource.coordinates,
-      phoneNumber: resource.phone_number,
-      email: resource.email,
-      website: resource.website,
-      imageUrl: resource.image_url,
-      isActive: resource.is_active === 1 || resource.is_active === true,
-      isOpen: resource.is_open === 1 || resource.is_open === true,
-      createdAt: resource.created_at,
-      updatedAt: resource.updated_at,
-      filters: filtersMap.get(resource.id) || [],
-      prices: pricesMap.get(resource.id) || [],
-      services: servicesMap.get(resource.id) || [],
-      schedules: schedulesMap.get(resource.id) || []
-    }));
+    const formattedResources = resources.map(resource => {
+      const resourceSchedules = schedulesMap.get(resource.id) || [];
+      const status = calculateCurrentStatus(resourceSchedules, 'en');
+      
+      return {
+        id: resource.id,
+        titleEnglish: resource.title_english,
+        titleSpanish: resource.title_spanish,
+        descriptionEnglish: resource.description_english,
+        descriptionSpanish: resource.description_spanish,
+        informationEnglish: resource.information_english,
+        informationSpanish: resource.information_spanish,
+        address: resource.address,
+        coordinates: resource.latitude && resource.longitude 
+          ? `${resource.latitude},${resource.longitude}` 
+          : null,
+        phoneNumber: resource.phone_number,
+        email: resource.email,
+        website: resource.website,
+        imageUrl: resource.image_url,
+        isActive: resource.is_active === 1 || resource.is_active === true,
+        isOpen: status.isOpen,
+        currentStatus: status.currentStatus,
+        todayHours: status.todayHours,
+        createdAt: resource.created_at,
+        updatedAt: resource.updated_at,
+        filters: filtersMap.get(resource.id) || [],
+        prices: pricesMap.get(resource.id) || [],
+        services: servicesMap.get(resource.id) || [],
+        schedules: resourceSchedules
+      };
+    });
 
     res.json({
       resources: formattedResources,
@@ -17665,7 +17680,8 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
         information_english,
         information_spanish,
         address,
-        coordinates,
+        ST_Y(coordinates) as latitude,
+        ST_X(coordinates) as longitude,
         phone_number,
         email,
         website,
@@ -17694,6 +17710,9 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       getSchedulesForResources([resource.id])
     ]);
 
+    const resourceSchedules = schedulesMap.get(resource.id) || [];
+    const status = calculateCurrentStatus(resourceSchedules, 'en');
+
     const formattedResource = {
       id: resource.id,
       titleEnglish: resource.title_english,
@@ -17703,19 +17722,23 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.coordinates,
+      coordinates: resource.latitude && resource.longitude 
+        ? `${resource.latitude},${resource.longitude}` 
+        : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
       imageUrl: resource.image_url,
       isActive: resource.is_active === 1 || resource.is_active === true,
-      isOpen: resource.is_open === 1 || resource.is_open === true,
+      isOpen: status.isOpen,
+      currentStatus: status.currentStatus,
+      todayHours: status.todayHours,
       createdAt: resource.created_at,
       updatedAt: resource.updated_at,
       filters: filtersMap.get(resource.id) || [],
       prices: pricesMap.get(resource.id) || [],
       services: servicesMap.get(resource.id) || [],
-      schedules: schedulesMap.get(resource.id) || []
+      schedules: resourceSchedules
     };
 
     res.json(formattedResource);
@@ -17763,6 +17786,14 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       return res.status(400).json('Missing required fields');
     }
 
+    // Parse coordinates from string format "lat,lng"
+    const coordParts = coordinates.split(',').map(c => c.trim());
+    if (coordParts.length !== 2 || isNaN(coordParts[0]) || isNaN(coordParts[1])) {
+      return res.status(400).json('Invalid coordinates format. Expected "latitude,longitude"');
+    }
+    const latitude = parseFloat(coordParts[0]);
+    const longitude = parseFloat(coordParts[1]);
+
     await connection.beginTransaction();
 
     // Insert the main resource
@@ -17771,9 +17802,10 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
        (title_english, title_spanish, description_english, description_spanish, 
         information_english, information_spanish, address, coordinates, 
         phone_number, email, website, is_active) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, POINT(?, ?), ?, ?, ?, ?)`,
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
-       informationEnglish, informationSpanish, address, coordinates,
+       informationEnglish, informationSpanish, address, 
+       longitude, latitude,
        phoneNumber, email, website, isActive ? 1 : 0]
     );
 
@@ -17827,7 +17859,12 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
 
     // Get the created resource with all relations
     const [resources] = await mysqlConnection.promise().query(
-      `SELECT * FROM trusted_resources WHERE id = ?`,
+      `SELECT 
+        id, title_english, title_spanish, description_english, description_spanish,
+        information_english, information_spanish, address, 
+        ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude,
+        phone_number, email, website, image_url, is_active, is_open, created_at, updated_at
+      FROM trusted_resources WHERE id = ?`,
       [resourceId]
     );
 
@@ -17849,7 +17886,9 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.coordinates,
+      coordinates: resource.latitude && resource.longitude 
+        ? `${resource.latitude},${resource.longitude}` 
+        : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
@@ -17913,6 +17952,14 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       return res.status(400).json('Missing required fields');
     }
 
+    // Parse coordinates from string format "lat,lng"
+    const coordParts = coordinates.split(',').map(c => c.trim());
+    if (coordParts.length !== 2 || isNaN(coordParts[0]) || isNaN(coordParts[1])) {
+      return res.status(400).json('Invalid coordinates format. Expected "latitude,longitude"');
+    }
+    const latitude = parseFloat(coordParts[0]);
+    const longitude = parseFloat(coordParts[1]);
+
     await connection.beginTransaction();
 
     // Update the main resource
@@ -17920,11 +17967,12 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       `UPDATE trusted_resources 
        SET title_english = ?, title_spanish = ?, description_english = ?, 
            description_spanish = ?, information_english = ?, information_spanish = ?,
-           address = ?, coordinates = ?, phone_number = ?, email = ?, 
+           address = ?, coordinates = POINT(?, ?), phone_number = ?, email = ?, 
            website = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
-       informationEnglish, informationSpanish, address, coordinates,
+       informationEnglish, informationSpanish, address, 
+       longitude, latitude,
        phoneNumber, email, website, isActive ? 1 : 0, id]
     );
 
@@ -17987,7 +18035,12 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
 
     // Get the updated resource with all relations
     const [resources] = await mysqlConnection.promise().query(
-      `SELECT * FROM trusted_resources WHERE id = ?`,
+      `SELECT 
+        id, title_english, title_spanish, description_english, description_spanish,
+        information_english, information_spanish, address, 
+        ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude,
+        phone_number, email, website, image_url, is_active, is_open, created_at, updated_at
+      FROM trusted_resources WHERE id = ?`,
       [id]
     );
 
@@ -18000,6 +18053,9 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       getSchedulesForResources([id])
     ]);
 
+    const resourceSchedules = schedulesMap.get(resource.id) || [];
+    const status = calculateCurrentStatus(resourceSchedules, 'en');
+
     const formattedResource = {
       id: resource.id,
       titleEnglish: resource.title_english,
@@ -18009,19 +18065,23 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.coordinates,
+      coordinates: resource.latitude && resource.longitude 
+        ? `${resource.latitude},${resource.longitude}` 
+        : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
       imageUrl: resource.image_url,
       isActive: resource.is_active === 1 || resource.is_active === true,
-      isOpen: resource.is_open === 1 || resource.is_open === true,
+      isOpen: status.isOpen,
+      currentStatus: status.currentStatus,
+      todayHours: status.todayHours,
       createdAt: resource.created_at,
       updatedAt: resource.updated_at,
       filters: filtersMap.get(resource.id) || [],
       prices: pricesMap.get(resource.id) || [],
       services: servicesMap.get(resource.id) || [],
-      schedules: schedulesMap.get(resource.id) || []
+      schedules: resourceSchedules
     };
 
     res.json(formattedResource);
@@ -18269,7 +18329,8 @@ router.get('/trusted-resources/public', async (req, res) => {
         ${lang === 'en' ? 'tr.description_english' : 'tr.description_spanish'} as description,
         ${lang === 'en' ? 'tr.information_english' : 'tr.information_spanish'} as information,
         tr.address,
-        tr.coordinates,
+        ST_Y(tr.coordinates) as latitude,
+        ST_X(tr.coordinates) as longitude,
         tr.phone_number,
         tr.email,
         tr.website,
@@ -18316,7 +18377,9 @@ router.get('/trusted-resources/public', async (req, res) => {
         description: resource.description,
         information: resource.information,
         address: resource.address,
-        coordinates: resource.coordinates,
+        coordinates: resource.latitude && resource.longitude 
+          ? `${resource.latitude},${resource.longitude}` 
+          : null,
         phoneNumber: resource.phone_number,
         email: resource.email,
         website: resource.website,
@@ -18360,7 +18423,8 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
         ${lang === 'en' ? 'description_english' : 'description_spanish'} as description,
         ${lang === 'en' ? 'information_english' : 'information_spanish'} as information,
         address,
-        coordinates,
+        ST_Y(coordinates) as latitude,
+        ST_X(coordinates) as longitude,
         phone_number,
         email,
         website,
@@ -18395,7 +18459,9 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       description: resource.description,
       information: resource.information,
       address: resource.address,
-      coordinates: resource.coordinates,
+      coordinates: resource.latitude && resource.longitude 
+        ? `${resource.latitude},${resource.longitude}` 
+        : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
       website: resource.website,
