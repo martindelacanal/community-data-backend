@@ -17128,7 +17128,7 @@ router.get('/calendar/events/:id', async (req, res) => {
 router.post('/calendar/events', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
-    const { date, time, location_id, description_en, description_es } = req.body;
+    const { date, time, location_id } = req.body;
 
     if (!date || !time || !location_id) {
       return res.status(400).json('Missing required fields: date, time, location_id');
@@ -17137,8 +17137,8 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
     try {
       // Insert the new event
       const [result] = await mysqlConnection.promise().query(
-        'INSERT INTO calendar_event (date, time, location_id, description_en, description_es) VALUES (?, ?, ?, ?, ?)',
-        [date, time, location_id, description_en || null, description_es || null]
+        'INSERT INTO calendar_event (date, time, location_id) VALUES (?, ?, ?)',
+        [date, time, location_id]
       );
 
       // Get the created event with location details
@@ -17147,8 +17147,6 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
           ce.id,
           ce.date,
           ce.time,
-          ce.description_en,
-          ce.description_es,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
@@ -17176,7 +17174,7 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     const { id } = req.params;
-    const { date, time, location_id, description_en, description_es } = req.body;
+    const { date, time, location_id } = req.body;
 
     if (!date || !time || !location_id) {
       return res.status(400).json('Missing required fields: date, time, location_id');
@@ -17185,8 +17183,8 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
     try {
       // Update the event
       const [result] = await mysqlConnection.promise().query(
-        'UPDATE calendar_event SET date = ?, time = ?, location_id = ?, description_en = ?, description_es = ? WHERE id = ? AND enabled = "Y"',
-        [date, time, location_id, description_en || null, description_es || null, id]
+        'UPDATE calendar_event SET date = ?, time = ?, location_id = ? WHERE id = ? AND enabled = "Y"',
+        [date, time, location_id, id]
       );
 
       if (result.affectedRows === 0) {
@@ -17199,8 +17197,6 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
           ce.id,
           ce.date,
           ce.time,
-          ce.description_en,
-          ce.description_es,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
@@ -17250,6 +17246,1175 @@ router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
     }
   } else {
     res.status(401).json('Unauthorized');
+  }
+});
+
+// ============ TRUSTED RESOURCES ENDPOINTS ============
+
+// Multer configuration for trusted resource images
+const trustedResourceUpload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB max file size
+  }
+}).single('image');
+
+// Helper function to get filters for resources
+async function getFiltersForResources(resourceIds) {
+  if (!resourceIds || resourceIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = resourceIds.map(() => '?').join(',');
+  const [filters] = await mysqlConnection.promise().query(
+    `SELECT rfr.resource_id, rf.id, rf.name_english, rf.name_spanish
+     FROM resource_filter_relations rfr
+     INNER JOIN resource_filters rf ON rfr.filter_id = rf.id
+     WHERE rfr.resource_id IN (${placeholders})
+     ORDER BY rf.name_english`,
+    resourceIds
+  );
+
+  const filtersMap = new Map();
+  filters.forEach(filter => {
+    if (!filtersMap.has(filter.resource_id)) {
+      filtersMap.set(filter.resource_id, []);
+    }
+    filtersMap.get(filter.resource_id).push({
+      id: filter.id,
+      nameEnglish: filter.name_english,
+      nameSpanish: filter.name_spanish
+    });
+  });
+
+  return filtersMap;
+}
+
+// Helper function to get prices for resources
+async function getPricesForResources(resourceIds) {
+  if (!resourceIds || resourceIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = resourceIds.map(() => '?').join(',');
+  const [prices] = await mysqlConnection.promise().query(
+    `SELECT rpr.resource_id, rp.id, rp.name_english, rp.name_spanish
+     FROM resource_price_relations rpr
+     INNER JOIN resource_prices rp ON rpr.price_id = rp.id
+     WHERE rpr.resource_id IN (${placeholders})
+     ORDER BY rp.name_english`,
+    resourceIds
+  );
+
+  const pricesMap = new Map();
+  prices.forEach(price => {
+    if (!pricesMap.has(price.resource_id)) {
+      pricesMap.set(price.resource_id, []);
+    }
+    pricesMap.get(price.resource_id).push({
+      id: price.id,
+      nameEnglish: price.name_english,
+      nameSpanish: price.name_spanish
+    });
+  });
+
+  return pricesMap;
+}
+
+// Helper function to get services for resources
+async function getServicesForResources(resourceIds) {
+  if (!resourceIds || resourceIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = resourceIds.map(() => '?').join(',');
+  const [services] = await mysqlConnection.promise().query(
+    `SELECT rsr.resource_id, rs.id, rs.name_english, rs.name_spanish
+     FROM resource_service_relations rsr
+     INNER JOIN resource_services rs ON rsr.service_id = rs.id
+     WHERE rsr.resource_id IN (${placeholders})
+     ORDER BY rs.name_english`,
+    resourceIds
+  );
+
+  const servicesMap = new Map();
+  services.forEach(service => {
+    if (!servicesMap.has(service.resource_id)) {
+      servicesMap.set(service.resource_id, []);
+    }
+    servicesMap.get(service.resource_id).push({
+      id: service.id,
+      nameEnglish: service.name_english,
+      nameSpanish: service.name_spanish
+    });
+  });
+
+  return servicesMap;
+}
+
+// Helper function to get schedules for resources
+async function getSchedulesForResources(resourceIds) {
+  if (!resourceIds || resourceIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = resourceIds.map(() => '?').join(',');
+  const [schedules] = await mysqlConnection.promise().query(
+    `SELECT id, resource_id, day_of_week, is_open, open_time, close_time
+     FROM resource_schedules
+     WHERE resource_id IN (${placeholders})
+     ORDER BY day_of_week`,
+    resourceIds
+  );
+
+  const schedulesMap = new Map();
+  schedules.forEach(schedule => {
+    if (!schedulesMap.has(schedule.resource_id)) {
+      schedulesMap.set(schedule.resource_id, []);
+    }
+    schedulesMap.get(schedule.resource_id).push({
+      id: schedule.id,
+      dayOfWeek: schedule.day_of_week,
+      isOpen: schedule.is_open === 1 || schedule.is_open === true,
+      openTime: schedule.open_time,
+      closeTime: schedule.close_time
+    });
+  });
+
+  return schedulesMap;
+}
+
+// Helper function to calculate current status and today's hours
+function calculateCurrentStatus(schedules, language = 'en') {
+  const now = new Date();
+  const currentDay = now.getDay(); // 0-6 (0 = Sunday)
+  const currentTime = now.getHours() * 60 + now.getMinutes(); // minutes since midnight
+
+  const todaySchedule = schedules.find(s => s.dayOfWeek === currentDay);
+
+  if (!todaySchedule || !todaySchedule.isOpen) {
+    return {
+      isOpen: false,
+      currentStatus: language === 'en' ? 'Closed today' : 'Cerrado hoy',
+      todayHours: language === 'en' ? 'Closed' : 'Cerrado'
+    };
+  }
+
+  const [openHour, openMin] = todaySchedule.openTime.split(':').map(Number);
+  const [closeHour, closeMin] = todaySchedule.closeTime.split(':').map(Number);
+  const openTimeMinutes = openHour * 60 + openMin;
+  const closeTimeMinutes = closeHour * 60 + closeMin;
+
+  const isOpen = currentTime >= openTimeMinutes && currentTime <= closeTimeMinutes;
+
+  // Format hours for display (12-hour format)
+  const formatTime = (time) => {
+    const [hour, min] = time.split(':').map(Number);
+    const period = hour >= 12 ? 'PM' : 'AM';
+    const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+    return `${displayHour}:${min.toString().padStart(2, '0')} ${period}`;
+  };
+
+  const todayHours = `${formatTime(todaySchedule.openTime)} to ${formatTime(todaySchedule.closeTime)}`;
+
+  return {
+    isOpen,
+    currentStatus: isOpen 
+      ? (language === 'en' ? 'Open now' : 'Abierto ahora')
+      : (language === 'en' ? 'Closed now' : 'Cerrado ahora'),
+    todayHours
+  };
+}
+
+// ============ CATALOG ENDPOINTS ============
+
+// GET /trusted-resources/filters - Get all filters
+router.get('/trusted-resources/filters', async (req, res) => {
+  try {
+    const [filters] = await mysqlConnection.promise().query(
+      'SELECT id, name_english, name_spanish FROM resource_filters ORDER BY name_english'
+    );
+
+    const formattedFilters = filters.map(filter => ({
+      id: filter.id,
+      nameEnglish: filter.name_english,
+      nameSpanish: filter.name_spanish
+    }));
+
+    res.json(formattedFilters);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting filters:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/prices - Get all prices
+router.get('/trusted-resources/prices', async (req, res) => {
+  try {
+    const [prices] = await mysqlConnection.promise().query(
+      'SELECT id, name_english, name_spanish FROM resource_prices ORDER BY name_english'
+    );
+
+    const formattedPrices = prices.map(price => ({
+      id: price.id,
+      nameEnglish: price.name_english,
+      nameSpanish: price.name_spanish
+    }));
+
+    res.json(formattedPrices);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting prices:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/services - Get all services
+router.get('/trusted-resources/services', async (req, res) => {
+  try {
+    const [services] = await mysqlConnection.promise().query(
+      'SELECT id, name_english, name_spanish FROM resource_services ORDER BY name_english'
+    );
+
+    const formattedServices = services.map(service => ({
+      id: service.id,
+      nameEnglish: service.name_english,
+      nameSpanish: service.name_spanish
+    }));
+    
+    res.json(formattedServices);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting services:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// ============ ADMIN ENDPOINTS ============
+
+// GET /trusted-resources - Get all trusted resources (ADMIN)
+router.get('/trusted-resources', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { 
+      page = 1, 
+      pageSize = 20, 
+      search = '', 
+      filterIds = '', 
+      isActive 
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const pageSizeNum = parseInt(pageSize);
+    const offset = (pageNum - 1) * pageSizeNum;
+
+    let whereConditions = [];
+    let queryParams = [];
+
+    // Search by title or address
+    if (search && search.trim() !== '') {
+      whereConditions.push('(tr.title_english LIKE ? OR tr.title_spanish LIKE ? OR tr.address LIKE ?)');
+      const searchTerm = `%${search.trim()}%`;
+      queryParams.push(searchTerm, searchTerm, searchTerm);
+    }
+
+    // Filter by active status
+    if (isActive !== undefined && isActive !== '') {
+      whereConditions.push('tr.is_active = ?');
+      queryParams.push(isActive === 'true' ? 1 : 0);
+    }
+
+    // Filter by filter IDs
+    let filterJoin = '';
+    if (filterIds && filterIds.trim() !== '') {
+      const filterIdArray = filterIds.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+      if (filterIdArray.length > 0) {
+        const filterPlaceholders = filterIdArray.map(() => '?').join(',');
+        filterJoin = `INNER JOIN resource_filter_relations rfr ON tr.id = rfr.resource_id`;
+        whereConditions.push(`rfr.filter_id IN (${filterPlaceholders})`);
+        queryParams.push(...filterIdArray);
+      }
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(DISTINCT tr.id) as total
+      FROM trusted_resources tr
+      ${filterJoin}
+      ${whereClause}
+    `;
+    const [countResult] = await mysqlConnection.promise().query(countQuery, queryParams);
+    const total = countResult[0].total;
+
+    // Get resources
+    const resourcesQuery = `
+      SELECT DISTINCT
+        tr.id,
+        tr.title_english,
+        tr.title_spanish,
+        tr.description_english,
+        tr.description_spanish,
+        tr.information_english,
+        tr.information_spanish,
+        tr.address,
+        tr.coordinates,
+        tr.phone_number,
+        tr.email,
+        tr.website,
+        tr.image_url,
+        tr.is_active,
+        tr.is_open,
+        tr.created_at,
+        tr.updated_at
+      FROM trusted_resources tr
+      ${filterJoin}
+      ${whereClause}
+      ORDER BY tr.created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+    queryParams.push(pageSizeNum, offset);
+
+    const [resources] = await mysqlConnection.promise().query(resourcesQuery, queryParams);
+
+    if (resources.length === 0) {
+      return res.json({
+        resources: [],
+        total: 0,
+        page: pageNum,
+        pageSize: pageSizeNum
+      });
+    }
+
+    // Get resource IDs
+    const resourceIds = resources.map(r => r.id);
+
+    // Get filters, prices, services, and schedules for all resources
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources(resourceIds),
+      getPricesForResources(resourceIds),
+      getServicesForResources(resourceIds),
+      getSchedulesForResources(resourceIds)
+    ]);
+
+    // Format response
+    const formattedResources = resources.map(resource => ({
+      id: resource.id,
+      titleEnglish: resource.title_english,
+      titleSpanish: resource.title_spanish,
+      descriptionEnglish: resource.description_english,
+      descriptionSpanish: resource.description_spanish,
+      informationEnglish: resource.information_english,
+      informationSpanish: resource.information_spanish,
+      address: resource.address,
+      coordinates: resource.coordinates,
+      phoneNumber: resource.phone_number,
+      email: resource.email,
+      website: resource.website,
+      imageUrl: resource.image_url,
+      isActive: resource.is_active === 1 || resource.is_active === true,
+      isOpen: resource.is_open === 1 || resource.is_open === true,
+      createdAt: resource.created_at,
+      updatedAt: resource.updated_at,
+      filters: filtersMap.get(resource.id) || [],
+      prices: pricesMap.get(resource.id) || [],
+      services: servicesMap.get(resource.id) || [],
+      schedules: schedulesMap.get(resource.id) || []
+    }));
+
+    res.json({
+      resources: formattedResources,
+      total,
+      page: pageNum,
+      pageSize: pageSizeNum
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting trusted resources:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/:id - Get single trusted resource by ID (ADMIN)
+router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT 
+        id,
+        title_english,
+        title_spanish,
+        description_english,
+        description_spanish,
+        information_english,
+        information_spanish,
+        address,
+        coordinates,
+        phone_number,
+        email,
+        website,
+        image_url,
+        is_active,
+        is_open,
+        created_at,
+        updated_at
+      FROM trusted_resources
+      WHERE id = ?
+      LIMIT 1`,
+      [id]
+    );
+
+    if (resources.length === 0) {
+      return res.status(404).json({ message: 'Resource not found' });
+    }
+
+    const resource = resources[0];
+
+    // Get filters, prices, services, and schedules
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources([resource.id]),
+      getPricesForResources([resource.id]),
+      getServicesForResources([resource.id]),
+      getSchedulesForResources([resource.id])
+    ]);
+
+    const formattedResource = {
+      id: resource.id,
+      titleEnglish: resource.title_english,
+      titleSpanish: resource.title_spanish,
+      descriptionEnglish: resource.description_english,
+      descriptionSpanish: resource.description_spanish,
+      informationEnglish: resource.information_english,
+      informationSpanish: resource.information_spanish,
+      address: resource.address,
+      coordinates: resource.coordinates,
+      phoneNumber: resource.phone_number,
+      email: resource.email,
+      website: resource.website,
+      imageUrl: resource.image_url,
+      isActive: resource.is_active === 1 || resource.is_active === true,
+      isOpen: resource.is_open === 1 || resource.is_open === true,
+      createdAt: resource.created_at,
+      updatedAt: resource.updated_at,
+      filters: filtersMap.get(resource.id) || [],
+      prices: pricesMap.get(resource.id) || [],
+      services: servicesMap.get(resource.id) || [],
+      schedules: schedulesMap.get(resource.id) || []
+    };
+
+    res.json(formattedResource);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting trusted resource:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /trusted-resources - Create a new trusted resource (ADMIN)
+router.post('/trusted-resources', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const connection = await mysqlConnection.promise().getConnection();
+
+  try {
+    const {
+      titleEnglish,
+      titleSpanish,
+      descriptionEnglish,
+      descriptionSpanish,
+      informationEnglish,
+      informationSpanish,
+      address,
+      coordinates,
+      phoneNumber,
+      email,
+      website,
+      isActive = true,
+      filterIds = [],
+      priceIds = [],
+      serviceIds = [],
+      schedules = []
+    } = req.body;
+
+    // Validate required fields
+    if (!titleEnglish || !titleSpanish || !descriptionEnglish || !descriptionSpanish ||
+        !informationEnglish || !informationSpanish || !address || !coordinates || 
+        !phoneNumber || !email || !website) {
+      return res.status(400).json('Missing required fields');
+    }
+
+    await connection.beginTransaction();
+
+    // Insert the main resource
+    const [result] = await connection.query(
+      `INSERT INTO trusted_resources 
+       (title_english, title_spanish, description_english, description_spanish, 
+        information_english, information_spanish, address, coordinates, 
+        phone_number, email, website, is_active) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
+       informationEnglish, informationSpanish, address, coordinates,
+       phoneNumber, email, website, isActive ? 1 : 0]
+    );
+
+    const resourceId = result.insertId;
+
+    // Insert filter relations
+    if (filterIds && filterIds.length > 0) {
+      const filterValues = filterIds.map(filterId => [resourceId, filterId]);
+      await connection.query(
+        'INSERT INTO resource_filter_relations (resource_id, filter_id) VALUES ?',
+        [filterValues]
+      );
+    }
+
+    // Insert price relations
+    if (priceIds && priceIds.length > 0) {
+      const priceValues = priceIds.map(priceId => [resourceId, priceId]);
+      await connection.query(
+        'INSERT INTO resource_price_relations (resource_id, price_id) VALUES ?',
+        [priceValues]
+      );
+    }
+
+    // Insert service relations
+    if (serviceIds && serviceIds.length > 0) {
+      const serviceValues = serviceIds.map(serviceId => [resourceId, serviceId]);
+      await connection.query(
+        'INSERT INTO resource_service_relations (resource_id, service_id) VALUES ?',
+        [serviceValues]
+      );
+    }
+
+    // Insert schedules
+    if (schedules && schedules.length > 0) {
+      const scheduleValues = schedules.map(schedule => [
+        resourceId,
+        schedule.dayOfWeek,
+        schedule.isOpen ? 1 : 0,
+        schedule.openTime,
+        schedule.closeTime
+      ]);
+      await connection.query(
+        `INSERT INTO resource_schedules 
+         (resource_id, day_of_week, is_open, open_time, close_time) 
+         VALUES ?`,
+        [scheduleValues]
+      );
+    }
+
+    await connection.commit();
+
+    // Get the created resource with all relations
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT * FROM trusted_resources WHERE id = ?`,
+      [resourceId]
+    );
+
+    const resource = resources[0];
+
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources([resourceId]),
+      getPricesForResources([resourceId]),
+      getServicesForResources([resourceId]),
+      getSchedulesForResources([resourceId])
+    ]);
+
+    const formattedResource = {
+      id: resource.id,
+      titleEnglish: resource.title_english,
+      titleSpanish: resource.title_spanish,
+      descriptionEnglish: resource.description_english,
+      descriptionSpanish: resource.description_spanish,
+      informationEnglish: resource.information_english,
+      informationSpanish: resource.information_spanish,
+      address: resource.address,
+      coordinates: resource.coordinates,
+      phoneNumber: resource.phone_number,
+      email: resource.email,
+      website: resource.website,
+      imageUrl: resource.image_url,
+      isActive: resource.is_active === 1 || resource.is_active === true,
+      isOpen: resource.is_open === 1 || resource.is_open === true,
+      createdAt: resource.created_at,
+      updatedAt: resource.updated_at,
+      filters: filtersMap.get(resource.id) || [],
+      prices: pricesMap.get(resource.id) || [],
+      services: servicesMap.get(resource.id) || [],
+      schedules: schedulesMap.get(resource.id) || []
+    };
+
+    res.status(201).json(formattedResource);
+
+  } catch (err) {
+    await connection.rollback();
+    console.log(err);
+    logger.error('Error creating trusted resource:', err);
+    res.status(500).json('Internal server error');
+  } finally {
+    connection.release();
+  }
+});
+
+// PUT /trusted-resources/:id - Update a trusted resource (ADMIN)
+router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const connection = await mysqlConnection.promise().getConnection();
+
+  try {
+    const { id } = req.params;
+    const {
+      titleEnglish,
+      titleSpanish,
+      descriptionEnglish,
+      descriptionSpanish,
+      informationEnglish,
+      informationSpanish,
+      address,
+      coordinates,
+      phoneNumber,
+      email,
+      website,
+      isActive = true,
+      filterIds = [],
+      priceIds = [],
+      serviceIds = [],
+      schedules = []
+    } = req.body;
+
+    // Validate required fields
+    if (!titleEnglish || !titleSpanish || !descriptionEnglish || !descriptionSpanish ||
+        !informationEnglish || !informationSpanish || !address || !coordinates || 
+        !phoneNumber || !email || !website) {
+      return res.status(400).json('Missing required fields');
+    }
+
+    await connection.beginTransaction();
+
+    // Update the main resource
+    const [updateResult] = await connection.query(
+      `UPDATE trusted_resources 
+       SET title_english = ?, title_spanish = ?, description_english = ?, 
+           description_spanish = ?, information_english = ?, information_spanish = ?,
+           address = ?, coordinates = ?, phone_number = ?, email = ?, 
+           website = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
+       informationEnglish, informationSpanish, address, coordinates,
+       phoneNumber, email, website, isActive ? 1 : 0, id]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      await connection.rollback();
+      return res.status(404).json('Resource not found');
+    }
+
+    // Delete existing relations
+    await connection.query('DELETE FROM resource_filter_relations WHERE resource_id = ?', [id]);
+    await connection.query('DELETE FROM resource_price_relations WHERE resource_id = ?', [id]);
+    await connection.query('DELETE FROM resource_service_relations WHERE resource_id = ?', [id]);
+    await connection.query('DELETE FROM resource_schedules WHERE resource_id = ?', [id]);
+
+    // Insert new filter relations
+    if (filterIds && filterIds.length > 0) {
+      const filterValues = filterIds.map(filterId => [id, filterId]);
+      await connection.query(
+        'INSERT INTO resource_filter_relations (resource_id, filter_id) VALUES ?',
+        [filterValues]
+      );
+    }
+
+    // Insert new price relations
+    if (priceIds && priceIds.length > 0) {
+      const priceValues = priceIds.map(priceId => [id, priceId]);
+      await connection.query(
+        'INSERT INTO resource_price_relations (resource_id, price_id) VALUES ?',
+        [priceValues]
+      );
+    }
+
+    // Insert new service relations
+    if (serviceIds && serviceIds.length > 0) {
+      const serviceValues = serviceIds.map(serviceId => [id, serviceId]);
+      await connection.query(
+        'INSERT INTO resource_service_relations (resource_id, service_id) VALUES ?',
+        [serviceValues]
+      );
+    }
+
+    // Insert new schedules
+    if (schedules && schedules.length > 0) {
+      const scheduleValues = schedules.map(schedule => [
+        id,
+        schedule.dayOfWeek,
+        schedule.isOpen ? 1 : 0,
+        schedule.openTime,
+        schedule.closeTime
+      ]);
+      await connection.query(
+        `INSERT INTO resource_schedules 
+         (resource_id, day_of_week, is_open, open_time, close_time) 
+         VALUES ?`,
+        [scheduleValues]
+      );
+    }
+
+    await connection.commit();
+
+    // Get the updated resource with all relations
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT * FROM trusted_resources WHERE id = ?`,
+      [id]
+    );
+
+    const resource = resources[0];
+
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources([id]),
+      getPricesForResources([id]),
+      getServicesForResources([id]),
+      getSchedulesForResources([id])
+    ]);
+
+    const formattedResource = {
+      id: resource.id,
+      titleEnglish: resource.title_english,
+      titleSpanish: resource.title_spanish,
+      descriptionEnglish: resource.description_english,
+      descriptionSpanish: resource.description_spanish,
+      informationEnglish: resource.information_english,
+      informationSpanish: resource.information_spanish,
+      address: resource.address,
+      coordinates: resource.coordinates,
+      phoneNumber: resource.phone_number,
+      email: resource.email,
+      website: resource.website,
+      imageUrl: resource.image_url,
+      isActive: resource.is_active === 1 || resource.is_active === true,
+      isOpen: resource.is_open === 1 || resource.is_open === true,
+      createdAt: resource.created_at,
+      updatedAt: resource.updated_at,
+      filters: filtersMap.get(resource.id) || [],
+      prices: pricesMap.get(resource.id) || [],
+      services: servicesMap.get(resource.id) || [],
+      schedules: schedulesMap.get(resource.id) || []
+    };
+
+    res.json(formattedResource);
+
+  } catch (err) {
+    await connection.rollback();
+    console.log(err);
+    logger.error('Error updating trusted resource:', err);
+    res.status(500).json('Internal server error');
+  } finally {
+    connection.release();
+  }
+});
+
+// DELETE /trusted-resources/:id - Delete a trusted resource (ADMIN)
+router.delete('/trusted-resources/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    // Get image URL before deleting
+    const [resources] = await mysqlConnection.promise().query(
+      'SELECT image_url FROM trusted_resources WHERE id = ?',
+      [id]
+    );
+
+    if (resources.length === 0) {
+      return res.status(404).json('Resource not found');
+    }
+
+    // Delete from S3 if image exists
+    if (resources[0].image_url) {
+      try {
+        const imageKey = resources[0].image_url.split('/').pop();
+        const deleteCommand = new DeleteObjectCommand({
+          Bucket: bucketName,
+          Key: imageKey
+        });
+        await s3.send(deleteCommand);
+      } catch (s3Error) {
+        console.log('Error deleting image from S3:', s3Error);
+        // Continue with database deletion even if S3 deletion fails
+      }
+    }
+
+    // Delete the resource (cascade will handle relations)
+    const [result] = await mysqlConnection.promise().query(
+      'DELETE FROM trusted_resources WHERE id = ?',
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json('Resource not found');
+    }
+
+    res.json({
+      success: true,
+      message: 'Resource deleted successfully'
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting trusted resource:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /trusted-resources/:id/image - Upload image for a trusted resource (ADMIN)
+router.post('/trusted-resources/:id/image', verifyToken, trustedResourceUpload, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json('No image file provided');
+    }
+
+    // Verify resource exists
+    const [resources] = await mysqlConnection.promise().query(
+      'SELECT image_url FROM trusted_resources WHERE id = ?',
+      [id]
+    );
+
+    if (resources.length === 0) {
+      return res.status(404).json('Resource not found');
+    }
+
+    // Delete old image from S3 if exists
+    if (resources[0].image_url) {
+      try {
+        const oldImageKey = resources[0].image_url.split('/').pop();
+        const deleteCommand = new DeleteObjectCommand({
+          Bucket: bucketName,
+          Key: oldImageKey
+        });
+        await s3.send(deleteCommand);
+      } catch (s3Error) {
+        console.log('Error deleting old image from S3:', s3Error);
+      }
+    }
+
+    // Upload new image to S3
+    const imageName = randomImageName();
+    const putCommand = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: imageName,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype
+    });
+
+    await s3.send(putCommand);
+
+    // Generate the image URL
+    const imageUrl = `https://${bucketName}.s3.${bucketRegion}.amazonaws.com/${imageName}`;
+
+    // Update database
+    await mysqlConnection.promise().query(
+      'UPDATE trusted_resources SET image_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [imageUrl, id]
+    );
+
+    res.json({ imageUrl });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error uploading image:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// DELETE /trusted-resources/:id/image - Delete image from a trusted resource (ADMIN)
+router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    // Get image URL
+    const [resources] = await mysqlConnection.promise().query(
+      'SELECT image_url FROM trusted_resources WHERE id = ?',
+      [id]
+    );
+
+    if (resources.length === 0) {
+      return res.status(404).json('Resource not found');
+    }
+
+    if (!resources[0].image_url) {
+      return res.status(404).json('No image to delete');
+    }
+
+    // Delete from S3
+    try {
+      const imageKey = resources[0].image_url.split('/').pop();
+      const deleteCommand = new DeleteObjectCommand({
+        Bucket: bucketName,
+        Key: imageKey
+      });
+      await s3.send(deleteCommand);
+    } catch (s3Error) {
+      console.log('Error deleting image from S3:', s3Error);
+    }
+
+    // Update database
+    await mysqlConnection.promise().query(
+      'UPDATE trusted_resources SET image_url = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [id]
+    );
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting image:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// ============ PUBLIC ENDPOINTS ============
+
+// GET /trusted-resources/public - Get all trusted resources (PUBLIC)
+router.get('/trusted-resources/public', async (req, res) => {
+  try {
+    const { 
+      language = 'en',
+      page = 1, 
+      pageSize = 20, 
+      filterIds = '', 
+      openNow 
+    } = req.query;
+
+    const lang = ['en', 'es'].includes(language) ? language : 'en';
+    const pageNum = parseInt(page);
+    const pageSizeNum = parseInt(pageSize);
+    const offset = (pageNum - 1) * pageSizeNum;
+
+    let whereConditions = ['tr.is_active = 1'];
+    let queryParams = [];
+
+    // Filter by open now
+    if (openNow === 'true') {
+      whereConditions.push('tr.is_open = 1');
+    }
+
+    // Filter by filter IDs
+    let filterJoin = '';
+    if (filterIds && filterIds.trim() !== '') {
+      const filterIdArray = filterIds.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+      if (filterIdArray.length > 0) {
+        const filterPlaceholders = filterIdArray.map(() => '?').join(',');
+        filterJoin = `INNER JOIN resource_filter_relations rfr ON tr.id = rfr.resource_id`;
+        whereConditions.push(`rfr.filter_id IN (${filterPlaceholders})`);
+        queryParams.push(...filterIdArray);
+      }
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(DISTINCT tr.id) as total
+      FROM trusted_resources tr
+      ${filterJoin}
+      WHERE ${whereClause}
+    `;
+    const [countResult] = await mysqlConnection.promise().query(countQuery, queryParams);
+    const total = countResult[0].total;
+
+    // Get resources
+    const resourcesQuery = `
+      SELECT DISTINCT
+        tr.id,
+        ${lang === 'en' ? 'tr.title_english' : 'tr.title_spanish'} as title,
+        ${lang === 'en' ? 'tr.description_english' : 'tr.description_spanish'} as description,
+        ${lang === 'en' ? 'tr.information_english' : 'tr.information_spanish'} as information,
+        tr.address,
+        tr.coordinates,
+        tr.phone_number,
+        tr.email,
+        tr.website,
+        tr.image_url,
+        tr.is_open
+      FROM trusted_resources tr
+      ${filterJoin}
+      WHERE ${whereClause}
+      ORDER BY tr.created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+    queryParams.push(pageSizeNum, offset);
+
+    const [resources] = await mysqlConnection.promise().query(resourcesQuery, queryParams);
+
+    if (resources.length === 0) {
+      return res.json({
+        resources: [],
+        total: 0,
+        page: pageNum,
+        pageSize: pageSizeNum
+      });
+    }
+
+    // Get resource IDs
+    const resourceIds = resources.map(r => r.id);
+
+    // Get filters, prices, services, and schedules for all resources
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources(resourceIds),
+      getPricesForResources(resourceIds),
+      getServicesForResources(resourceIds),
+      getSchedulesForResources(resourceIds)
+    ]);
+
+    // Format response
+    const formattedResources = resources.map(resource => {
+      const schedules = schedulesMap.get(resource.id) || [];
+      const status = calculateCurrentStatus(schedules, lang);
+      
+      return {
+        id: resource.id,
+        title: resource.title,
+        description: resource.description,
+        information: resource.information,
+        address: resource.address,
+        coordinates: resource.coordinates,
+        phoneNumber: resource.phone_number,
+        email: resource.email,
+        website: resource.website,
+        imageUrl: resource.image_url,
+        isOpen: status.isOpen,
+        filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
+        prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
+        services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
+        schedules: schedules,
+        currentStatus: status.currentStatus,
+        todayHours: status.todayHours
+      };
+    });
+
+    res.json({
+      resources: formattedResources,
+      total,
+      page: pageNum,
+      pageSize: pageSizeNum
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting public trusted resources:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/public/:id - Get single trusted resource by ID (PUBLIC)
+router.get('/trusted-resources/public/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { language = 'en' } = req.query;
+
+    const lang = ['en', 'es'].includes(language) ? language : 'en';
+
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT 
+        id,
+        ${lang === 'en' ? 'title_english' : 'title_spanish'} as title,
+        ${lang === 'en' ? 'description_english' : 'description_spanish'} as description,
+        ${lang === 'en' ? 'information_english' : 'information_spanish'} as information,
+        address,
+        coordinates,
+        phone_number,
+        email,
+        website,
+        image_url,
+        is_open
+      FROM trusted_resources
+      WHERE id = ? AND is_active = 1
+      LIMIT 1`,
+      [id]
+    );
+
+    if (resources.length === 0) {
+      return res.status(404).json({ message: 'Resource not found' });
+    }
+
+    const resource = resources[0];
+
+    // Get filters, prices, services, and schedules
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources([resource.id]),
+      getPricesForResources([resource.id]),
+      getServicesForResources([resource.id]),
+      getSchedulesForResources([resource.id])
+    ]);
+
+    const schedules = schedulesMap.get(resource.id) || [];
+    const status = calculateCurrentStatus(schedules, lang);
+
+    const formattedResource = {
+      id: resource.id,
+      title: resource.title,
+      description: resource.description,
+      information: resource.information,
+      address: resource.address,
+      coordinates: resource.coordinates,
+      phoneNumber: resource.phone_number,
+      email: resource.email,
+      website: resource.website,
+      imageUrl: resource.image_url,
+      isOpen: status.isOpen,
+      filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
+      prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
+      services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
+      schedules: schedules,
+      currentStatus: status.currentStatus,
+      todayHours: status.todayHours
+    };
+
+    res.json(formattedResource);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting public trusted resource:', err);
+    res.status(500).json('Internal server error');
   }
 });
 
