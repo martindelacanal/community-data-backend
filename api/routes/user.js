@@ -15530,7 +15530,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 // Get public articles with pagination (for frontend public consumption)
 router.get('/article/public', async (req, res) => {
   try {
-    const { language = 'en', page = 1, limit = 6 } = req.query;
+    const { language = 'en', page = 1, limit = 6, filterId, categoryId } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     // Validate language parameter
@@ -15538,10 +15538,35 @@ router.get('/article/public', async (req, res) => {
       return res.status(400).json({ error: 'Invalid language. Must be "en" or "es"' });
     }
 
-    // Get total count of published articles
-    const [countResult] = await mysqlConnection.promise().query(
-      'SELECT COUNT(*) as total FROM article WHERE article_status_id = 2'
-    );
+    // Build WHERE conditions and parameters
+    let whereConditions = ['a.article_status_id = 2'];
+    let queryParams = [];
+    let joinClauses = '';
+
+    // Add filter condition if filterId is provided
+    if (filterId) {
+      joinClauses += ' INNER JOIN article_filter af_filter ON a.id = af_filter.article_id';
+      whereConditions.push('af_filter.filter_id = ?');
+      queryParams.push(parseInt(filterId));
+    }
+
+    // Add category condition if categoryId is provided
+    if (categoryId) {
+      joinClauses += ' INNER JOIN article_category ac ON a.id = ac.article_id';
+      whereConditions.push('ac.category_id = ?');
+      queryParams.push(parseInt(categoryId));
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    // Get total count of published articles with filters
+    const countQuery = `
+      SELECT COUNT(DISTINCT a.id) as total 
+      FROM article a
+      ${joinClauses}
+      WHERE ${whereClause}
+    `;
+    const [countResult] = await mysqlConnection.promise().query(countQuery, queryParams);
     const total = countResult[0].total;
 
     // Main query to get public articles with required data
@@ -15557,12 +15582,16 @@ router.get('/article/public', async (req, res) => {
         AND ai.image_type = ${language === 'en' ? "'preview_en'" : "'preview_es'"}
       LEFT JOIN article_filter af ON a.id = af.article_id AND af.priority = 'Y'
       LEFT JOIN filter f ON af.filter_id = f.id
-      WHERE a.article_status_id = 2
+      ${joinClauses}
+      WHERE ${whereClause}
       ORDER BY a.priority ASC, a.publication_date DESC, a.creation_date DESC
       LIMIT ? OFFSET ?
     `;
 
-    const [articles] = await mysqlConnection.promise().query(query, [parseInt(limit), offset]);
+    const [articles] = await mysqlConnection.promise().query(
+      query, 
+      [...queryParams, parseInt(limit), offset]
+    );
 
     // Collect all S3 keys for batch processing
     const s3Keys = articles
@@ -15592,7 +15621,11 @@ router.get('/article/public', async (req, res) => {
       articles: formattedArticles,
       total,
       page: parseInt(page),
-      limit: parseInt(limit)
+      limit: parseInt(limit),
+      filters: {
+        filterId: filterId ? parseInt(filterId) : null,
+        categoryId: categoryId ? parseInt(categoryId) : null
+      }
     };
 
     res.json(response);
@@ -17499,6 +17532,242 @@ router.get('/trusted-resources/services', async (req, res) => {
   }
 });
 
+// ============ PUBLIC ENDPOINTS ============
+
+// GET /trusted-resources/public - Get all trusted resources (PUBLIC)
+router.get('/trusted-resources/public', async (req, res) => {
+  try {
+    const { 
+      language = 'en',
+      page = 1, 
+      pageSize = 20, 
+      filterIds = '', 
+      openNow 
+    } = req.query;
+
+    const lang = ['en', 'es'].includes(language) ? language : 'en';
+    const pageNum = parseInt(page);
+    const pageSizeNum = parseInt(pageSize);
+    const offset = (pageNum - 1) * pageSizeNum;
+    console.log("hola");
+
+    let whereConditions = ['tr.is_active = 1'];
+    let queryParams = [];
+
+    // Filter by open now
+    if (openNow === 'true') {
+      whereConditions.push('tr.is_open = 1');
+    }
+
+    // Filter by filter IDs
+    let filterJoin = '';
+    if (filterIds && filterIds.trim() !== '') {
+      const filterIdArray = filterIds.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+      if (filterIdArray.length > 0) {
+        const filterPlaceholders = filterIdArray.map(() => '?').join(',');
+        filterJoin = `INNER JOIN resource_filter_relations rfr ON tr.id = rfr.resource_id`;
+        whereConditions.push(`rfr.filter_id IN (${filterPlaceholders})`);
+        queryParams.push(...filterIdArray);
+      }
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(DISTINCT tr.id) as total
+      FROM trusted_resources tr
+      ${filterJoin}
+      WHERE ${whereClause}
+    `;
+    const [countResult] = await mysqlConnection.promise().query(countQuery, queryParams);
+    const total = countResult[0].total;
+
+    // Get resources
+    const resourcesQuery = `
+      SELECT DISTINCT
+        tr.id,
+        ${lang === 'en' ? 'tr.title_english' : 'tr.title_spanish'} as title,
+        ${lang === 'en' ? 'tr.description_english' : 'tr.description_spanish'} as description,
+        ${lang === 'en' ? 'tr.information_english' : 'tr.information_spanish'} as information,
+        tr.address,
+        ST_Y(tr.coordinates) as latitude,
+        ST_X(tr.coordinates) as longitude,
+        tr.phone_number,
+        tr.email,
+        tr.website,
+        tr.image_url,
+        tr.is_open
+      FROM trusted_resources tr
+      ${filterJoin}
+      WHERE ${whereClause}
+      ORDER BY tr.created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+    queryParams.push(pageSizeNum, offset);
+
+    const [resources] = await mysqlConnection.promise().query(resourcesQuery, queryParams);
+
+    if (resources.length === 0) {
+      return res.json({
+        resources: [],
+        total: 0,
+        page: pageNum,
+        pageSize: pageSizeNum
+      });
+    }
+
+    // Get resource IDs
+    const resourceIds = resources.map(r => r.id);
+
+    // Get filters, prices, services, and schedules for all resources
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources(resourceIds),
+      getPricesForResources(resourceIds),
+      getServicesForResources(resourceIds),
+      getSchedulesForResources(resourceIds)
+    ]);
+
+    // Collect all S3 keys for batch processing
+    const s3Keys = resources
+      .filter(resource => resource.image_url)
+      .map(resource => resource.image_url);
+
+    // Generate all signed URLs in parallel
+    const signedUrls = await getSignedUrlsForImages(s3Keys);
+
+    // Create a map of S3 keys to signed URLs
+    const urlMap = new Map();
+    s3Keys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        urlMap.set(key, signedUrls[index]);
+      }
+    });
+
+    // Format response
+    const formattedResources = resources.map(resource => {
+      const schedules = schedulesMap.get(resource.id) || [];
+      const status = calculateCurrentStatus(schedules, lang);
+      
+      return {
+        id: resource.id,
+        title: resource.title,
+        description: resource.description,
+        information: resource.information,
+        address: resource.address,
+        coordinates: resource.latitude && resource.longitude 
+          ? `${resource.latitude},${resource.longitude}` 
+          : null,
+        phoneNumber: resource.phone_number,
+        email: resource.email,
+        website: resource.website,
+        imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
+        isOpen: status.isOpen,
+        filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
+        prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
+        services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
+        schedules: schedules,
+        currentStatus: status.currentStatus,
+        todayHours: status.todayHours
+      };
+    });
+
+    res.json({
+      resources: formattedResources,
+      total,
+      page: pageNum,
+      pageSize: pageSizeNum
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting public trusted resources:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/public/:id - Get single trusted resource by ID (PUBLIC)
+router.get('/trusted-resources/public/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { language = 'en' } = req.query;
+
+    const lang = ['en', 'es'].includes(language) ? language : 'en';
+
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT 
+        id,
+        ${lang === 'en' ? 'title_english' : 'title_spanish'} as title,
+        ${lang === 'en' ? 'description_english' : 'description_spanish'} as description,
+        ${lang === 'en' ? 'information_english' : 'information_spanish'} as information,
+        address,
+        ST_Y(coordinates) as latitude,
+        ST_X(coordinates) as longitude,
+        phone_number,
+        email,
+        website,
+        image_url,
+        is_open
+      FROM trusted_resources
+      WHERE id = ? AND is_active = 1
+      LIMIT 1`,
+      [id]
+    );
+
+    if (resources.length === 0) {
+      return res.status(404).json({ message: 'Resource not found' });
+    }
+
+    const resource = resources[0];
+
+    // Get filters, prices, services, and schedules
+    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+      getFiltersForResources([resource.id]),
+      getPricesForResources([resource.id]),
+      getServicesForResources([resource.id]),
+      getSchedulesForResources([resource.id])
+    ]);
+
+    const schedules = schedulesMap.get(resource.id) || [];
+    const status = calculateCurrentStatus(schedules, lang);
+
+    // Generate signed URL for image if exists
+    let imageUrl = null;
+    if (resource.image_url) {
+      imageUrl = await getSignedUrlForImage(resource.image_url);
+    }
+
+    const formattedResource = {
+      id: resource.id,
+      title: resource.title,
+      description: resource.description,
+      information: resource.information,
+      address: resource.address,
+      coordinates: resource.latitude && resource.longitude 
+        ? `${resource.latitude},${resource.longitude}` 
+        : null,
+      phoneNumber: resource.phone_number,
+      email: resource.email,
+      website: resource.website,
+      imageUrl: imageUrl,
+      isOpen: status.isOpen,
+      filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
+      prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
+      services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
+      schedules: schedules,
+      currentStatus: status.currentStatus,
+      todayHours: status.todayHours
+    };
+
+    res.json(formattedResource);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting public trusted resource:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
 // ============ ADMIN ENDPOINTS ============
 
 // GET /trusted-resources - Get all trusted resources (ADMIN)
@@ -18305,239 +18574,5 @@ router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
   }
 });
 
-// ============ PUBLIC ENDPOINTS ============
-
-// GET /trusted-resources/public - Get all trusted resources (PUBLIC)
-router.get('/trusted-resources/public', async (req, res) => {
-  try {
-    const { 
-      language = 'en',
-      page = 1, 
-      pageSize = 20, 
-      filterIds = '', 
-      openNow 
-    } = req.query;
-
-    const lang = ['en', 'es'].includes(language) ? language : 'en';
-    const pageNum = parseInt(page);
-    const pageSizeNum = parseInt(pageSize);
-    const offset = (pageNum - 1) * pageSizeNum;
-
-    let whereConditions = ['tr.is_active = 1'];
-    let queryParams = [];
-
-    // Filter by open now
-    if (openNow === 'true') {
-      whereConditions.push('tr.is_open = 1');
-    }
-
-    // Filter by filter IDs
-    let filterJoin = '';
-    if (filterIds && filterIds.trim() !== '') {
-      const filterIdArray = filterIds.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
-      if (filterIdArray.length > 0) {
-        const filterPlaceholders = filterIdArray.map(() => '?').join(',');
-        filterJoin = `INNER JOIN resource_filter_relations rfr ON tr.id = rfr.resource_id`;
-        whereConditions.push(`rfr.filter_id IN (${filterPlaceholders})`);
-        queryParams.push(...filterIdArray);
-      }
-    }
-
-    const whereClause = whereConditions.join(' AND ');
-
-    // Get total count
-    const countQuery = `
-      SELECT COUNT(DISTINCT tr.id) as total
-      FROM trusted_resources tr
-      ${filterJoin}
-      WHERE ${whereClause}
-    `;
-    const [countResult] = await mysqlConnection.promise().query(countQuery, queryParams);
-    const total = countResult[0].total;
-
-    // Get resources
-    const resourcesQuery = `
-      SELECT DISTINCT
-        tr.id,
-        ${lang === 'en' ? 'tr.title_english' : 'tr.title_spanish'} as title,
-        ${lang === 'en' ? 'tr.description_english' : 'tr.description_spanish'} as description,
-        ${lang === 'en' ? 'tr.information_english' : 'tr.information_spanish'} as information,
-        tr.address,
-        ST_Y(tr.coordinates) as latitude,
-        ST_X(tr.coordinates) as longitude,
-        tr.phone_number,
-        tr.email,
-        tr.website,
-        tr.image_url,
-        tr.is_open
-      FROM trusted_resources tr
-      ${filterJoin}
-      WHERE ${whereClause}
-      ORDER BY tr.created_at DESC
-      LIMIT ? OFFSET ?
-    `;
-    queryParams.push(pageSizeNum, offset);
-
-    const [resources] = await mysqlConnection.promise().query(resourcesQuery, queryParams);
-
-    if (resources.length === 0) {
-      return res.json({
-        resources: [],
-        total: 0,
-        page: pageNum,
-        pageSize: pageSizeNum
-      });
-    }
-
-    // Get resource IDs
-    const resourceIds = resources.map(r => r.id);
-
-    // Get filters, prices, services, and schedules for all resources
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
-      getFiltersForResources(resourceIds),
-      getPricesForResources(resourceIds),
-      getServicesForResources(resourceIds),
-      getSchedulesForResources(resourceIds)
-    ]);
-
-    // Collect all S3 keys for batch processing
-    const s3Keys = resources
-      .filter(resource => resource.image_url)
-      .map(resource => resource.image_url);
-
-    // Generate all signed URLs in parallel
-    const signedUrls = await getSignedUrlsForImages(s3Keys);
-
-    // Create a map of S3 keys to signed URLs
-    const urlMap = new Map();
-    s3Keys.forEach((key, index) => {
-      if (signedUrls[index]) {
-        urlMap.set(key, signedUrls[index]);
-      }
-    });
-
-    // Format response
-    const formattedResources = resources.map(resource => {
-      const schedules = schedulesMap.get(resource.id) || [];
-      const status = calculateCurrentStatus(schedules, lang);
-      
-      return {
-        id: resource.id,
-        title: resource.title,
-        description: resource.description,
-        information: resource.information,
-        address: resource.address,
-        coordinates: resource.latitude && resource.longitude 
-          ? `${resource.latitude},${resource.longitude}` 
-          : null,
-        phoneNumber: resource.phone_number,
-        email: resource.email,
-        website: resource.website,
-        imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
-        isOpen: status.isOpen,
-        filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
-        prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
-        services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
-        schedules: schedules,
-        currentStatus: status.currentStatus,
-        todayHours: status.todayHours
-      };
-    });
-
-    res.json({
-      resources: formattedResources,
-      total,
-      page: pageNum,
-      pageSize: pageSizeNum
-    });
-
-  } catch (err) {
-    console.log(err);
-    logger.error('Error getting public trusted resources:', err);
-    res.status(500).json('Internal server error');
-  }
-});
-
-// GET /trusted-resources/public/:id - Get single trusted resource by ID (PUBLIC)
-router.get('/trusted-resources/public/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { language = 'en' } = req.query;
-
-    const lang = ['en', 'es'].includes(language) ? language : 'en';
-
-    const [resources] = await mysqlConnection.promise().query(
-      `SELECT 
-        id,
-        ${lang === 'en' ? 'title_english' : 'title_spanish'} as title,
-        ${lang === 'en' ? 'description_english' : 'description_spanish'} as description,
-        ${lang === 'en' ? 'information_english' : 'information_spanish'} as information,
-        address,
-        ST_Y(coordinates) as latitude,
-        ST_X(coordinates) as longitude,
-        phone_number,
-        email,
-        website,
-        image_url,
-        is_open
-      FROM trusted_resources
-      WHERE id = ? AND is_active = 1
-      LIMIT 1`,
-      [id]
-    );
-
-    if (resources.length === 0) {
-      return res.status(404).json({ message: 'Resource not found' });
-    }
-
-    const resource = resources[0];
-
-    // Get filters, prices, services, and schedules
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
-      getFiltersForResources([resource.id]),
-      getPricesForResources([resource.id]),
-      getServicesForResources([resource.id]),
-      getSchedulesForResources([resource.id])
-    ]);
-
-    const schedules = schedulesMap.get(resource.id) || [];
-    const status = calculateCurrentStatus(schedules, lang);
-
-    // Generate signed URL for image if exists
-    let imageUrl = null;
-    if (resource.image_url) {
-      imageUrl = await getSignedUrlForImage(resource.image_url);
-    }
-
-    const formattedResource = {
-      id: resource.id,
-      title: resource.title,
-      description: resource.description,
-      information: resource.information,
-      address: resource.address,
-      coordinates: resource.latitude && resource.longitude 
-        ? `${resource.latitude},${resource.longitude}` 
-        : null,
-      phoneNumber: resource.phone_number,
-      email: resource.email,
-      website: resource.website,
-      imageUrl: imageUrl,
-      isOpen: status.isOpen,
-      filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
-      prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
-      services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
-      schedules: schedules,
-      currentStatus: status.currentStatus,
-      todayHours: status.todayHours
-    };
-
-    res.json(formattedResource);
-
-  } catch (err) {
-    console.log(err);
-    logger.error('Error getting public trusted resource:', err);
-    res.status(500).json('Internal server error');
-  }
-});
 
 module.exports = router;
