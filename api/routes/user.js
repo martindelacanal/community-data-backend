@@ -17549,7 +17549,6 @@ router.get('/trusted-resources/public', async (req, res) => {
     const pageNum = parseInt(page);
     const pageSizeNum = parseInt(pageSize);
     const offset = (pageNum - 1) * pageSizeNum;
-    console.log("hola");
 
     let whereConditions = ['tr.is_active = 1'];
     let queryParams = [];
@@ -17758,7 +17757,7 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       currentStatus: status.currentStatus,
       todayHours: status.todayHours
     };
-
+    
     res.json(formattedResource);
 
   } catch (err) {
