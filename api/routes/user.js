@@ -17158,6 +17158,7 @@ router.get('/calendar/events', async (req, res) => {
         l.organization as location_name,
         l.community_city as location_city,
         l.address as location_address,
+        CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
         ce.creation_date as created_at,
         ce.modification_date as updated_at
       FROM calendar_event ce
@@ -17195,6 +17196,7 @@ router.get('/calendar/events/:id', async (req, res) => {
         l.organization as location_name,
         l.community_city as location_city,
         l.address as location_address,
+        CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
         ce.creation_date as created_at,
         ce.modification_date as updated_at
       FROM calendar_event ce
