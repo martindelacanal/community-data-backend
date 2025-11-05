@@ -17039,7 +17039,7 @@ function verifyTokenOptional(req, res, next) {
 // GET /calendar/events - Get all calendar events with optional filters
 // Query params:
 // - fromToday: 'true' to get events from today onwards
-// - daysLimit: number of days from today (requires fromToday=true)
+// - daysLimit: number of days with events to return (requires fromToday=true)
 // - month: month number (1-12) for monthly pagination
 // - year: year (YYYY) for monthly pagination
 // - location_id: filter by specific location
@@ -17065,8 +17065,34 @@ router.get('/calendar/events', async (req, res) => {
       whereConditions.push('ce.date >= CURDATE()');
       
       if (daysLimit && !isNaN(daysLimit)) {
-        whereConditions.push('ce.date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)');
-        queryParams.push(parseInt(daysLimit));
+        const limit = parseInt(daysLimit);
+        
+        // First, get distinct dates with events from today onwards
+        const whereClause = whereConditions.join(' AND ');
+        const distinctDatesQuery = `
+          SELECT DISTINCT DATE(ce.date) as event_date
+          FROM calendar_event ce
+          INNER JOIN location l ON ce.location_id = l.id
+          WHERE ${whereClause}
+          ORDER BY event_date ASC
+          LIMIT ?
+        `;
+        
+        const [distinctDates] = await mysqlConnection.promise().query(
+          distinctDatesQuery, 
+          [...queryParams, limit]
+        );
+        
+        if (distinctDates.length === 0) {
+          return res.json([]);
+        }
+        
+        // Get the last date from the limited results
+        const lastDate = distinctDates[distinctDates.length - 1].event_date;
+        
+        // Now query for all events up to and including that last date
+        whereConditions.push('ce.date <= ?');
+        queryParams.push(lastDate);
       }
     }
     // Filter by specific month and year (calendar pagination)
@@ -17090,7 +17116,6 @@ router.get('/calendar/events', async (req, res) => {
 
     const whereClause = whereConditions.join(' AND ');
 
-    // ${language === 'en' ? 'l.description_en' : 'l.description_es'} as description,
     const [rows] = await mysqlConnection.promise().query(
       `SELECT 
         ce.id,
@@ -17108,7 +17133,7 @@ router.get('/calendar/events', async (req, res) => {
       ORDER BY ce.date ASC, ce.time ASC`,
       queryParams
     );
-
+    
     res.json(rows);
   } catch (err) {
     console.log(err);
