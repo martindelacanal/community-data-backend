@@ -15527,6 +15527,39 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
   }
 });
 
+// Get volunteer gallery images
+router.get('/article/volunteer-gallery', async (req, res) => {
+  try {
+    // Get all active volunteer images ordered by display_order
+    const [volunteerImages] = await mysqlConnection.promise().query(
+      `SELECT id, image_url, alt_text, display_order
+       FROM volunteer_images
+       WHERE is_active = 1
+       ORDER BY display_order ASC, created_at DESC`
+    );
+
+    if (!volunteerImages || volunteerImages.length === 0) {
+      return res.json({ images: [] });
+    }
+
+    // Extract all S3 keys
+    const s3Keys = volunteerImages.map(img => img.image_url);
+
+    // Generate signed URLs in parallel
+    const signedUrls = await getSignedUrlsForImages(s3Keys);
+
+    // Filter out any failed URL generations and return only valid URLs
+    const validUrls = signedUrls.filter(url => url !== null);
+
+    res.json({ images: validUrls });
+
+  } catch (error) {
+    console.error('Error fetching volunteer gallery images:', error);
+    logger.error('Error fetching volunteer gallery images:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get public articles with pagination (for frontend public consumption)
 router.get('/article/public', async (req, res) => {
   try {
