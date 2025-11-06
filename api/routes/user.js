@@ -5703,6 +5703,174 @@ router.post('/message', verifyToken, async (req, res) => {
   }
 });
 
+// Public endpoint for contact form (no token required)
+router.post('/contact', async (req, res) => {
+  try {
+    const { name, email, phone, message, language = 'es', user_id } = req.body;
+    // Validations
+    if (!name || typeof name !== 'string' || name.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: language === 'en'
+          ? 'Name is required and must be at least 2 characters.'
+          : 'El nombre es requerido y debe tener al menos 2 caracteres.'
+      });
+    }
+
+    if (!email || typeof email !== 'string' || !email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+      return res.status(400).json({
+        success: false,
+        message: language === 'en'
+          ? 'A valid email address is required.'
+          : 'Debe proporcionar un email válido.'
+      });
+    }
+
+    if (!message || typeof message !== 'string' || message.trim().length < 10) {
+      return res.status(400).json({
+        success: false,
+        message: language === 'en'
+          ? 'Message must be at least 10 characters.'
+          : 'El mensaje debe tener al menos 10 caracteres.'
+      });
+    }
+
+    // Validate message length (max 1000 characters)
+    if (message.length > 1000) {
+      return res.status(400).json({
+        success: false,
+        message: language === 'en'
+          ? 'Message must not exceed 1000 characters.'
+          : 'El mensaje no debe exceder 1000 caracteres.'
+      });
+    }
+
+    // Validate user_id if provided
+    if (user_id) {
+      const [userExists] = await mysqlConnection.promise().query(
+        'SELECT id FROM user WHERE id = ?',
+        [user_id]
+      );
+
+      if (userExists.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: language === 'en'
+            ? 'User not found.'
+            : 'Usuario no encontrado.'
+        });
+      }
+    }
+
+    // Get IP address
+    const ip_address = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip;
+
+    // Save to database
+    const [result] = await mysqlConnection.promise().query(
+      `INSERT INTO contact_messages (name, email, phone, message, language, user_id, ip_address, status, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NOW())`,
+      [
+        name.trim(),
+        email.trim().toLowerCase(),
+        phone ? phone.trim() : null,
+        message.trim(),
+        language,
+        user_id || null,
+        ip_address
+      ]
+    );
+
+    if (result.affectedRows > 0) {
+      // Send email notification to admin
+      try {
+        const emailService = require('../email/email');
+        const nodemailer = require('nodemailer');
+
+        // Create email content
+        let emailSubject = language === 'en'
+          ? `New Contact Message from ${name}`
+          : `Nuevo Mensaje de Contacto de ${name}`;
+
+        let emailHtml = `
+          <h2>${language === 'en' ? 'New Contact Message' : 'Nuevo Mensaje de Contacto'}</h2>
+          <p><strong>${language === 'en' ? 'Name' : 'Nombre'}:</strong> ${name}</p>
+          <p><strong>${language === 'en' ? 'Email' : 'Correo'}:</strong> ${email}</p>
+          ${phone ? `<p><strong>${language === 'en' ? 'Phone' : 'Teléfono'}:</strong> ${phone}</p>` : ''}
+          ${user_id ? `<p><strong>${language === 'en' ? 'User ID' : 'ID de Usuario'}:</strong> ${user_id}</p>` : ''}
+          <p><strong>${language === 'en' ? 'Message' : 'Mensaje'}:</strong></p>
+          <p style="white-space: pre-wrap; background-color: #f5f5f5; padding: 15px; border-radius: 5px;">${message}</p>
+          <hr>
+          <p style="color: #666; font-size: 12px;">
+            <strong>${language === 'en' ? 'IP Address' : 'Dirección IP'}:</strong> ${ip_address}<br>
+            <strong>${language === 'en' ? 'Language' : 'Idioma'}:</strong> ${language}<br>
+            <strong>${language === 'en' ? 'Date' : 'Fecha'}:</strong> ${new Date().toLocaleString()}
+          </p>
+        `;
+
+        let emailText = `
+${language === 'en' ? 'New Contact Message' : 'Nuevo Mensaje de Contacto'}
+
+${language === 'en' ? 'Name' : 'Nombre'}: ${name}
+${language === 'en' ? 'Email' : 'Correo'}: ${email}
+${phone ? `${language === 'en' ? 'Phone' : 'Teléfono'}: ${phone}\n` : ''}${user_id ? `${language === 'en' ? 'User ID' : 'ID de Usuario'}: ${user_id}\n` : ''}
+${language === 'en' ? 'Message' : 'Mensaje'}:
+${message}
+
+---
+${language === 'en' ? 'IP Address' : 'Dirección IP'}: ${ip_address}
+${language === 'en' ? 'Language' : 'Idioma'}: ${language}
+${language === 'en' ? 'Date' : 'Fecha'}: ${new Date().toLocaleString()}
+        `;
+
+        // Use the existing transporter from email.js
+        let transporter = nodemailer.createTransport({
+          service: 'gmail',
+          auth: {
+            user: 'bienestarcommunity@gmail.com',
+            pass: 'auag ynko amyv rsuj'
+          }
+        });
+
+        let mailOptions = {
+          from: 'bienestarcommunity@gmail.com',
+          to: 'community@bienestariswellbeing.org',
+          subject: emailSubject,
+          text: emailText,
+          html: emailHtml
+        };
+
+        await transporter.sendMail(mailOptions);
+      } catch (emailError) {
+        console.error('Error sending notification email:', emailError);
+        // Don't fail the request if email fails, just log it
+      }
+
+      // Send success response
+      return res.status(200).json({
+        success: true,
+        message: language === 'en'
+          ? 'Message sent successfully'
+          : 'Mensaje enviado exitosamente'
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: language === 'en'
+          ? 'Error saving message.'
+          : 'Error al guardar el mensaje.'
+      });
+    }
+
+  } catch (error) {
+    console.error('Error processing contact message:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error.',
+      error: error.message
+    });
+  }
+});
+
 router.put('/settings/password', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
@@ -13530,8 +13698,8 @@ router.get('/view/location/:idLocation', verifyToken, async (req, res) => {
       const { idLocation } = req.params;
       const { lang = 'en' } = req.query;
 
-    // Validate language parameter
-    const language = ['en', 'es'].includes(lang) ? lang : 'en';
+      // Validate language parameter
+      const language = ['en', 'es'].includes(lang) ? lang : 'en';
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT l.id,
@@ -14464,7 +14632,7 @@ const signedUrlCache = new Map();
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 // Multer configuration for article images
-const articleUpload = multer({ 
+const articleUpload = multer({
   storage: storage,
   limits: {
     fieldSize: 50 * 1024 * 1024, // 50MB for text fields (HTML content with base64 images)
@@ -15281,7 +15449,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     // PASO 1: Create article WITHOUT content first (to get ID)
     const connection = await mysqlConnection.promise().getConnection();
-    
+
     let articleId;
     try {
       const [articleResult] = await connection.query(
@@ -15335,7 +15503,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
       // Manage priority (ensure uniqueness and shift if necessary)
       managedPriority = await managePriority(priority, articleId, connection);
-      
+
       // Update priority
       await connection.query(
         'UPDATE article SET priority = ? WHERE id = ?',
@@ -15622,7 +15790,7 @@ router.get('/article/public', async (req, res) => {
     `;
 
     const [articles] = await mysqlConnection.promise().query(
-      query, 
+      query,
       [...queryParams, parseInt(limit), offset]
     );
 
@@ -17096,10 +17264,10 @@ router.get('/calendar/events', async (req, res) => {
     // Filter by date range: from today onwards with optional days limit
     if (fromToday === 'true') {
       whereConditions.push('ce.date >= CURDATE()');
-      
+
       if (daysLimit && !isNaN(daysLimit)) {
         const limit = parseInt(daysLimit);
-        
+
         // First, get distinct dates with events from today onwards
         const whereClause = whereConditions.join(' AND ');
         const distinctDatesQuery = `
@@ -17110,19 +17278,19 @@ router.get('/calendar/events', async (req, res) => {
           ORDER BY event_date ASC
           LIMIT ?
         `;
-        
+
         const [distinctDates] = await mysqlConnection.promise().query(
-          distinctDatesQuery, 
+          distinctDatesQuery,
           [...queryParams, limit]
         );
-        
+
         if (distinctDates.length === 0) {
           return res.json([]);
         }
-        
+
         // Get the last date from the limited results
         const lastDate = distinctDates[distinctDates.length - 1].event_date;
-        
+
         // Now query for all events up to and including that last date
         whereConditions.push('ce.date <= ?');
         queryParams.push(lastDate);
@@ -17167,7 +17335,7 @@ router.get('/calendar/events', async (req, res) => {
       ORDER BY ce.date ASC, ce.time ASC`,
       queryParams
     );
-    
+
     res.json(rows);
   } catch (err) {
     console.log(err);
@@ -17209,7 +17377,7 @@ router.get('/calendar/events/:id', async (req, res) => {
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Event not found' });
     }
-    
+
     res.json(rows[0]);
   } catch (err) {
     console.log(err);
@@ -17329,9 +17497,9 @@ router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
         return res.status(404).json('Event not found');
       }
 
-      res.json({ 
-        message: 'Event deleted successfully', 
-        deleted_id: parseInt(id) 
+      res.json({
+        message: 'Event deleted successfully',
+        deleted_id: parseInt(id)
       });
     } catch (err) {
       console.log(err);
@@ -17345,7 +17513,7 @@ router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
 // ============ TRUSTED RESOURCES ENDPOINTS ============
 
 // Multer configuration for trusted resource images
-const trustedResourceUpload = multer({ 
+const trustedResourceUpload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB max file size
@@ -17481,10 +17649,10 @@ async function getSchedulesForResources(resourceIds) {
 function calculateCurrentStatus(schedules, language = 'en') {
   // Get current time in Los Angeles timezone
   const nowUTC = new Date();
-  const losAngelesTime = new Date(nowUTC.toLocaleString('en-US', { 
-    timeZone: 'America/Los_Angeles' 
+  const losAngelesTime = new Date(nowUTC.toLocaleString('en-US', {
+    timeZone: 'America/Los_Angeles'
   }));
-  
+
   const currentDay = losAngelesTime.getDay(); // 0-6 (0 = Sunday)
   const currentTime = losAngelesTime.getHours() * 60 + losAngelesTime.getMinutes(); // minutes since midnight
 
@@ -17517,7 +17685,7 @@ function calculateCurrentStatus(schedules, language = 'en') {
 
   return {
     isOpen,
-    currentStatus: isOpen 
+    currentStatus: isOpen
       ? (language === 'en' ? 'Open now' : 'Abierto ahora')
       : (language === 'en' ? 'Closed now' : 'Cerrado ahora'),
     todayHours
@@ -17582,7 +17750,7 @@ router.get('/trusted-resources/services', async (req, res) => {
       nameEnglish: service.name_english,
       nameSpanish: service.name_spanish
     }));
-    
+
     res.json(formattedServices);
 
   } catch (err) {
@@ -17597,12 +17765,12 @@ router.get('/trusted-resources/services', async (req, res) => {
 // GET /trusted-resources/public - Get all trusted resources (PUBLIC)
 router.get('/trusted-resources/public', async (req, res) => {
   try {
-    const { 
+    const {
       language = 'en',
-      page = 1, 
-      pageSize = 20, 
-      filterIds = '', 
-      openNow 
+      page = 1,
+      pageSize = 20,
+      filterIds = '',
+      openNow
     } = req.query;
 
     const lang = ['en', 'es'].includes(language) ? language : 'en';
@@ -17707,15 +17875,15 @@ router.get('/trusted-resources/public', async (req, res) => {
     const formattedResources = resources.map(resource => {
       const schedules = schedulesMap.get(resource.id) || [];
       const status = calculateCurrentStatus(schedules, lang);
-      
+
       return {
         id: resource.id,
         title: resource.title,
         description: resource.description,
         information: resource.information,
         address: resource.address,
-        coordinates: resource.latitude && resource.longitude 
-          ? `${resource.latitude},${resource.longitude}` 
+        coordinates: resource.latitude && resource.longitude
+          ? `${resource.latitude},${resource.longitude}`
           : null,
         phoneNumber: resource.phone_number,
         email: resource.email,
@@ -17802,8 +17970,8 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       description: resource.description,
       information: resource.information,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude 
-        ? `${resource.latitude},${resource.longitude}` 
+      coordinates: resource.latitude && resource.longitude
+        ? `${resource.latitude},${resource.longitude}`
         : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
@@ -17817,7 +17985,7 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       currentStatus: status.currentStatus,
       todayHours: status.todayHours
     };
-    
+
     res.json(formattedResource);
 
   } catch (err) {
@@ -17837,12 +18005,12 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
   }
 
   try {
-    const { 
-      page = 1, 
-      pageSize = 20, 
-      search = '', 
-      filterIds = '', 
-      isActive 
+    const {
+      page = 1,
+      pageSize = 20,
+      search = '',
+      filterIds = '',
+      isActive
     } = req.query;
 
     const pageNum = parseInt(page);
@@ -17960,7 +18128,7 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
     const formattedResources = resources.map(resource => {
       const resourceSchedules = schedulesMap.get(resource.id) || [];
       const status = calculateCurrentStatus(resourceSchedules, 'en');
-      
+
       return {
         id: resource.id,
         titleEnglish: resource.title_english,
@@ -17970,8 +18138,8 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         informationEnglish: resource.information_english,
         informationSpanish: resource.information_spanish,
         address: resource.address,
-        coordinates: resource.latitude && resource.longitude 
-          ? `${resource.latitude},${resource.longitude}` 
+        coordinates: resource.latitude && resource.longitude
+          ? `${resource.latitude},${resource.longitude}`
           : null,
         phoneNumber: resource.phone_number,
         email: resource.email,
@@ -18072,8 +18240,8 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude 
-        ? `${resource.latitude},${resource.longitude}` 
+      coordinates: resource.latitude && resource.longitude
+        ? `${resource.latitude},${resource.longitude}`
         : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
@@ -18090,7 +18258,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       services: servicesMap.get(resource.id) || [],
       schedules: resourceSchedules
     };
-    
+
     res.json(formattedResource);
 
   } catch (err) {
@@ -18131,8 +18299,8 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
 
     // Validate required fields
     if (!titleEnglish || !titleSpanish || !descriptionEnglish || !descriptionSpanish ||
-        !informationEnglish || !informationSpanish || !address || !coordinates || 
-        !phoneNumber || !email || !website) {
+      !informationEnglish || !informationSpanish || !address || !coordinates ||
+      !phoneNumber || !email || !website) {
       return res.status(400).json('Missing required fields');
     }
 
@@ -18154,9 +18322,9 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
         phone_number, email, website, is_active) 
        VALUES (?, ?, ?, ?, ?, ?, ?, POINT(?, ?), ?, ?, ?, ?)`,
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
-       informationEnglish, informationSpanish, address, 
-       longitude, latitude,
-       phoneNumber, email, website, isActive ? 1 : 0]
+        informationEnglish, informationSpanish, address,
+        longitude, latitude,
+        phoneNumber, email, website, isActive ? 1 : 0]
     );
 
     const resourceId = result.insertId;
@@ -18242,8 +18410,8 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude 
-        ? `${resource.latitude},${resource.longitude}` 
+      coordinates: resource.latitude && resource.longitude
+        ? `${resource.latitude},${resource.longitude}`
         : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
@@ -18303,8 +18471,8 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
 
     // Validate required fields
     if (!titleEnglish || !titleSpanish || !descriptionEnglish || !descriptionSpanish ||
-        !informationEnglish || !informationSpanish || !address || !coordinates || 
-        !phoneNumber || !email || !website) {
+      !informationEnglish || !informationSpanish || !address || !coordinates ||
+      !phoneNumber || !email || !website) {
       return res.status(400).json('Missing required fields');
     }
 
@@ -18327,9 +18495,9 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
            website = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
-       informationEnglish, informationSpanish, address, 
-       longitude, latitude,
-       phoneNumber, email, website, isActive ? 1 : 0, id]
+        informationEnglish, informationSpanish, address,
+        longitude, latitude,
+        phoneNumber, email, website, isActive ? 1 : 0, id]
     );
 
     if (updateResult.affectedRows === 0) {
@@ -18427,8 +18595,8 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude 
-        ? `${resource.latitude},${resource.longitude}` 
+      coordinates: resource.latitude && resource.longitude
+        ? `${resource.latitude},${resource.longitude}`
         : null,
       phoneNumber: resource.phone_number,
       email: resource.email,
