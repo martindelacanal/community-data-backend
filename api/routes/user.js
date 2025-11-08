@@ -17320,22 +17320,22 @@ router.get('/calendar/events', async (req, res) => {
     const [rows] = await mysqlConnection.promise().query(
       `SELECT 
         ce.id,
-        ce.date,
+        DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
         ce.time,
         ce.location_id,
         l.organization as location_name,
         l.community_city as location_city,
         l.address as location_address,
         CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
-        ce.creation_date as created_at,
-        ce.modification_date as updated_at
+        DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
+        DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
       FROM calendar_event ce
       INNER JOIN location l ON ce.location_id = l.id
       WHERE ${whereClause}
       ORDER BY ce.date ASC, ce.time ASC`,
       queryParams
     );
-
+    
     res.json(rows);
   } catch (err) {
     console.log(err);
@@ -17357,7 +17357,7 @@ router.get('/calendar/events/:id', async (req, res) => {
     const [rows] = await mysqlConnection.promise().query(
       `SELECT 
         ce.id,
-        ce.date,
+        DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
         ce.time,
         ${language === 'en' ? 'l.description_en' : 'l.description_es'} as description,
         ce.location_id,
@@ -17365,8 +17365,8 @@ router.get('/calendar/events/:id', async (req, res) => {
         l.community_city as location_city,
         l.address as location_address,
         CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
-        ce.creation_date as created_at,
-        ce.modification_date as updated_at
+        DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
+        DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
       FROM calendar_event ce
       INNER JOIN location l ON ce.location_id = l.id
       WHERE ce.id = ? AND ce.enabled = "Y"
@@ -17395,25 +17395,27 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
       return res.status(400).json('Missing required fields: date, time, location_id');
     }
 
+    const date_formatted = date.split('T')[0];
+
     try {
       // Insert the new event
       const [result] = await mysqlConnection.promise().query(
         'INSERT INTO calendar_event (date, time, location_id) VALUES (?, ?, ?)',
-        [date, time, location_id]
+        [date_formatted, time, location_id]
       );
 
       // Get the created event with location details
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
           ce.id,
-          ce.date,
+          DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
           ce.time,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
           l.address as location_address,
-          ce.creation_date as created_at,
-          ce.modification_date as updated_at
+          DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
+          DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
         FROM calendar_event ce
         INNER JOIN location l ON ce.location_id = l.id
         WHERE ce.id = ?`,
@@ -17441,11 +17443,13 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
       return res.status(400).json('Missing required fields: date, time, location_id');
     }
 
+    const date_formatted = date.split('T')[0];
+
     try {
       // Update the event
       const [result] = await mysqlConnection.promise().query(
         'UPDATE calendar_event SET date = ?, time = ?, location_id = ? WHERE id = ? AND enabled = "Y"',
-        [date, time, location_id, id]
+        [date_formatted, time, location_id, id]
       );
 
       if (result.affectedRows === 0) {
@@ -17456,14 +17460,14 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT 
           ce.id,
-          ce.date,
+          DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
           ce.time,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
           l.address as location_address,
-          ce.creation_date as created_at,
-          ce.modification_date as updated_at
+          DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
+          DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
         FROM calendar_event ce
         INNER JOIN location l ON ce.location_id = l.id
         WHERE ce.id = ?`,
