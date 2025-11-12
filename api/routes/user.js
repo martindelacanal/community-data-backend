@@ -5990,6 +5990,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS age,
         u.phone, u.zipcode, u.household_size,
         g.name AS gender, eth.name AS ethnicity, u.other_ethnicity,
+        first_loc.community_city AS first_location_visited,
         loc.community_city AS last_location_visited,
         (
           SELECT GROUP_CONCAT(DISTINCT loc2.community_city ORDER BY loc2.community_city SEPARATOR ', ')
@@ -6028,6 +6029,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN gender g ON g.id = u.gender_id
         INNER JOIN ethnicity eth ON eth.id = u.ethnicity_id
+        LEFT JOIN location first_loc ON first_loc.id = u.first_location_id
         LEFT JOIN location loc ON loc.id = u.location_id
       WHERE u.role_id = 5
         AND (
@@ -6207,6 +6209,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
         gender: u.gender,
         ethnicity: u.ethnicity,
         other_ethnicity: u.other_ethnicity,
+        first_location_visited: u.first_location_visited,
         last_location_visited: u.last_location_visited,
         locations_visited: u.locations_visited,
         delivery_count: u.delivery_count,
@@ -6259,6 +6262,7 @@ function baseHeaders() {
     { id: 'gender', title: 'Gender' },
     { id: 'ethnicity', title: 'Ethnicity' },
     { id: 'other_ethnicity', title: 'Other ethnicity' },
+    { id: 'first_location_visited', title: 'First location visited' },
     { id: 'last_location_visited', title: 'Last location visited' },
     { id: 'locations_visited', title: 'Locations visited' },
     { id: 'delivery_count', title: 'Delivery Count' },
