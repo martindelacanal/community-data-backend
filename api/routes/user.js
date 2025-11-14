@@ -15369,7 +15369,6 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
   }
 
   try {
-    console.log("req.body :", req.body);
     const {
       titleEnglish, titleSpanish, subtitleEnglish, subtitleSpanish,
       contentEnglish, contentSpanish, author, author_gender, date,
@@ -15461,13 +15460,15 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
         `INSERT INTO article (
           title_en, title_es, subtitle_en, subtitle_es, content_en, content_es,
           author, author_gender, publication_date, priority, article_status_id,
-          slug_en, slug_es
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          slug_en, slug_es, show_image_en, show_image_es
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           titleEnglish, titleSpanish, subtitleEnglish || null, subtitleSpanish || null,
           '', '', // Empty content initially
           author, author_gender, publicationDate,
-          null, article_status_id || 1, slugEn, slugEs // Priority will be set later
+          null, article_status_id || 1, slugEn, slugEs, // Priority will be set later
+          req.body.showImageEnglish === false ? 'N' : 'Y',
+          req.body.showImageSpanish === false ? 'N' : 'Y'
         ]
       );
 
@@ -15685,6 +15686,8 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       imageSpanishUrl,
       imageCaptionEnglish: imageCaptionEnglish || null,
       imageCaptionSpanish: imageCaptionSpanish || null,
+      showImageEnglish: req.body.showImageEnglish !== false,
+      showImageSpanish: req.body.showImageSpanish !== false,
       slugEnglish: slugEn,
       slugSpanish: slugEs,
       createdAt: new Date().toISOString(),
@@ -15872,6 +15875,8 @@ router.get('/article', async (req, res) => {
         a.slug_es as slugSpanish,
         a.view_count,
         a.featured,
+        a.show_image_en as showImageEnglish,
+        a.show_image_es as showImageSpanish,
         DATE_FORMAT(CONVERT_TZ(a.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as createdAt,
         DATE_FORMAT(CONVERT_TZ(a.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as updatedAt,
         asi.name_en as statusNameEnglish,
@@ -16035,6 +16040,8 @@ router.get('/article', async (req, res) => {
         slugSpanish: article.slugSpanish,
         viewCount: article.view_count,
         featured: article.featured,
+        showImageEnglish: article.showImageEnglish === 'Y',
+        showImageSpanish: article.showImageSpanish === 'Y',
         imageEnglishUrl: article.previewEnglishKey ? urlMap.get(article.previewEnglishKey) : null,
         imageSpanishUrl: article.previewSpanishKey ? urlMap.get(article.previewSpanishKey) : null,
         imageCaptionEnglish: article.imageCaptionEnglish,
@@ -16106,7 +16113,9 @@ router.get('/article/:id', async (req, res) => {
       `SELECT 
         a.*,
         DATE_FORMAT(CONVERT_TZ(a.publication_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as date,
-        asi.name_${lang === 'en' ? 'en' : 'es'} as statusName
+        asi.name_${lang === 'en' ? 'en' : 'es'} as statusName,
+        a.show_image_en,
+        a.show_image_es
       FROM article a
       LEFT JOIN article_status asi ON a.article_status_id = asi.id
       WHERE a.id = ?`,
@@ -16228,6 +16237,8 @@ router.get('/article/:id', async (req, res) => {
       slugSpanish: article.slug_es,
       viewCount: article.view_count + 1,
       featured: article.featured,
+      showImageEnglish: article.show_image_en === 'Y',
+      showImageSpanish: article.show_image_es === 'Y',
       imageEnglishUrl,
       imageSpanishUrl,
       imageCaptionEnglish,
@@ -16258,7 +16269,9 @@ router.get('/article/slug/:slug', async (req, res) => {
         a.*,
         DATE_FORMAT(CONVERT_TZ(a.publication_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as date,
         asi.name_en as statusNameEn,
-        asi.name_es as statusNameEs
+        asi.name_es as statusNameEs,
+        a.show_image_en,
+        a.show_image_es
       FROM article a
       LEFT JOIN article_status asi ON a.article_status_id = asi.id
       WHERE a.slug_en = ?`,
@@ -16275,7 +16288,9 @@ router.get('/article/slug/:slug', async (req, res) => {
           a.*,
           DATE_FORMAT(CONVERT_TZ(a.publication_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as date,
           asi.name_en as statusNameEn,
-          asi.name_es as statusNameEs
+          asi.name_es as statusNameEs,
+          a.show_image_en,
+          a.show_image_es
         FROM article a
         LEFT JOIN article_status asi ON a.article_status_id = asi.id
         WHERE a.slug_es = ?`,
@@ -16403,6 +16418,8 @@ router.get('/article/slug/:slug', async (req, res) => {
       slugSpanish: article.slug_es,
       viewCount: article.view_count + 1,
       featured: article.featured,
+      showImageEnglish: article.show_image_en === 'Y',
+      showImageSpanish: article.show_image_es === 'Y',
       imageEnglishUrl,
       imageSpanishUrl,
       imageCaptionEnglish,
@@ -16573,12 +16590,15 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         title_en = ?, title_es = ?, subtitle_en = ?, subtitle_es = ?,
         content_en = ?, content_es = ?, author = ?, author_gender = ?, publication_date = ?,
         priority = ?, article_status_id = ?,
-        slug_en = ?, slug_es = ?, modification_date = CURRENT_TIMESTAMP
+        slug_en = ?, slug_es = ?, show_image_en = ?, show_image_es = ?, modification_date = CURRENT_TIMESTAMP
       WHERE id = ?`,
       [
         titleEnglish, titleSpanish, subtitleEnglish || null, subtitleSpanish || null,
         processedContentEnglish, processedContentSpanish, author, author_gender, publicationDate,
-        managedPriority, article_status_id || 1, slugEn, slugEs, id
+        managedPriority, article_status_id || 1, slugEn, slugEs,
+        req.body.showImageEnglish === false ? 'N' : 'Y',
+        req.body.showImageSpanish === false ? 'N' : 'Y',
+        id
       ]
     );
 
@@ -16756,6 +16776,8 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       imageSpanishUrl,
       imageCaptionEnglish: imageCaptionEnglish || null,
       imageCaptionSpanish: imageCaptionSpanish || null,
+      showImageEnglish: req.body.showImageEnglish !== false,
+      showImageSpanish: req.body.showImageSpanish !== false,
       updatedAt: new Date().toISOString()
     };
 
