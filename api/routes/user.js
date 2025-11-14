@@ -5834,6 +5834,7 @@ ${language === 'en' ? 'Date' : 'Fecha'}: ${new Date().toLocaleString()}
         let mailOptions = {
           from: 'bienestarcommunity@gmail.com',
           to: 'community@bienestariswellbeing.org',
+          // to: 'martin.delacanalerbetta@gmail.com',
           subject: emailSubject,
           text: emailText,
           html: emailHtml
