@@ -18832,5 +18832,78 @@ router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
   }
 });
 
+// Get web images with optional filters (public endpoint)
+router.get('/web-images/public', async (req, res) => {
+  try {
+    const { id, filename } = req.query;
+
+    // Build the query based on provided parameters
+    let query = 'SELECT * FROM web_images';
+    let queryParams = [];
+
+    if (id) {
+      query += ' WHERE id = ?';
+      queryParams.push(id);
+    } else if (filename) {
+      query += ' WHERE original_filename = ?';
+      queryParams.push(filename);
+    }
+
+    // Execute query
+    const [rows] = await mysqlConnection.promise().query(query, queryParams);
+
+    // If no results found
+    if (rows.length === 0) {
+      return res.json([]);
+    }
+
+    // Generate signed URLs for each image
+    const imagesWithUrls = await Promise.all(
+      rows.map(async (image) => {
+        try {
+          // Generate signed URL from file_hash
+          const getObjectParams = {
+            Bucket: bucketName,
+            Key: image.file_hash
+          };
+          const command = new GetObjectCommand(getObjectParams);
+          const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // URL expires in 1 hour
+
+          // Return image data with URL instead of file_hash
+          return {
+            id: image.id,
+            mime_type: image.mime_type,
+            original_filename: image.original_filename,
+            alt_text_en: image.alt_text_en,
+            alt_text_es: image.alt_text_es,
+            modification_date: image.modification_date,
+            creation_date: image.creation_date,
+            url: url
+          };
+        } catch (error) {
+          logger.error('Error generating signed URL for web image:', image.file_hash, error);
+          // Return image data with null URL if there's an error
+          return {
+            id: image.id,
+            mime_type: image.mime_type,
+            original_filename: image.original_filename,
+            alt_text_en: image.alt_text_en,
+            alt_text_es: image.alt_text_es,
+            modification_date: image.modification_date,
+            creation_date: image.creation_date,
+            url: null
+          };
+        }
+      })
+    );
+
+    res.json(imagesWithUrls);
+
+  } catch (err) {
+    logger.error('Error fetching web images:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 module.exports = router;
