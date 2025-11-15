@@ -18838,14 +18838,14 @@ router.get('/web-images/public', async (req, res) => {
     const { id, filename } = req.query;
 
     // Build the query based on provided parameters
-    let query = 'SELECT * FROM web_images';
+    let query = "SELECT * FROM web_images WHERE enabled = 'Y'";
     let queryParams = [];
 
     if (id) {
-      query += ' WHERE id = ?';
+      query += ' AND id = ?';
       queryParams.push(id);
     } else if (filename) {
-      query += ' WHERE original_filename = ?';
+      query += ' AND original_filename = ?';
       queryParams.push(filename);
     }
 
