@@ -5673,36 +5673,6 @@ router.post('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res
   }
 });
 
-
-router.post('/message', verifyToken, async (req, res) => {
-  const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
-    try {
-      const user_id = cabecera.id;
-      const message = req.body.message || null;
-
-      if (message) {
-        const [rows] = await mysqlConnection.promise().query(
-          'insert into message(user_id,name) values(? , ?)',
-          [user_id, message]
-        );
-        if (rows.affectedRows > 0) {
-          res.json('Message sent successfully');
-        } else {
-          res.status(500).json('Could not send message');
-        }
-      } else {
-        res.status(400).json('Bad request');
-      }
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
-    }
-  } else {
-    res.status(401).json('Unauthorized');
-  }
-});
-
 // Public endpoint for contact form (no token required)
 router.post('/contact', async (req, res) => {
   try {
