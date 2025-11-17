@@ -17540,6 +17540,184 @@ router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
   }
 });
 
+// ============ SEARCH ENDPOINT ============
+
+// GET /search - Global search for calendar events and articles
+// Query params:
+// - query: search text (required)
+// - language: 'en' or 'es' (required)
+router.get('/search', async (req, res) => {
+  try {
+    const { query, language } = req.query;
+
+    // Validate required parameters
+    if (!query || !language) {
+      return res.status(400).json({ error: 'Missing required parameters: query and language' });
+    }
+
+    // Validate language parameter
+    if (!['en', 'es'].includes(language)) {
+      return res.status(400).json({ error: 'Invalid language. Must be "en" or "es"' });
+    }
+
+    const searchTerm = `%${query}%`;
+    const maxEvents = 20;
+    const maxArticles = 30;
+
+    // ===== SEARCH CALENDAR EVENTS =====
+    const eventsQuery = `
+      SELECT
+        ce.id,
+        ce.date,
+        ce.time,
+        ce.location_id,
+        ${language === 'en' ? 'l.name_en' : 'l.name_es'} as location_name,
+        l.community_city as location_city,
+        l.address as location_address,
+        CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
+        ce.created_at,
+        ce.updated_at
+      FROM calendar_event ce
+      INNER JOIN location l ON ce.location_id = l.id
+      WHERE ce.enabled = 'Y'
+        AND (
+          ${language === 'en' ? 'l.name_en' : 'l.name_es'} LIKE ?
+          OR l.community_city LIKE ?
+          OR l.address LIKE ?
+        )
+      ORDER BY ce.date ASC, ce.time ASC
+      LIMIT ?
+    `;
+
+    const [calendarEvents] = await mysqlConnection.promise().query(
+      eventsQuery,
+      [searchTerm, searchTerm, searchTerm, maxEvents]
+    );
+
+    // ===== SEARCH ARTICLES =====
+    const articlesQuery = `
+      SELECT DISTINCT
+        a.id,
+        ${language === 'en' ? 'a.title_en' : 'a.title_es'} as title,
+        ${language === 'en' ? 'a.slug_en' : 'a.slug_es'} as slug,
+        ${language === 'en' ? 'a.subtitle_en' : 'a.subtitle_es'} as subtitle,
+        ai.s3_key as image_s3_key,
+        ${language === 'en' ? 'f.name_en' : 'f.name_es'} as filterName
+      FROM article a
+      LEFT JOIN article_images ai ON a.id = ai.article_id
+        AND ai.image_type = ${language === 'en' ? "'preview_en'" : "'preview_es'"}
+      LEFT JOIN article_filter af ON a.id = af.article_id AND af.priority = 'Y'
+      LEFT JOIN filter f ON af.filter_id = f.id
+      LEFT JOIN article_category ac ON a.id = ac.article_id
+      LEFT JOIN category c ON ac.category_id = c.id
+      WHERE a.article_status_id = 2
+        AND (
+          ${language === 'en' ? 'a.title_en' : 'a.title_es'} LIKE ?
+          OR ${language === 'en' ? 'a.subtitle_en' : 'a.subtitle_es'} LIKE ?
+          OR ${language === 'en' ? 'f.name_en' : 'f.name_es'} LIKE ?
+          OR ${language === 'en' ? 'c.name_en' : 'c.name_es'} LIKE ?
+        )
+      ORDER BY a.priority ASC, a.publication_date DESC
+      LIMIT ?
+    `;
+
+    const [articles] = await mysqlConnection.promise().query(
+      articlesQuery,
+      [searchTerm, searchTerm, searchTerm, searchTerm, maxArticles]
+    );
+
+    // Get article IDs for fetching categories
+    const articleIds = articles.map(article => article.id);
+
+    let categoriesMap = new Map();
+
+    if (articleIds.length > 0) {
+      // Get all categories for these articles
+      const [categories] = await mysqlConnection.promise().query(
+        `SELECT
+          ac.article_id,
+          c.id as category_id,
+          ${language === 'en' ? 'c.name_en' : 'c.name_es'} as categoryName
+        FROM article_category ac
+        INNER JOIN category c ON ac.category_id = c.id
+        WHERE ac.article_id IN (${articleIds.map(() => '?').join(',')})`,
+        articleIds
+      );
+
+      // Build categories map: article_id -> [categories]
+      categories.forEach(cat => {
+        if (!categoriesMap.has(cat.article_id)) {
+          categoriesMap.set(cat.article_id, []);
+        }
+        categoriesMap.get(cat.article_id).push(cat.categoryName);
+      });
+    }
+
+    // Generate signed URLs for article images
+    const s3Keys = articles
+      .filter(article => article.image_s3_key)
+      .map(article => article.image_s3_key);
+
+    const signedUrls = await getSignedUrlsForImages(s3Keys);
+
+    const urlMap = new Map();
+    s3Keys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        urlMap.set(key, signedUrls[index]);
+      }
+    });
+
+    // Format articles and group by category
+    const articlesGroupedByCategory = {};
+
+    articles.forEach(article => {
+      const categories = categoriesMap.get(article.id) || [];
+      const primaryCategory = categories[0] || 'Uncategorized';
+
+      if (!articlesGroupedByCategory[primaryCategory]) {
+        articlesGroupedByCategory[primaryCategory] = [];
+      }
+
+      articlesGroupedByCategory[primaryCategory].push({
+        imageUrl: article.image_s3_key ? urlMap.get(article.image_s3_key) || '' : '',
+        filterName: article.filterName || '',
+        title: article.title || '',
+        slug: article.slug || '',
+        subtitle: article.subtitle || '',
+        categoryName: primaryCategory
+      });
+    });
+
+    // Convert to array format
+    const articlesArray = Object.keys(articlesGroupedByCategory).map(categoryName => ({
+      categoryName,
+      articles: articlesGroupedByCategory[categoryName]
+    }));
+
+    // Build final response
+    const response = {
+      calendarEvents: calendarEvents.map(event => ({
+        id: event.id,
+        date: event.date,
+        time: event.time,
+        location_id: event.location_id,
+        location_name: event.location_name,
+        location_city: event.location_city,
+        location_address: event.location_address,
+        coordinates: event.coordinates,
+        created_at: event.created_at,
+        updated_at: event.updated_at
+      })),
+      articles: articlesArray
+    };
+
+    res.json(response);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ============ TRUSTED RESOURCES ENDPOINTS ============
 
 // Multer configuration for trusted resource images
