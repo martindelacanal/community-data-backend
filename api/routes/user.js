@@ -17549,7 +17549,7 @@ router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
 router.get('/search', async (req, res) => {
   try {
     const { query, language } = req.query;
-
+    
     // Validate required parameters
     if (!query || !language) {
       return res.status(400).json({ error: 'Missing required parameters: query and language' });
@@ -17571,17 +17571,17 @@ router.get('/search', async (req, res) => {
         ce.date,
         ce.time,
         ce.location_id,
-        ${language === 'en' ? 'l.name_en' : 'l.name_es'} as location_name,
+        l.organization as location_name,
         l.community_city as location_city,
         l.address as location_address,
         CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
-        ce.created_at,
-        ce.updated_at
+        ce.creation_date,
+        ce.modification_date
       FROM calendar_event ce
       INNER JOIN location l ON ce.location_id = l.id
       WHERE ce.enabled = 'Y'
         AND (
-          ${language === 'en' ? 'l.name_en' : 'l.name_es'} LIKE ?
+          l.organization LIKE ?
           OR l.community_city LIKE ?
           OR l.address LIKE ?
         )
@@ -17610,7 +17610,7 @@ router.get('/search', async (req, res) => {
       LEFT JOIN filter f ON af.filter_id = f.id
       LEFT JOIN article_category ac ON a.id = ac.article_id
       LEFT JOIN category c ON ac.category_id = c.id
-      WHERE a.article_status_id = 2
+      WHERE a.article_status_id = 2 AND ac.category_id = 16 -- POR AHORA SOLO MOSTRAMOS ARTÍCULOS DE LA CATEGORÍA "Stories"
         AND (
           ${language === 'en' ? 'a.title_en' : 'a.title_es'} LIKE ?
           OR ${language === 'en' ? 'a.subtitle_en' : 'a.subtitle_es'} LIKE ?
@@ -17705,12 +17705,12 @@ router.get('/search', async (req, res) => {
         location_city: event.location_city,
         location_address: event.location_address,
         coordinates: event.coordinates,
-        created_at: event.created_at,
-        updated_at: event.updated_at
+        created_at: event.creation_date,
+        updated_at: event.modification_date
       })),
       articles: articlesArray
     };
-
+    
     res.json(response);
   } catch (err) {
     console.log(err);
