@@ -99,7 +99,6 @@ router.get('/alerts', verifyToken, verifyAdmin, async (req, res) => {
        ORDER BY created_at DESC`
     );
 
-    logger.info('Retrieved all alerts');
     res.status(200).json(rows);
   } catch (error) {
     logger.error('Error retrieving alerts:', error);
@@ -151,7 +150,6 @@ router.post('/alerts', verifyToken, verifyAdmin, async (req, res) => {
       // If this alert is being set as active, deactivate all others
       if (active) {
         await connection.query('UPDATE alerts SET active = "N"');
-        logger.info('Deactivated all existing alerts before creating new active alert');
       }
 
       // Insert new alert
@@ -174,8 +172,7 @@ router.post('/alerts', verifyToken, verifyAdmin, async (req, res) => {
       );
 
       const cabecera = JSON.parse(req.data.data);
-      logger.info(`Alert created by user ${cabecera.email || cabecera.id}: Alert ID ${result.insertId}, Active: ${active}`);
-
+     
       res.status(201).json(newAlert[0]);
     } catch (error) {
       await connection.rollback();
@@ -227,7 +224,6 @@ router.put('/alerts/:id', verifyToken, verifyAdmin, async (req, res) => {
       // If this alert is being activated, deactivate all others
       if (active) {
         await connection.query('UPDATE alerts SET active = "N"');
-        logger.info('Deactivated all existing alerts before activating alert ID ' + alertId);
       }
 
       // Update the alert
@@ -249,8 +245,7 @@ router.put('/alerts/:id', verifyToken, verifyAdmin, async (req, res) => {
       );
 
       const cabecera = JSON.parse(req.data.data);
-      logger.info(`Alert ${alertId} updated by user ${cabecera.email || cabecera.id}: Active set to ${active}`);
-
+     
       res.status(200).json(updatedAlert[0]);
     } catch (error) {
       await connection.rollback();
@@ -296,7 +291,6 @@ router.delete('/alerts/:id', verifyToken, verifyAdmin, async (req, res) => {
     );
 
     const cabecera = JSON.parse(req.data.data);
-    logger.info(`Alert ${alertId} deleted by user ${cabecera.email || cabecera.id}`);
 
     res.status(200).json({
       message: 'Alert deleted successfully',
