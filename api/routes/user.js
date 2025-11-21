@@ -15466,8 +15466,8 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
           '', '', // Empty content initially
           author, author_gender, publicationDate,
           null, article_status_id || 1, slugEn, slugEs, // Priority will be set later
-          req.body.showImageEnglish === false ? 'N' : 'Y',
-          req.body.showImageSpanish === false ? 'N' : 'Y'
+          req.body.showImageEnglish === true || req.body.showImageEnglish === 'true' ? 'Y' : 'N',
+          req.body.showImageSpanish === true || req.body.showImageSpanish === 'true' ? 'Y' : 'N'
         ]
       );
 
@@ -16585,7 +16585,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     // Update main article record
     await connection.query(
-      `UPDATE article SET 
+      `UPDATE article SET
         title_en = ?, title_es = ?, subtitle_en = ?, subtitle_es = ?,
         content_en = ?, content_es = ?, author = ?, author_gender = ?, publication_date = ?,
         priority = ?, article_status_id = ?,
@@ -16595,8 +16595,8 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
         titleEnglish, titleSpanish, subtitleEnglish || null, subtitleSpanish || null,
         processedContentEnglish, processedContentSpanish, author, author_gender, publicationDate,
         managedPriority, article_status_id || 1, slugEn, slugEs,
-        req.body.showImageEnglish === false ? 'N' : 'Y',
-        req.body.showImageSpanish === false ? 'N' : 'Y',
+        req.body.showImageEnglish === true || req.body.showImageEnglish === 'true' ? 'Y' : 'N',
+        req.body.showImageSpanish === true || req.body.showImageSpanish === 'true' ? 'Y' : 'N',
         id
       ]
     );
