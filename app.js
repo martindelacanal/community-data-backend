@@ -19,4 +19,7 @@ require('dotenv').config({path: './.env'}); // variables de entorno
 const userRoute = require('./api/routes/user');
 app.use('/api',userRoute);
 
+const alertsRoute = require('./api/routes/alerts');
+app.use('/api',alertsRoute);
+
 module.exports = app;
