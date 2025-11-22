@@ -12113,6 +12113,112 @@ router.delete('/ticket/:id', verifyToken, async (req, res) => {
   }
 });
 
+router.put('/notes/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const allowedRoles = ['admin', 'opsmanager', 'stocker', 'auditor'];
+
+  if (!allowedRoles.includes(cabecera.role)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const noteId = req.params.id;
+    const { note } = req.body;
+
+    // Validación
+    if (!note || note.trim() === '') {
+      return res.status(400).json({ error: 'Note cannot be empty' });
+    }
+
+    // Verificar que la nota existe
+    const [noteData] = await mysqlConnection.promise().execute(
+      'SELECT user_id FROM donation_ticket_note WHERE id = ?',
+      [noteId]
+    );
+
+    if (!noteData.length) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    // Validar ownership
+    const isOwner = noteData[0].user_id === cabecera.id;
+    const isAdminOrOps = ['admin', 'opsmanager'].includes(cabecera.role);
+
+    if (!isOwner && !isAdminOrOps) {
+      return res.status(403).json({ error: 'Forbidden: You can only edit your own notes' });
+    }
+
+    // Actualizar nota
+    await mysqlConnection.promise().execute(
+      'UPDATE donation_ticket_note SET note = ? WHERE id = ?',
+      [note.trim(), noteId]
+    );
+
+    // Log de la operación
+    await mysqlConnection.promise().execute(
+      'INSERT INTO stocker_log(user_id, operation_id, note_id) VALUES(?, ?, ?)',
+      [cabecera.id, 12, noteId]
+    );
+
+    res.status(200).json({ message: 'Note updated successfully' });
+
+  } catch (error) {
+    console.error(error);
+    logger.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/notes/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const allowedRoles = ['admin', 'opsmanager', 'stocker', 'auditor'];
+
+  if (!allowedRoles.includes(cabecera.role)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const noteId = req.params.id;
+
+    // Verificar que la nota existe
+    const [noteData] = await mysqlConnection.promise().execute(
+      'SELECT user_id FROM donation_ticket_note WHERE id = ?',
+      [noteId]
+    );
+
+    if (!noteData.length) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    // Validar ownership
+    const isOwner = noteData[0].user_id === cabecera.id;
+    const isAdminOrOps = ['admin', 'opsmanager'].includes(cabecera.role);
+
+    if (!isOwner && !isAdminOrOps) {
+      return res.status(403).json({ error: 'Forbidden: You can only delete your own notes' });
+    }
+
+    // Log antes de borrar
+    await mysqlConnection.promise().execute(
+      'INSERT INTO stocker_log(user_id, operation_id, note_id) VALUES(?, ?, ?)',
+      [cabecera.id, 13, noteId]
+    );
+
+    // Eliminar nota
+    await mysqlConnection.promise().execute(
+      'DELETE FROM donation_ticket_note WHERE id = ?',
+      [noteId]
+    );
+
+    res.status(200).json({ message: 'Note deleted successfully' });
+
+  } catch (error) {
+    console.error(error);
+    logger.error(error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/table/product', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
