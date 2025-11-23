@@ -11168,7 +11168,7 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
       if (page < 1) {
         page = 1;
       }
-      var resultsPerPage = 10;
+      var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
       var start = (page - 1) * resultsPerPage;
 
       const filters = req.body;
@@ -11295,7 +11295,7 @@ router.get('/table/notification', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -11413,7 +11413,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -11620,7 +11620,7 @@ router.post('/table/volunteer', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -11858,7 +11858,7 @@ router.post('/table/delivered', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -12269,7 +12269,7 @@ router.post('/table/product', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -12401,7 +12401,7 @@ router.post('/table/product-type', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -12593,7 +12593,7 @@ router.post('/table/worker', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -12715,7 +12715,7 @@ router.post('/table/delivered-by', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -12806,7 +12806,7 @@ router.post('/table/transported-by', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -12898,7 +12898,7 @@ router.post('/table/gender', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -12997,7 +12997,7 @@ router.post('/table/ethnicity', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -13092,7 +13092,7 @@ router.post('/table/provider', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -13191,7 +13191,7 @@ router.post('/table/client', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -13359,7 +13359,7 @@ router.post('/table/article', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
@@ -13478,7 +13478,7 @@ router.post('/table/location', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
