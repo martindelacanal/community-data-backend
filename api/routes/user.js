@@ -11987,7 +11987,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     if (page < 1) {
       page = 1;
     }
-    var resultsPerPage = 10;
+    var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 20;
     var start = (page - 1) * resultsPerPage;
 
     var orderBy = req.query.orderBy ? req.query.orderBy : 'date';
