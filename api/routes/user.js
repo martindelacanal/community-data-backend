@@ -2919,14 +2919,15 @@ router.get('/workers', verifyToken, async (req, res) => {
 
 router.get('/locations', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
+  const withFilterEvent = req.query.withFilterEvent === 'true';
   if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'director') {
     try {
       let query = 'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location';
       let whereClause = '';
       let params = [];
 
-      // Si es delivery, filtrar por eventos del día actual
-      if (cabecera.role === 'delivery') {
+      // Si es delivery y withFilterEvent es true, filtrar por eventos del día actual
+      if (cabecera.role === 'delivery' && withFilterEvent) {
         whereClause = ` where id IN (
           SELECT location_id 
           FROM calendar_event 
@@ -2972,18 +2973,21 @@ router.get('/locations', verifyToken, async (req, res) => {
       } else {
         if (cabecera.role === 'beneficiary') {
           try {
-            const [rows] = await mysqlConnection.promise().query(
-              `select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude 
-               from location 
-               where enabled = "Y" 
-               AND id IN (
-                 SELECT location_id 
-                 FROM calendar_event 
-                 WHERE date = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
-                 AND enabled = 'Y'
-               )
-               order by community_city`
-            );
+            let query = 'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y"';
+            
+            // Si withFilterEvent es true, filtrar por eventos del día actual
+            if (withFilterEvent) {
+              query += ` AND id IN (
+                SELECT location_id 
+                FROM calendar_event 
+                WHERE date = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
+                AND enabled = 'Y'
+              )`;
+            }
+            
+            query += ' order by community_city';
+            
+            const [rows] = await mysqlConnection.promise().query(query);
             res.json(rows);
           } catch (err) {
             console.log(err);
