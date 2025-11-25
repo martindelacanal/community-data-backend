@@ -72,8 +72,6 @@ router.post('/signin', (req, res) => {
 
   const email = req.body.email || null;
   const password = req.body.password || null;
-  const remember = req.body.remember || null;
-  console.log(req.body);
 
   mysqlConnection.query('SELECT user.id, \
                                   user.firstname, \
@@ -86,6 +84,7 @@ router.post('/signin', (req, res) => {
                                   user.client_id as client_id, \
                                   user.reset_password as reset_password, \
                                   role.name AS role, \
+                                  user.language as language, \
                                   user.enabled as enabled\
                                   FROM user \
                                   INNER JOIN role ON role.id = user.role_id \
@@ -95,7 +94,6 @@ router.post('/signin', (req, res) => {
     [email, email, email],
     async (err, rows, fields) => {
       if (!err) {
-        console.log(rows);
         if (rows.length > 0) {
           const validUsers = [];
           for (const row of rows) {
@@ -109,7 +107,6 @@ router.post('/signin', (req, res) => {
               delete row.lastname;
               delete row.creation_date;
               let data = JSON.stringify(row);
-              console.log("los datos del token son: " + data);
               try {
                 const token = await jwtSignAsync({ data }, process.env.JWT_SECRET, { expiresIn: '1h' });
                 validUsers.push({
