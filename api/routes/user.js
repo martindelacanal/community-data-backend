@@ -9513,6 +9513,104 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
 }
 );
 
+router.post('/metrics/participant/language', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+    try {
+      const filters = req.body;
+      let from_date = filters.from_date || '1970-01-01';
+      let to_date = filters.to_date || '2100-01-01';
+      const locations = filters.locations || [];
+      const genders = filters.genders || [];
+      const ethnicities = filters.ethnicities || [];
+      const min_age = filters.min_age || 0;
+      const max_age = filters.max_age || 150;
+      const zipcode = filters.zipcode || null;
+
+      // Convertir a formato ISO y obtener solo la fecha
+      if (filters.from_date) {
+        from_date = new Date(filters.from_date).toISOString().slice(0, 10);
+      }
+      if (filters.to_date) {
+        to_date = new Date(filters.to_date).toISOString().slice(0, 10);
+      }
+
+      const language = req.query.language || 'en';
+
+      var query_from_date = '';
+      if (filters.from_date) {
+        query_from_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\'';
+      }
+      var query_to_date = '';
+      if (filters.to_date) {
+        query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
+      }
+      var query_locations = '';
+      if (locations.length > 0) {
+        query_locations = 'AND ( (db.location_id IN (' + locations.join() + ') AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') >= \'' + from_date + '\' AND CONVERT_TZ(db.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY) ) OR u.first_location_id IN (' + locations.join() + ')) ';
+      }
+      var query_genders = '';
+      if (genders.length > 0) {
+        query_genders = 'AND u.gender_id IN (' + genders.join() + ')';
+      }
+      var query_ethnicities = '';
+      if (ethnicities.length > 0) {
+        query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+      }
+      var query_min_age = '';
+      if (filters.min_age) {
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      }
+      var query_max_age = '';
+      if (filters.max_age) {
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      }
+      var query_zipcode = '';
+      if (filters.zipcode) {
+        query_zipcode = 'AND u.zipcode = ' + zipcode;
+      }
+
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          CASE 
+            WHEN u.language = 'en' THEN ${language === 'en' ? "'English'" : "'Inglés'"}
+            WHEN u.language = 'es' THEN ${language === 'en' ? "'Spanish'" : "'Español'"}
+            ELSE ${language === 'en' ? "'Unknown'" : "'Desconocido'"}
+          END AS name,
+          COUNT(DISTINCT(u.id)) AS total
+          FROM user u
+          ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+          
+          WHERE u.id IN (SELECT DISTINCT u2.id 
+                          FROM user u2
+                          LEFT JOIN delivery_beneficiary AS db ON u2.id = db.receiving_user_id
+                          WHERE u2.role_id = 5 AND u2.enabled = 'Y' 
+                          ${query_from_date}
+                          ${query_to_date}
+                          ${query_locations}
+                          ${query_genders}
+                          ${query_ethnicities}
+                          ${query_min_age}
+                          ${query_max_age}
+                          ${query_zipcode}
+                        )
+          ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
+          GROUP BY u.language
+          ORDER BY name`,
+        [cabecera.client_id]
+      );
+
+      res.json(rows);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+);
+
 router.post('/metrics/product/reach', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director' || cabecera.role === 'auditor') {
