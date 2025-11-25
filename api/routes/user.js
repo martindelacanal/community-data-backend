@@ -17404,12 +17404,51 @@ function verifyTokenOptional(req, res, next) {
 // - year: year (YYYY) for monthly pagination
 // - location_id: filter by specific location
 // - lang: 'en' or 'es' (default: 'en')
+// - page: page number for pagination (1-based)
+// - pageSize: number of items per page
 router.get('/calendar/events', async (req, res) => {
   try {
-    const { fromToday, daysLimit, month, year, location_id, lang = 'en' } = req.query;
+    const { fromToday, daysLimit, month, year, location_id, lang = 'en', page, pageSize } = req.query;
 
     // Validate language parameter
     const language = ['en', 'es'].includes(lang) ? lang : 'en';
+
+    // Check if pagination parameters are provided
+    const usePagination = page !== undefined || pageSize !== undefined;
+
+    if (usePagination) {
+      // Validate pagination parameters
+      if (page === undefined || pageSize === undefined) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Both page and pageSize parameters are required for pagination'
+        });
+      }
+
+      const pageNum = parseInt(page);
+      const pageSizeNum = parseInt(pageSize);
+
+      if (isNaN(pageNum) || pageNum < 1) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'page must be a positive integer (>= 1)'
+        });
+      }
+
+      if (isNaN(pageSizeNum) || pageSizeNum < 1) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'pageSize must be a positive integer (>= 1)'
+        });
+      }
+
+      if (pageSizeNum > 100) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'pageSize must not exceed 100'
+        });
+      }
+    }
 
     let whereConditions = ['ce.enabled = "Y"'];
     let queryParams = [];
@@ -17444,6 +17483,15 @@ router.get('/calendar/events', async (req, res) => {
         );
 
         if (distinctDates.length === 0) {
+          if (usePagination) {
+            return res.json({
+              events: [],
+              total: 0,
+              page: parseInt(page),
+              pageSize: parseInt(pageSize),
+              totalPages: 0
+            });
+          }
           return res.json([]);
         }
 
@@ -17476,26 +17524,75 @@ router.get('/calendar/events', async (req, res) => {
 
     const whereClause = whereConditions.join(' AND ');
 
-    const [rows] = await mysqlConnection.promise().query(
-      `SELECT 
-        ce.id,
-        DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
-        ce.time,
-        ce.location_id,
-        l.organization as location_name,
-        l.community_city as location_city,
-        l.address as location_address,
-        CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
-        DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
-        DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
-      FROM calendar_event ce
-      INNER JOIN location l ON ce.location_id = l.id
-      WHERE ${whereClause}
-      ORDER BY ce.date ASC, ce.time ASC`,
-      queryParams
-    );
-    
-    res.json(rows);
+    if (usePagination) {
+      // Get total count for pagination
+      const countQuery = `
+        SELECT COUNT(*) as total
+        FROM calendar_event ce
+        INNER JOIN location l ON ce.location_id = l.id
+        WHERE ${whereClause}
+      `;
+
+      const [countResult] = await mysqlConnection.promise().query(countQuery, queryParams);
+      const total = countResult[0].total;
+
+      // Calculate pagination
+      const pageNum = parseInt(page);
+      const pageSizeNum = parseInt(pageSize);
+      const offset = (pageNum - 1) * pageSizeNum;
+      const totalPages = Math.ceil(total / pageSizeNum);
+
+      // Get paginated results
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          ce.id,
+          DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
+          ce.time,
+          ce.location_id,
+          l.organization as location_name,
+          l.community_city as location_city,
+          l.address as location_address,
+          CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
+          DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
+          DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
+        FROM calendar_event ce
+        INNER JOIN location l ON ce.location_id = l.id
+        WHERE ${whereClause}
+        ORDER BY ce.date ASC, ce.time ASC
+        LIMIT ? OFFSET ?`,
+        [...queryParams, pageSizeNum, offset]
+      );
+
+      res.json({
+        events: rows,
+        total: total,
+        page: pageNum,
+        pageSize: pageSizeNum,
+        totalPages: totalPages
+      });
+    } else {
+      // Backward compatibility: return all events as array
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT 
+          ce.id,
+          DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
+          ce.time,
+          ce.location_id,
+          l.organization as location_name,
+          l.community_city as location_city,
+          l.address as location_address,
+          CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
+          DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
+          DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
+        FROM calendar_event ce
+        INNER JOIN location l ON ce.location_id = l.id
+        WHERE ${whereClause}
+        ORDER BY ce.date ASC, ce.time ASC`,
+        queryParams
+      );
+      
+      res.json(rows);
+    }
   } catch (err) {
     console.log(err);
     res.status(500).json('Internal server error');

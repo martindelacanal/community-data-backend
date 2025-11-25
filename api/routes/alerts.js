@@ -91,15 +91,84 @@ function validateAlertData(data, isUpdate = false) {
 // GET /api/alerts - Get all alerts (admin only)
 router.get('/alerts', verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const [rows] = await mysqlConnection.promise().query(
-      `SELECT id, title_en, title_es, text_en, text_es,
-              CASE WHEN active = 'Y' THEN true ELSE false END as active,
-              created_at, updated_at
-       FROM alerts
-       ORDER BY created_at DESC`
-    );
+    const { page, pageSize } = req.query;
 
-    res.status(200).json(rows);
+    // Check if pagination parameters are provided
+    const usePagination = page !== undefined || pageSize !== undefined;
+
+    if (usePagination) {
+      // Validate pagination parameters
+      if (page === undefined || pageSize === undefined) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Both page and pageSize parameters are required for pagination'
+        });
+      }
+
+      const pageNum = parseInt(page);
+      const pageSizeNum = parseInt(pageSize);
+
+      if (isNaN(pageNum) || pageNum < 1) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'page must be a positive integer (>= 1)'
+        });
+      }
+
+      if (isNaN(pageSizeNum) || pageSizeNum < 1) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'pageSize must be a positive integer (>= 1)'
+        });
+      }
+
+      if (pageSizeNum > 100) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'pageSize must not exceed 100'
+        });
+      }
+
+      // Get total count
+      const [countResult] = await mysqlConnection.promise().query(
+        'SELECT COUNT(*) as total FROM alerts'
+      );
+      const total = countResult[0].total;
+
+      // Calculate pagination
+      const offset = (pageNum - 1) * pageSizeNum;
+      const totalPages = Math.ceil(total / pageSizeNum);
+
+      // Get paginated results
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT id, title_en, title_es, text_en, text_es,
+                CASE WHEN active = 'Y' THEN true ELSE false END as active,
+                created_at, updated_at
+         FROM alerts
+         ORDER BY created_at DESC
+         LIMIT ? OFFSET ?`,
+        [pageSizeNum, offset]
+      );
+
+      res.status(200).json({
+        alerts: rows,
+        total: total,
+        page: pageNum,
+        pageSize: pageSizeNum,
+        totalPages: totalPages
+      });
+    } else {
+      // Backward compatibility: return all alerts as array
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT id, title_en, title_es, text_en, text_es,
+                CASE WHEN active = 'Y' THEN true ELSE false END as active,
+                created_at, updated_at
+         FROM alerts
+         ORDER BY created_at DESC`
+      );
+
+      res.status(200).json(rows);
+    }
   } catch (error) {
     logger.error('Error retrieving alerts:', error);
     res.status(500).json({ error: 'Internal Server Error', message: 'Error retrieving alerts' });
