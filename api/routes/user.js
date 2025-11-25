@@ -8820,7 +8820,7 @@ router.post('/metrics/volunteer/location', verifyToken, async (req, res) => {
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND v.location_id IN (' + locations.join() + ')) ';
+        query_locations = 'AND v.location_id IN (' + locations.join() + ')';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -8865,31 +8865,34 @@ router.post('/metrics/volunteer/location', verifyToken, async (req, res) => {
         [from_date, toDate]
       );
 
-      // Calcular el promedio
+      // Calcular el promedio usando row.total en lugar de row.name
       let sum = 0;
       let count = 0;
       for (const row of rows) {
-        sum += row.name * row.total;
+        sum += row.total;
         count += row.total;
       }
-      const average = Number((sum / count).toFixed(2));
+      const average = count > 0 ? Number((sum / count).toFixed(2)) : 0;
 
-      // Calcular la mediana
-      rows.sort((a, b) => a.name - b.name);
-      let median;
+      // Calcular la mediana usando row.total
+      // Primero ordenamos por total
+      rows.sort((a, b) => a.total - b.total);
+      
+      let median = 0;
       let accumulatedCount = 0;
+      const midPoint = count / 2;
+      
       for (const row of rows) {
         accumulatedCount += row.total;
-        if (accumulatedCount >= count / 2) {
-          median = row.name;
+        if (accumulatedCount >= midPoint) {
+          median = row.total;
           break;
         }
       }
 
-      // Convertir los números a cadenas
-      for (const row of rows) {
-        row.name = String(row.name);
-      }
+      // Volver a ordenar por nombre para mantener el orden original
+      rows.sort((a, b) => a.name.localeCompare(b.name));
+
       res.json({ average: average, median: median, total: count, data: rows });
     } catch (err) {
       console.log(err);
@@ -8898,8 +8901,7 @@ router.post('/metrics/volunteer/location', verifyToken, async (req, res) => {
   } else {
     res.status(403).json('Unauthorized');
   }
-}
-);
+});
 
 router.post('/metrics/volunteer/age', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
@@ -9346,7 +9348,8 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
                           ${query_zipcode}
                         )
           ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-          GROUP BY name`,
+          GROUP BY name
+          order by name desc`,
         [cabecera.client_id]
       );
 
@@ -9437,7 +9440,8 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
                           ${query_zipcode}
                         )
           ${cabecera.role === 'client' ? 'and cu.client_id = ?' : ''}
-          GROUP BY name`,
+          GROUP BY name
+          order by name desc`,
         [cabecera.client_id]
       );
 
