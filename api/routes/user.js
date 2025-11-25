@@ -5932,6 +5932,33 @@ router.put('/settings/password', verifyToken, async (req, res) => {
   }
 });
 
+router.put('/settings/language', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const user_id = cabecera.id;
+  const { language } = req.body;
+
+  try {
+    if (!language || (language !== 'en' && language !== 'es')) {
+      return res.status(400).json('Invalid language. Must be "en" or "es"');
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      'UPDATE user SET language = ? WHERE id = ?',
+      [language, user_id]
+    );
+
+    if (rows.affectedRows > 0) {
+      res.json('Language updated successfully');
+    } else {
+      res.status(500).json('Could not update language');
+    }
+  } catch (err) {
+    console.log(err);
+    logger.error(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
 const { createObjectCsvStringifier } = require('csv-writer');
 
 router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
