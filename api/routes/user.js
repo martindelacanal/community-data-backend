@@ -13543,6 +13543,8 @@ router.post('/table/article', verifyToken, async (req, res) => {
         DATE_FORMAT(CONVERT_TZ(a.publication_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as publication_date,
         ${language === 'en' ? 'ast.name_en' : 'ast.name_es'} as status,
         COALESCE(a.priority, '') as priority,
+        a.slug_en,
+        a.slug_es,
         DATE_FORMAT(CONVERT_TZ(a.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
         FROM article as a
         LEFT JOIN article_status as ast ON a.article_status_id = ast.id
@@ -13575,6 +13577,8 @@ router.post('/table/article', verifyToken, async (req, res) => {
           DATE_FORMAT(CONVERT_TZ(a.publication_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as publication_date,
           ${language === 'en' ? 'ast.name_en' : 'ast.name_es'} as status,
           COALESCE(a.priority, '') as priority,
+          a.slug_en,
+          a.slug_es,
           DATE_FORMAT(CONVERT_TZ(a.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
           FROM article as a
           LEFT JOIN article_status as ast ON a.article_status_id = ast.id
