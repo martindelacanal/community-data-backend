@@ -15,7 +15,7 @@ const moment = require('moment-timezone');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const { parse } = require('csv-parse/sync');
 
-const XLSX = require('xlsx');
+const XLSX = require('xlsx-js-style');
 
 schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
     // Modificar todos los delivery_log con operation_id = 3 y offboarding_date = null que hayan sido creados hace más de 5 horas y agregarle la fecha actual
@@ -531,16 +531,16 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
 
     let locationRowBuilder;
     if (parseInt(client_id) === 1) {
-        locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New' });
+        locationTableRows.push({ col1: '', col2: 'Location', col3: 'New' });
         locationRowBuilder = (loc, newAtLoc) => ({
-            col1: loc.id,
+            col1: '',
             col2: loc.name,
             col3: newAtLoc
         });
     } else {
-        locationTableRows.push({ col1: 'Id', col2: 'Location', col3: 'New', col4: 'Recurring', col5: 'Totals' });
+        locationTableRows.push({ col1: '', col2: 'Location', col3: 'New', col4: 'Recurring', col5: 'Totals' });
         locationRowBuilder = (loc, newAtLoc, recurringAtLoc, totalAtLoc) => ({
-            col1: loc.id,
+            col1: '',
             col2: loc.name,
             col3: newAtLoc,
             col4: recurringAtLoc,
@@ -568,8 +568,6 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
             totalRecurringByLocation += recurringAtLoc;
             grandTotalByLocation += totalAtLoc;
         });
-
-        locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' });
 
         if (parseInt(client_id) === 1) {
             locationTableRows.push({
@@ -643,21 +641,95 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
     const summaryData = [];
 
     if (parseInt(client_id) === 1) {
-        // Para client_id = 1, solo 3 columnas
+        // Para client_id = 1, 3 columnas (col1 vacia, Location, New)
         allCsvRows.forEach(row => {
-            summaryData.push([row.col1, row.col2, row.col3]);
+            summaryData.push([
+                row.col1 !== undefined && row.col1 !== null ? row.col1 : '',
+                row.col2 !== undefined && row.col2 !== null ? row.col2 : '',
+                row.col3 !== undefined && row.col3 !== null ? row.col3 : 0
+            ]);
         });
     } else {
-        // Para otros clientes, 5 columnas
+        // Para otros clientes, 5 columnas (col1 vacia, Location, New, Recurring, Totals)
         allCsvRows.forEach(row => {
-            summaryData.push([row.col1, row.col2, row.col3, row.col4, row.col5]);
+            summaryData.push([
+                row.col1 !== undefined && row.col1 !== null ? row.col1 : '',
+                row.col2 !== undefined && row.col2 !== null ? row.col2 : '',
+                row.col3 !== undefined && row.col3 !== null ? row.col3 : 0,
+                row.col4 !== undefined && row.col4 !== null ? row.col4 : 0,
+                row.col5 !== undefined && row.col5 !== null ? row.col5 : 0
+            ]);
         });
     }
 
     const summaryWorksheet = XLSX.utils.aoa_to_sheet(summaryData);
+
+    // Ajustes de estilo y formato para cumplir requisitos visuales
+    const setBold = (cellAddress) => {
+        if (!summaryWorksheet[cellAddress]) { return; }
+        summaryWorksheet[cellAddress].s = {
+            font: { bold: true }
+        };
+    };
+
+    // Bold for Date Range value, first Total (New+Recurring), and YES value (column B)
+    setBold('B2'); // Date Range value
+    setBold('B4'); // New value
+    setBold('B6'); // First Total value
+    setBold('B9'); // YES value
+
+    // Calcular filas para la tabla de locations
+    const headerRowIndex = summaryPartRows.length + 2; // blank row + header row
+    const firstDataRowIndex = headerRowIndex + 1;
+    const totalRowIndex = summaryPartRows.length + locationTableRows.length;
+
+    // Encabezados de la tabla de locations en negrita (Location, New, Recurring, Totals)
+    if (parseInt(client_id) === 1) {
+        setBold(`B${headerRowIndex}`); // Location
+        setBold(`C${headerRowIndex}`); // New
+    } else {
+        setBold(`B${headerRowIndex}`); // Location
+        setBold(`C${headerRowIndex}`); // New
+        setBold(`D${headerRowIndex}`); // Recurring
+        setBold(`E${headerRowIndex}`); // Totals
+    }
+
+    // Columna New (column C): valores > 0 en negrita y total de New en negrita
+    const newColumnLetter = 'C';
+    for (let rowIdx = firstDataRowIndex; rowIdx < totalRowIndex; rowIdx++) {
+        const cellAddress = `${newColumnLetter}${rowIdx}`;
+        const cell = summaryWorksheet[cellAddress];
+        if (cell && Number(cell.v) > 0) {
+            setBold(cellAddress);
+        }
+    }
+    setBold(`${newColumnLetter}${totalRowIndex}`);
+
+    // Calcular anchos automáticos de columna basados en el contenido
+    const range = XLSX.utils.decode_range(summaryWorksheet['!ref']);
+    const colWidths = [];
+    
+    for (let C = range.s.c; C <= range.e.c; ++C) {
+        let maxWidth = 10; // Ancho mínimo
+        for (let R = range.s.r; R <= range.e.r; ++R) {
+            const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
+            const cell = summaryWorksheet[cellAddress];
+            if (cell && cell.v) {
+                const cellValue = cell.v.toString();
+                const cellWidth = cellValue.length + 2; // Agregar padding
+                if (cellWidth > maxWidth) {
+                    maxWidth = cellWidth;
+                }
+            }
+        }
+        colWidths.push({ wch: maxWidth });
+    }
+    
+    summaryWorksheet['!cols'] = colWidths;
+
     XLSX.utils.book_append_sheet(summaryWorkbook, summaryWorksheet, 'Summary');
 
-    const excelBuffer = XLSX.write(summaryWorkbook, { bookType: 'xlsx', type: 'buffer' });
+    const excelBuffer = XLSX.write(summaryWorkbook, { bookType: 'xlsx', type: 'buffer', cellStyles: true });
 
     return { excelBuffer: excelBuffer, emailReportData: emailReportData };
 }
