@@ -326,76 +326,96 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
     const displayToDate = moment(to_date, "YYYY-MM-DD").format("MM/DD/YYYY");
     const dateRangeDisplay = `${displayFromDate} - ${displayToDate}`;
 
-    const from_date_db_start = moment(from_date, "YYYY-MM-DD").format("YYYY-MM-DD 00:00:00");
-    const to_date_db_end = moment(to_date, "YYYY-MM-DD").format("YYYY-MM-DD 23:59:59");
-
-    // Overall Summary Calculations (from csvRawData)
+    // Overall Summary Calculations aligned with /metrics/participant/register
     let newCount = 0;
     let newHealthPlanYes = 0;
     let newHealthPlanNo = 0;
     let recurringCount = 0; // Initialize recurringCount
+    let newUserIds = [];
 
-    if (records.length > 0) {
-        const filterFromDateMoment = moment(from_date, "YYYY-MM-DD");
-        const filterToDateMoment = moment(to_date, "YYYY-MM-DD").endOf('day');
+    // Fetch client locations for filters and table rendering
+    let allClientLocations = [];
+    try {
+        let locationQuery = `SELECT l.id, l.community_city as name FROM location l JOIN client_location cl ON l.id = cl.location_id WHERE cl.client_id = ?`;
+        // Exclude Compton (location_id = 32) for Molina (client_id = 2)
+        if (parseInt(client_id) === 2) {
+            locationQuery += ` AND l.id != 32`;
+        }
+        locationQuery += ` ORDER BY l.id`;
+        [allClientLocations] = await mysqlConnection.promise().query(locationQuery, [client_id]);
+    } catch (error) {
+        logger.error(`Error fetching locations for client_id ${client_id}:`, error);
+    }
 
-        records.forEach(record => {
-            const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-            const isWithinDateRange = registrationDate.isBetween(filterFromDateMoment, filterToDateMoment, 'day', '[]');
-            const wasRegisteredAtThisClientLocation = record['Registered at Client Location'] === '1';
+    const locationIds = allClientLocations.map(loc => loc.id);
+    const locationPlaceholders = locationIds.map(() => '?').join(',');
+    const hasLocationFilter = locationIds.length > 0;
 
-            if (isWithinDateRange && wasRegisteredAtThisClientLocation) {
-                newCount++;
-                if (record['Health Insurance?'] === 'Yes') {
-                    newHealthPlanYes++;
-                } else if (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '') {
-                    newHealthPlanNo++;
-                }
-            }
-        });
+    try {
+        const newParams = [
+            from_date,
+            to_date,
+            ...(hasLocationFilter ? locationIds : [])
+        ];
+
+        const [newRows] = await mysqlConnection.promise().query(
+            `
+            SELECT DISTINCT u.id AS user_id
+            FROM user u
+            WHERE u.role_id = 5
+              AND u.enabled = 'Y'
+              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ?
+              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+              ${hasLocationFilter ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
+            `,
+            newParams
+        );
+
+        newUserIds = newRows.map(row => row.user_id);
+        newCount = newUserIds.length;
+    } catch (error) {
+        logger.error(`Error fetching overall new count for client_id ${client_id}:`, error);
     }
 
     try {
         const recurringParams = [
-            client_id,
-            client_id,
-            from_date_db_start,
-            to_date_db_end,
-            from_date_db_start,
-            from_date_db_start
+            from_date,
+            to_date,
+            ...(hasLocationFilter ? locationIds : []), // db_range.location_id filter
+            ...(hasLocationFilter ? locationIds : []), // db_prev_original.location_id filter
+            from_date,
+            ...(hasLocationFilter ? locationIds : []), // u.first_location_id filter
+            from_date
         ];
         const [recurringRows] = await mysqlConnection.promise().query(
             `
             SELECT COUNT(DISTINCT u.id) AS recurring
-            FROM user u
-            INNER JOIN client_user cu ON u.id = cu.user_id AND cu.client_id = ?
-            INNER JOIN delivery_beneficiary db_range ON u.id = db_range.receiving_user_id
-            INNER JOIN client_location cl_range ON db_range.location_id = cl_range.location_id AND cl_range.client_id = ?
-            WHERE u.role_id = 5 AND u.enabled = 'Y'
-              AND CONVERT_TZ(db_range.creation_date,'+00:00','America/Los_Angeles') BETWEEN ? AND ?
+            FROM delivery_beneficiary db_range
+            INNER JOIN user u ON db_range.receiving_user_id = u.id
+            WHERE 
+              CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') >= ?
+              AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+              AND u.role_id = 5 AND u.enabled = 'Y'
+              ${hasLocationFilter ? `AND db_range.location_id IN (${locationPlaceholders})` : ''}
               AND (
-                    EXISTS (
-                        SELECT 1
-                        FROM delivery_beneficiary db_prev
-                        INNER JOIN client_location cl_prev ON db_prev.location_id = cl_prev.location_id AND cl_prev.client_id = cu.client_id
-                        WHERE db_prev.receiving_user_id = u.id
-                          AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
-                    )
-                    OR
-                    (
-                        CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ? 
-                        AND EXISTS ( 
-                            SELECT 1
-                            FROM client_location cl_first_check
-                            WHERE cl_first_check.location_id = u.first_location_id AND cl_first_check.client_id = cu.client_id
-                        )
-                        AND NOT EXISTS ( 
-                            SELECT 1
-                            FROM delivery_beneficiary db_no_past
-                            WHERE db_no_past.receiving_user_id = u.id
-                              AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < ? 
-                        )
-                    )
+                  EXISTS (
+                      SELECT 1
+                      FROM delivery_beneficiary db_prev_original
+                      WHERE db_prev_original.receiving_user_id = u.id
+                        AND CONVERT_TZ(db_prev_original.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
+                        ${hasLocationFilter ? `AND db_prev_original.location_id IN (${locationPlaceholders})` : ''}
+                  )
+                  OR
+                  (
+                      CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                      ${hasLocationFilter ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db_no_past
+                          WHERE db_no_past.receiving_user_id = u.id
+                            AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                      )
+                  )
               )
             `,
             recurringParams
@@ -403,6 +423,27 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         recurringCount = (recurringRows[0] && recurringRows[0].recurring) || 0;
     } catch (error) {
         logger.error(`Error fetching overall recurring count for client_id ${client_id}:`, error);
+    }
+
+    // Health plan breakdown scoped to the users counted as "new"
+    if (newUserIds.length > 0 && records.length > 0) {
+        const newUserIdsSet = new Set(newUserIds);
+        records.forEach(record => {
+            const recordUserId = Number(record['User ID']);
+            if (Number.isNaN(recordUserId)) {
+                return;
+            }
+            if (!newUserIdsSet.has(recordUserId)) {
+                return;
+            }
+
+            const healthValue = (record['Health Insurance?'] || '').toString().trim().toLowerCase();
+            if (healthValue === 'yes') {
+                newHealthPlanYes++;
+            } else if (healthValue === 'no' || healthValue === '') {
+                newHealthPlanNo++;
+            }
+        });
     }
 
     const totalNewRecurring = newCount + recurringCount;
@@ -422,108 +463,86 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         { col1: '  Total', col2: totalNewHealthPlan, col3: '', col4: '', col5: '' }
     ];
 
-    let allClientLocations = [];
-    try {
-        let locationQuery = `SELECT l.id, l.community_city as name FROM location l JOIN client_location cl ON l.id = cl.location_id WHERE cl.client_id = ?`;
-        
-        // Excluir Compton (location_id = 32) para Molina (client_id = 2)
-        if (parseInt(client_id) === 2) {
-            locationQuery += ` AND l.id != 32`;
-        }
-        
-        locationQuery += ` ORDER BY l.id`;
-        
-        [allClientLocations] = await mysqlConnection.promise().query(locationQuery, [client_id]);
-    } catch (error) {
-        logger.error(`Error fetching locations for client_id ${client_id}:`, error);
-    }
-
     const newPerLocationMap = {};
     try {
-        let newPerLocationQuery = `SELECT
-                u.first_location_id AS location_id,
-                COUNT(DISTINCT u.id) AS new_count
-            FROM user u
-            JOIN client_user cu ON u.id = cu.user_id AND cu.client_id = ?
-            JOIN client_location cl ON u.first_location_id = cl.location_id AND cl.client_id = ?
-            WHERE u.role_id = 5
-              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?`;
-        
-        // Excluir Compton (location_id = 32) para Molina (client_id = 2)
-        if (parseInt(client_id) === 2) {
-            newPerLocationQuery += ` AND u.first_location_id != 32`;
+        if (hasLocationFilter) {
+            const newPerLocationQuery = `SELECT
+                    u.first_location_id AS location_id,
+                    COUNT(DISTINCT u.id) AS new_count
+                FROM user u
+                WHERE u.role_id = 5
+                  AND u.enabled = 'Y'
+                  AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ?
+                  AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                  AND u.first_location_id IN (${locationPlaceholders})
+                GROUP BY u.first_location_id;`;
+
+            const [newLocRows] = await mysqlConnection.promise().query(
+                newPerLocationQuery,
+                [from_date, to_date, ...locationIds]
+            );
+            newLocRows.forEach(row => { newPerLocationMap[row.location_id] = row.new_count; });
         }
-        
-        newPerLocationQuery += ` GROUP BY u.first_location_id;`;
-        
-        const [newLocRows] = await mysqlConnection.promise().query(
-            newPerLocationQuery,
-            [client_id, client_id, from_date_db_start, to_date_db_end]
-        );
-        newLocRows.forEach(row => { newPerLocationMap[row.location_id] = row.new_count; });
     } catch (error) {
         logger.error(`Error fetching new per location for client_id ${client_id}:`, error);
     }
 
     const recurringPerLocationMap = {};
     try {
-        const recurringPerLocationParams = [
-            client_id,
-            client_id,
-            from_date_db_start,
-            to_date_db_end,
-            from_date_db_start,
-            from_date_db_start
-        ];
-        
-        let recurringPerLocationQuery = `SELECT
-                db_range.location_id,
-                COUNT(DISTINCT u.id) AS recurring_count
-            FROM user u
-            INNER JOIN client_user cu ON u.id = cu.user_id AND cu.client_id = ?
-            INNER JOIN delivery_beneficiary db_range ON u.id = db_range.receiving_user_id
-            INNER JOIN client_location cl_range ON db_range.location_id = cl_range.location_id AND cl_range.client_id = ?
-            WHERE u.role_id = 5 AND u.enabled = 'Y'
-              AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?`;
-        
-        // Excluir Compton (location_id = 32) para Molina (client_id = 2)
-        if (parseInt(client_id) === 2) {
-            recurringPerLocationQuery += ` AND db_range.location_id != 32`;
+        if (hasLocationFilter) {
+            const recurringPerLocationQuery = `SELECT
+                    db_range.location_id,
+                    COUNT(DISTINCT u.id) AS recurring_count
+                FROM delivery_beneficiary db_range
+                INNER JOIN user u ON db_range.receiving_user_id = u.id
+                WHERE u.role_id = 5 AND u.enabled = 'Y'
+                  AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') >= ?
+                  AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                  AND db_range.location_id IN (${locationPlaceholders})
+                  AND (
+                      EXISTS (
+                          SELECT 1
+                          FROM delivery_beneficiary db_prev
+                          WHERE db_prev.receiving_user_id = u.id
+                            AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
+                            AND db_prev.location_id IN (${locationPlaceholders})
+                      )
+                      OR
+                      (
+                          CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                          AND u.first_location_id IN (${locationPlaceholders})
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM delivery_beneficiary db_no_past
+                              WHERE db_no_past.receiving_user_id = u.id
+                                AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                          )
+                      )
+                  )
+                GROUP BY db_range.location_id;`;
+
+            const recurringPerLocationParams = [
+                from_date,
+                to_date,
+                ...locationIds, // db_range.location_id
+                ...locationIds, // db_prev.location_id
+                from_date,
+                ...locationIds, // u.first_location_id
+                from_date
+            ];
+
+            const [recLocRows] = await mysqlConnection.promise().query(
+                recurringPerLocationQuery,
+                recurringPerLocationParams
+            );
+            recLocRows.forEach(row => { recurringPerLocationMap[row.location_id] = row.recurring_count; });
         }
-        
-        recurringPerLocationQuery += ` AND (
-                  EXISTS (
-                      SELECT 1
-                      FROM delivery_beneficiary db_prev
-                      INNER JOIN client_location cl_prev ON db_prev.location_id = cl_prev.location_id AND cl_prev.client_id = cu.client_id
-                      WHERE db_prev.receiving_user_id = u.id
-                        AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
-                  )
-                  OR
-                  (
-                      CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < ?
-                      AND EXISTS (
-                          SELECT 1
-                          FROM client_location cl_first_check
-                          WHERE cl_first_check.location_id = u.first_location_id AND cl_first_check.client_id = cu.client_id
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM delivery_beneficiary db_no_past
-                          WHERE db_no_past.receiving_user_id = u.id
-                            AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < ?
-                      )
-                  )
-              )
-            GROUP BY db_range.location_id;`;
-        
-        const [recLocRows] = await mysqlConnection.promise().query(
-            recurringPerLocationQuery,
-            recurringPerLocationParams
-        );
-        recLocRows.forEach(row => { recurringPerLocationMap[row.location_id] = row.recurring_count; });
     } catch (error) {
         logger.error(`Error fetching recurring per location for client_id ${client_id}:`, error);
+    }
+
+    if (!hasLocationFilter) {
+        logger.warn(`No locations found for client_id ${client_id}; location breakdown will be empty.`);
     }
 
     const locationTableRows = [];
