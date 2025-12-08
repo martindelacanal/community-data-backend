@@ -6624,7 +6624,8 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        // query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        query_locations = 'AND (u.first_location_id IN (' + locations.join() + '))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -6766,7 +6767,8 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
       }
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        // query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+        query_locations = 'AND (u.first_location_id IN (' + locations.join() + '))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -11595,13 +11597,15 @@ router.post('/table/user', verifyToken, async (req, res) => {
         case 'all':
           queryTableRole = 'AND (role.id != 2 AND role.id != 5)';
           if (locations.length > 0) {
-            query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+            // query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.delivering_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+            query_locations = 'AND (u.first_location_id IN (' + locations.join() + '))';
           }
           break;
         case 'beneficiary':
           queryTableRole = 'AND role.id = 5';
           if (locations.length > 0) {
-            query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+            // query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
+            query_locations = 'AND (u.first_location_id IN (' + locations.join() + '))';
           }
           if (filters.register_form) {
             const conditions = [];
