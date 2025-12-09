@@ -9087,11 +9087,6 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
-      const genders = filters.genders || [];
-      const ethnicities = filters.ethnicities || [];
-      const min_age = filters.min_age || 0;
-      const max_age = filters.max_age || 150;
-      const zipcode = filters.zipcode || null;
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -9120,27 +9115,6 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       let original_recurring_location_condition_sql = '';
       if (locations.length > 0) {
         original_recurring_location_condition_sql = `AND db_prev_original.location_id IN (${locations.map(Number).join(',')})`;
-      }
-
-      var query_genders = '';
-      if (genders.length > 0) {
-        query_genders = `AND u.gender_id IN (${genders.map(Number).join(',')})`;
-      }
-      var query_ethnicities = '';
-      if (ethnicities.length > 0) {
-        query_ethnicities = `AND u.ethnicity_id IN (${ethnicities.map(Number).join(',')})`;
-      }
-      var query_min_age = '';
-      if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ${Number(min_age)}`;
-      }
-      var query_max_age = '';
-      if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ${Number(max_age)}`;
-      }
-      var query_zipcode = '';
-      if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + mysqlConnection.escape(zipcode);
       }
 
       let params_metrics_participant = [];
@@ -9218,11 +9192,6 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
                 ${clientCondition}
                 ${query_locations_new_user_first_location}
-                ${query_genders}
-                ${query_ethnicities}
-                ${query_min_age}
-                ${query_max_age}
-                ${query_zipcode}
           ) AS new,
           (SELECT COUNT(DISTINCT db_range.receiving_user_id)
               FROM delivery_beneficiary db_range
@@ -9234,11 +9203,6 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                 AND u.role_id = 5 AND u.enabled = 'Y'
                 ${clientCondition}
                 ${query_locations_recurring_delivery}
-                ${query_genders}
-                ${query_ethnicities}
-                ${query_min_age}
-                ${query_max_age}
-                ${query_zipcode}
                 AND (
                     -- Original recurring: had a delivery prior to this specific db_range delivery (respecting location filter for that prior delivery)
                     EXISTS (
@@ -9276,11 +9240,6 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                   AND db_participations.delivering_user_id IS NOT NULL
                   ${clientCondition}
                   ${query_locations_participations}
-                  ${query_genders}
-                  ${query_ethnicities}
-                  ${query_min_age}
-                  ${query_max_age}
-                  ${query_zipcode}
                 ), 0
               ) +
               -- Conteo adicional de usuarios registrados sin delivery_beneficiary el mismo día
@@ -9294,11 +9253,6 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                   AND CONVERT_TZ(u_reg.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
                   ${clientCondition}
                   ${query_locations_new_user_first_location_reg}
-                  ${query_genders.replace(/u\./g, 'u_reg.')}
-                  ${query_ethnicities.replace(/u\./g, 'u_reg.')}
-                  ${query_min_age.replace(/u\./g, 'u_reg.')}
-                  ${query_max_age.replace(/u\./g, 'u_reg.')}
-                  ${query_zipcode.replace(/u\./g, 'u_reg.')}
                   AND NOT EXISTS (
                     SELECT 1
                     FROM delivery_beneficiary db_same_day
