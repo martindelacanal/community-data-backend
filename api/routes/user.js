@@ -10023,6 +10023,10 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
           break;
       }
 
+      // Adjust period expressions for alternate aliases
+      const periodExpressionUserReg = periodExpressionUser.replace(/u\./g, 'u_reg.');
+      const periodExpressionDeliveryParticipations = periodExpressionDelivery.replace(/db_current\./g, 'db_participations.');
+
       const periods = generatePeriods(from_date, to_date, interval); // generatePeriods should use LA dates
 
       let clientConditionSql = '';
@@ -10055,6 +10059,9 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         demographicParams.push(zipcode);
       }
 
+      // Reuse demographic filters for the u_reg alias (participations subquery)
+      const demographic_filters_sql_reg = demographic_filters_sql.replace(/u\./g, 'u_reg.');
+
       let query_locations_new_user_first_location_history = '';
       const location_params_for_first_location = [];
       if (locations.length > 0) {
@@ -10062,11 +10069,22 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         location_params_for_first_location.push(...locations.map(Number));
       }
 
+      let query_locations_new_user_first_location_history_reg = '';
+      if (locations.length > 0) {
+        query_locations_new_user_first_location_history_reg = `AND u_reg.first_location_id IN (${locations.map(() => '?').join(',')})`;
+      }
+
       let query_locations_recurring_delivery_history = '';
       const location_params_for_recurring_delivery = [];
       if (locations.length > 0) {
         query_locations_recurring_delivery_history = `AND db_current.location_id IN (${locations.map(() => '?').join(',')})`;
         location_params_for_recurring_delivery.push(...locations.map(Number));
+      }
+
+      // Alias-adjusted location filter for participations delivery subquery
+      let query_locations_participations_delivery_history = '';
+      if (locations.length > 0) {
+        query_locations_participations_delivery_history = `AND db_participations.location_id IN (${locations.map(() => '?').join(',')})`;
       }
 
       let original_recurring_location_condition_sql_history = '';
@@ -10113,6 +10131,21 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         from_date_param_original  // For db_no_past.creation_date < ? in NEW_TYPE_RECURRING
       ];
 
+      const participationsParams = [
+        // Deliveries with delivering_user_id
+        from_date_param_original,
+        to_date_exclusive_param,
+        ...demographicParams,
+        ...clientParams,
+        ...location_params_for_recurring_delivery,
+        // Registrations without same-day delivery
+        from_date_param_original,
+        to_date_exclusive_param,
+        ...demographicParams,
+        ...clientParams,
+        ...location_params_for_first_location
+      ];
+
       const recurringUsersQuery = `
         SELECT
           ${periodExpressionDelivery} AS period,
@@ -10150,12 +10183,58 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         GROUP BY period
       `;
 
+      const participationsQuery = `
+        SELECT period, SUM(participations_count) AS participations
+        FROM (
+          -- Deliveries with delivering_user_id (count as participations)
+          SELECT
+            ${periodExpressionDeliveryParticipations} AS period,
+            COUNT(db_participations.id) AS participations_count
+          FROM delivery_beneficiary db_participations
+          INNER JOIN user u ON db_participations.receiving_user_id = u.id
+          ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+          WHERE 
+            CONVERT_TZ(db_participations.creation_date, ${utcTimeZone}, ${laTimeZone}) >= ?
+            AND CONVERT_TZ(db_participations.creation_date, ${utcTimeZone}, ${laTimeZone}) < ?
+            AND u.role_id = 5 AND u.enabled = 'Y'
+            AND db_participations.delivering_user_id IS NOT NULL
+            ${clientConditionSql}
+            ${demographic_filters_sql}
+            ${query_locations_participations_delivery_history}
+          GROUP BY period
+          UNION ALL
+          -- Registrations without a delivery on the same day
+          SELECT
+            ${periodExpressionUserReg} AS period,
+            COUNT(DISTINCT u_reg.id) AS participations_count
+          FROM user u_reg
+          ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u_reg.id = cu.user_id' : ''}
+          WHERE u_reg.role_id = 5
+            AND u_reg.enabled = 'Y'
+            AND CONVERT_TZ(u_reg.creation_date, ${utcTimeZone}, ${laTimeZone}) >= ?
+            AND CONVERT_TZ(u_reg.creation_date, ${utcTimeZone}, ${laTimeZone}) < ?
+            ${clientConditionSql}
+            ${demographic_filters_sql_reg}
+            ${query_locations_new_user_first_location_history_reg}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM delivery_beneficiary db_same_day
+              WHERE db_same_day.receiving_user_id = u_reg.id
+                AND db_same_day.delivering_user_id IS NOT NULL
+                AND DATE(CONVERT_TZ(db_same_day.creation_date, ${utcTimeZone}, ${laTimeZone})) = DATE(CONVERT_TZ(u_reg.creation_date, ${utcTimeZone}, ${laTimeZone}))
+            )
+          GROUP BY period
+        ) participations_union
+        GROUP BY period
+      `;
+
       const [newUsersRows] = await mysqlConnection.promise().query(newUsersQuery, newUsersParams);
       const [recurringUsersRows] = await mysqlConnection.promise().query(recurringUsersQuery, recurringUsersParams);
+      const [participationsRows] = await mysqlConnection.promise().query(participationsQuery, participationsParams);
 
       const periodsMap = new Map();
       periods.forEach(period => {
-        periodsMap.set(period, { new_users: 0, recurring_users: 0 });
+        periodsMap.set(period, { new_users: 0, recurring_users: 0, participations: 0 });
       });
 
       newUsersRows.forEach(row => {
@@ -10170,9 +10249,16 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         }
       });
 
+      participationsRows.forEach(row => {
+        if (periodsMap.has(row.period)) {
+          periodsMap.get(row.period).participations = Number(row.participations);
+        }
+      });
+
       const categories = Array.from(periodsMap.keys());
       const newUsersData = categories.map(period => periodsMap.get(period).new_users);
       const recurringUsersData = categories.map(period => periodsMap.get(period).recurring_users);
+      const participationsData = categories.map(period => periodsMap.get(period).participations);
 
       const formattedCategories = categories.map(c => formatPeriod(c, interval, language));
 
@@ -10180,6 +10266,7 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const series = [
         { name: language === 'en' ? 'New' : 'Nuevos', data: newUsersData },
         { name: language === 'en' ? 'Recurring' : 'Recurrentes', data: recurringUsersData },
+        { name: language === 'en' ? 'Participations' : 'Participaciones', data: participationsData },
       ];
 
       res.json({ series, categories: formattedCategories });
@@ -10263,6 +10350,8 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
       let query_join_client_user = '';
       let location_condition_new = ''; // Location condition for 'new' query
       let location_condition_recurring = ''; // Location condition for 'recurring' query
+      let location_condition_participations_reg = '';
+      let locationPlaceholders = '';
       const locationParams = [];
 
       if (genders.length > 0) {
@@ -10306,14 +10395,20 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
       }
 
       if (locations.length > 0) {
-        const locationPlaceholders = locations.map(() => '?').join(',');
+        locationPlaceholders = locations.map(() => '?').join(',');
         // Location for NEW: Check first_location OR delivery location within period
         location_condition_new = ` AND (u.first_location_id IN (${locationPlaceholders}) OR db.location_id IN (${locationPlaceholders}))`;
         // Location for RECURRING: Check ONLY delivery location within period
         location_condition_recurring = ` AND db.location_id IN (${locationPlaceholders})`;
         locationParams.push(...locations); // Add location params once
       }
+
+      if (locations.length > 0) {
+        location_condition_participations_reg = ` AND u_reg.first_location_id IN (${locationPlaceholders})`;
+      }
       // --- End Parameterized Filters ---
+
+      const query_conditions_participations_reg = query_conditions_new.replace(/u\./g, 'u_reg.');
 
       // Adjust dates for queries
       const fromDateUTC = from_date + ' 00:00:00';
@@ -10402,6 +10497,59 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
           )
         GROUP BY db.location_id
       `;
+
+      const participationsQuery = `
+        SELECT location_id, SUM(participations_count) AS participations_count
+        FROM (
+          -- Deliveries with delivering_user_id
+          SELECT
+            db.location_id AS location_id,
+            COUNT(db.id) AS participations_count
+          FROM delivery_beneficiary db
+          INNER JOIN user u ON db.receiving_user_id = u.id
+          ${query_join_client_user}
+          WHERE CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') >= ?
+            AND CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') < ?
+            AND u.role_id = 5 AND u.enabled = 'Y'
+            AND db.delivering_user_id IS NOT NULL
+            ${query_conditions_recurring}
+            ${location_condition_recurring}
+          GROUP BY db.location_id
+          UNION ALL
+          -- Registered participants without delivery same day
+          SELECT
+            u_reg.first_location_id AS location_id,
+            COUNT(DISTINCT u_reg.id) AS participations_count
+          FROM user u_reg
+          ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u_reg.id = cu.user_id' : ''}
+          WHERE u_reg.role_id = 5
+            AND u_reg.enabled = 'Y'
+            AND CONVERT_TZ(u_reg.creation_date, '+00:00', 'America/Los_Angeles') >= ?
+            AND CONVERT_TZ(u_reg.creation_date, '+00:00', 'America/Los_Angeles') < ?
+            ${query_conditions_participations_reg}
+            ${location_condition_participations_reg}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM delivery_beneficiary db_same_day
+              WHERE db_same_day.receiving_user_id = u_reg.id
+                AND db_same_day.delivering_user_id IS NOT NULL
+                AND DATE(CONVERT_TZ(db_same_day.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(u_reg.creation_date, '+00:00', 'America/Los_Angeles'))
+            )
+          GROUP BY u_reg.first_location_id
+        ) participations_union
+        GROUP BY location_id
+      `;
+
+      const participationsParams = [
+        fromDateUTC,
+        toDateUTCExclusive,
+        ...paramsRecurring,
+        ...(locations.length > 0 ? locationParams : []),
+        fromDateUTC,
+        toDateUTCExclusive,
+        ...paramsRecurring,
+        ...(locations.length > 0 ? locationParams : [])
+      ];
       // Params:
       // 1. db.creation_date >= fromDateUTC
       // 2. db.creation_date < toDateUTCExclusive
@@ -10426,6 +10574,7 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
       // Execute queries
       const [newUsersRows] = await mysqlConnection.promise().query(newUsersQuery, newUsersParams);
       const [recurringUsersRows] = await mysqlConnection.promise().query(recurringUsersQuery, recurringUsersParams);
+      const [participationsRows] = await mysqlConnection.promise().query(participationsQuery, participationsParams);
 
       // --- Processing results (keep existing logic) ---
       const locationsMap = new Map();
@@ -10437,7 +10586,8 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
           id: location.id,
           name: location.name,
           new_users: 0,
-          recurring_users: 0
+          recurring_users: 0,
+          participations: 0
         });
       });
 
@@ -10453,16 +10603,24 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
         }
       });
 
+      participationsRows.forEach(row => {
+        if (row.location_id && locationsMap.has(row.location_id)) {
+          locationsMap.get(row.location_id).participations = row.participations_count;
+        }
+      });
+
       // Preparar los datos para la respuesta
       const locationData = Array.from(locationsMap.values());
       locationData.sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically by name
       const categories = locationData.map(location => location.name);
       const newUsersData = locationData.map(location => location.new_users);
       const recurringUsersData = locationData.map(location => location.recurring_users);
+      const participationsData = locationData.map(location => location.participations);
 
       const series = [
         { name: language === 'en' ? 'New' : 'Nuevos', data: newUsersData },
         { name: language === 'en' ? 'Recurring' : 'Recurrentes', data: recurringUsersData },
+        { name: language === 'en' ? 'Participations' : 'Participaciones', data: participationsData },
       ];
 
       res.json({ series, categories });
