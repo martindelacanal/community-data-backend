@@ -5999,9 +5999,11 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       return acc;
     }, {});
 
-    // Ventana en LA (end-exclusive = to_date + 1 día dentro del SQL)
-    const laStart = (filters.from_date ? `${filters.from_date} 00:00:00` : '1970-01-01 00:00:00');
-    const laEnd = (filters.to_date ? `${filters.to_date} 00:00:00` : '2100-01-01 00:00:00');
+    // Ventana de fechas (interpretar como días en America/Los_Angeles)
+    // El front manda YYYY-MM-DD; NO lo convertimos en JS.
+    // En SQL convertimos [from 00:00 LA, (to+1) 00:00 LA) a UTC para comparar con columnas UTC.
+    const laFromDate = (filters.from_date ? String(filters.from_date).slice(0, 10) : '1970-01-01');
+    const laToDate = (filters.to_date ? String(filters.to_date).slice(0, 10) : '2100-01-01');
 
     // ─────────────────────────────────────────────────────────────────────────────
     // 1) Preguntas visibles (para armar headers)
@@ -6098,13 +6100,13 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
     `;
     const usersParams = [
       // conteos en rango (3 veces)
-      laStart, laEnd,
-      laStart, laEnd,
-      laStart, laEnd,
+      laFromDate, laToDate,
+      laFromDate, laToDate,
+      laFromDate, laToDate,
       // registro en rango
-      laStart, laEnd,
+      laFromDate, laToDate,
       // entregas en rango del EXISTS
-      laStart, laEnd
+      laFromDate, laToDate
     ];
     if (locations.length) usersParams.push(locations);
 
@@ -8175,7 +8177,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
     try {
       const filters = req.body;
       const language = req.query.language || 'en';
-
+      
       // Validación temprana de filtros para evitar consultas innecesarias
       const locations = Array.isArray(filters.locations) ? filters.locations.filter(x => x !== null && x !== '') : [];
       const genders = Array.isArray(filters.genders) ? filters.genders.filter(x => x !== null && x !== '') : [];
@@ -8185,26 +8187,15 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       const zipcode = filters.zipcode || null;
       const register_form = filters.register_form || null;
 
-      // Manejo optimizado de fechas
-      const timeZone = 'America/Los_Angeles';
-      let from_date_utc, to_date_utc;
-
-      if (filters.from_date) {
-        from_date_utc = moment.tz(filters.from_date, timeZone).utc().format('YYYY-MM-DD HH:mm:ss');
-      } else {
-        from_date_utc = '1970-01-01 00:00:00';
-      }
-
-      if (filters.to_date) {
-        to_date_utc = moment.tz(filters.to_date, timeZone).utc().endOf('day').format('YYYY-MM-DD HH:mm:ss');
-      } else {
-        to_date_utc = '2100-01-01 23:59:59';
-      }
+      // Fechas: el front manda YYYY-MM-DD y deben interpretarse como días en America/Los_Angeles.
+      // No convertimos el input en JS; convertimos límites a UTC en SQL y comparamos contra columnas UTC.
+      const laFromDate = (filters.from_date ? String(filters.from_date).slice(0, 10) : '1970-01-01');
+      const laToDate = (filters.to_date ? String(filters.to_date).slice(0, 10) : '2100-01-01');
 
       // Calcular rangos de fechas de nacimiento para edades (solo si se usan filtros de edad)
       let minBirthDate, maxBirthDate;
       if (filters.min_age || filters.max_age) {
-        const today = moment.tz(timeZone).startOf('day');
+        const today = moment.tz('America/Los_Angeles').startOf('day');
         minBirthDate = today.clone().subtract(max_age, 'years').format('YYYY-MM-DD');
         maxBirthDate = today.clone().subtract(min_age, 'years').format('YYYY-MM-DD');
       }
@@ -8213,15 +8204,20 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       const whereClauses = ['u.role_id = 5'];
       const params = [];
 
-      // Filtro de fechas optimizado con CONVERT_TZ directo
+      // Filtro de fechas (LA day window): [from 00:00 LA, (to+1) 00:00 LA) convertido a UTC.
+      // Importante: NO aplicamos CONVERT_TZ() a las columnas para no romper índices.
       whereClauses.push(`(
-        CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN 
-        CONVERT_TZ(?, 'America/Los_Angeles', '+00:00') AND CONVERT_TZ(?, 'America/Los_Angeles', '+00:00')
-        OR 
-        CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN 
-        CONVERT_TZ(?, 'America/Los_Angeles', '+00:00') AND CONVERT_TZ(?, 'America/Los_Angeles', '+00:00')
+        (
+          u.creation_date >= CONVERT_TZ(CONCAT(?, ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+          AND u.creation_date <  CONVERT_TZ(CONCAT(DATE_ADD(?, INTERVAL 1 DAY), ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+        )
+        OR
+        (
+          db.creation_date >= CONVERT_TZ(CONCAT(?, ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+          AND db.creation_date <  CONVERT_TZ(CONCAT(DATE_ADD(?, INTERVAL 1 DAY), ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+        )
       )`);
-      params.push(from_date_utc, to_date_utc, from_date_utc, to_date_utc);
+      params.push(laFromDate, laToDate, laFromDate, laToDate);
 
       // Filtros con placeholders optimizados
       if (locations.length > 0) {
