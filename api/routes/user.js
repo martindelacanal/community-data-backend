@@ -9816,7 +9816,7 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const zipcode = filters.zipcode || null;
       const interval = filters.interval || 'month';
       const language = req.query.language || 'en';
-
+      
       const laTimeZone = "'America/Los_Angeles'";
       const utcTimeZone = "'+00:00'";
 
@@ -9828,14 +9828,14 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
           .promise()
           .query(
             `SELECT 
-              MIN(CONVERT_TZ(creation_date, ${utcTimeZone}, ${laTimeZone})) AS min_date
+              MIN(DATE_FORMAT(CONVERT_TZ(creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m-%d')) AS min_date
             FROM (
               SELECT creation_date FROM user WHERE enabled = 'Y' AND role_id = 5
               UNION ALL
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-        from_date = dateRange[0].min_date ? new Date(dateRange[0].min_date).toISOString().slice(0, 10) : '1970-01-01';
+        from_date = dateRange[0].min_date || '1970-01-01';
       }
 
       if (filters.to_date) {
@@ -9845,14 +9845,14 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
           .promise()
           .query(
             `SELECT 
-              MAX(CONVERT_TZ(creation_date, ${utcTimeZone}, ${laTimeZone})) AS max_date
+              MAX(DATE_FORMAT(CONVERT_TZ(creation_date, ${utcTimeZone}, ${laTimeZone}), '%Y-%m-%d')) AS max_date
             FROM (
               SELECT creation_date FROM user WHERE enabled = 'Y' AND role_id = 5
               UNION ALL
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-        to_date = dateRange[0].max_date ? new Date(dateRange[0].max_date).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+        to_date = dateRange[0].max_date || new Date().toISOString().slice(0, 10);
       }
 
       const isValidDate = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date);
@@ -10179,14 +10179,14 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
           .promise()
           .query(
             `SELECT 
-              MIN(creation_date) AS min_date
+              MIN(DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%d')) AS min_date
             FROM (
               SELECT creation_date FROM user WHERE enabled = 'Y'
               UNION ALL
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-        from_date = dateRange[0].min_date ? dateRange[0].min_date.toISOString().slice(0, 10) : '1970-01-01';
+        from_date = dateRange[0].min_date || '1970-01-01';
       }
 
       if (filters.to_date) {
@@ -10197,14 +10197,14 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
           .promise()
           .query(
             `SELECT 
-              MAX(creation_date) AS max_date
+              MAX(DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%d')) AS max_date
             FROM (
               SELECT creation_date FROM user WHERE enabled = 'Y'
               UNION ALL
               SELECT creation_date FROM delivery_beneficiary
             ) AS combined_dates`
           );
-        to_date = dateRange[0].max_date ? dateRange[0].max_date.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+        to_date = dateRange[0].max_date || new Date().toISOString().slice(0, 10);
       }
 
       // Validar las fechas para evitar inyección SQL
@@ -10506,55 +10506,98 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 
 // Funciones auxiliares
 function generatePeriods(startDate, endDate, interval) {
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const parseYMD = (ymd) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+    const [y, m, d] = ymd.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d));
+  };
+  const formatYMD = (date) => {
+    const y = date.getUTCFullYear();
+    const m = pad2(date.getUTCMonth() + 1);
+    const d = pad2(date.getUTCDate());
+    return `${y}-${m}-${d}`;
+  };
+  const getISOWeek = (dateUTC) => {
+    // ISO week date algorithm in UTC.
+    const d = new Date(Date.UTC(dateUTC.getUTCFullYear(), dateUTC.getUTCMonth(), dateUTC.getUTCDate()));
+    const dayNr = (d.getUTCDay() + 6) % 7; // Monday=0 ... Sunday=6
+    d.setUTCDate(d.getUTCDate() - dayNr + 3); // move to Thursday of current week
+    const weekYear = d.getUTCFullYear();
+    const firstThursday = new Date(Date.UTC(weekYear, 0, 4));
+    const firstDayNr = (firstThursday.getUTCDay() + 6) % 7;
+    firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNr + 3);
+    const weekNumber = 1 + Math.round((d - firstThursday) / 604800000);
+    return { weekYear, weekNumber };
+  };
+
+  const start = parseYMD(startDate);
+  const end = parseYMD(endDate);
+  if (!start || !end) return [];
+  if (start > end) return [];
+
   const periods = [];
-  let current = new Date(new Date(startDate + 'T00:00:00.000Z').toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-  const end = new Date(new Date(endDate + 'T00:00:00.000Z').toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const startYear = start.getUTCFullYear();
+  const startMonth = start.getUTCMonth() + 1; // 1-12
+  const endYear = end.getUTCFullYear();
+  const endMonth = end.getUTCMonth() + 1; // 1-12
 
-  while (current <= end) {
-    let period;
-    const year = current.getFullYear();
-    const month = current.getMonth(); // 0-11
-    const day = current.getDate();
-
-    switch (interval) {
-      case 'day':
-        period = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        current.setDate(current.getDate() + 1);
-        break;
-      case 'week':
-        // This needs to match MySQL's %x-W%v format for the LA timezone.
-        // Moment.js or a similar library would be robust here.
-        // Simplified version, might not perfectly match MySQL's week definition across all edge cases.
-        const tempDateForWeek = new Date(current.valueOf());
-        tempDateForWeek.setDate(tempDateForWeek.getDate() - (tempDateForWeek.getDay() + 6) % 7); // Monday of the week
-        const weekYear = tempDateForWeek.getFullYear();
-        const firstDayOfYear = new Date(weekYear, 0, 1);
-        const pastDaysOfYear = (tempDateForWeek - firstDayOfYear) / 86400000;
-        const weekNumber = String(Math.ceil((pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7)).padStart(2, '0');
-        period = `${weekYear}-W${weekNumber}`; // Approximation
-        current.setDate(current.getDate() + 7);
-        break;
-      case 'month':
-        period = `${year}-${String(month + 1).padStart(2, '0')}`;
-        current.setMonth(current.getMonth() + 1);
-        break;
-      case 'quarter':
-        const quarter = Math.floor(month / 3) + 1;
-        period = `${year}-Q${quarter}`;
-        current.setMonth(current.getMonth() + 3);
-        break;
-      case 'year':
-        period = `${year}`;
-        current.setFullYear(current.getFullYear() + 1);
-        break;
-      default: // Default to month
-        period = `${year}-${String(month + 1).padStart(2, '0')}`;
-        current.setMonth(current.getMonth() + 1);
-        break;
+  switch (interval) {
+    case 'day': {
+      const current = new Date(start.getTime());
+      while (current <= end) {
+        periods.push(formatYMD(current));
+        current.setUTCDate(current.getUTCDate() + 1);
+      }
+      return periods;
     }
-    periods.push(period);
+    case 'week': {
+      const current = new Date(start.getTime());
+      while (current <= end) {
+        const { weekYear, weekNumber } = getISOWeek(current);
+        const period = `${weekYear}-W${pad2(weekNumber)}`;
+        if (periods.length === 0 || periods[periods.length - 1] !== period) {
+          periods.push(period);
+        }
+        current.setUTCDate(current.getUTCDate() + 7);
+      }
+      return periods;
+    }
+    case 'month':
+    default: {
+      let y = startYear;
+      let m = startMonth;
+      while (y < endYear || (y === endYear && m <= endMonth)) {
+        periods.push(`${y}-${pad2(m)}`);
+        m += 1;
+        if (m === 13) {
+          m = 1;
+          y += 1;
+        }
+      }
+      return periods;
+    }
+    case 'quarter': {
+      let y = startYear;
+      let q = Math.floor((startMonth - 1) / 3) + 1;
+      const endQ = Math.floor((endMonth - 1) / 3) + 1;
+      while (y < endYear || (y === endYear && q <= endQ)) {
+        periods.push(`${y}-Q${q}`);
+        q += 1;
+        if (q === 5) {
+          q = 1;
+          y += 1;
+        }
+      }
+      return periods;
+    }
+    case 'year': {
+      for (let y = startYear; y <= endYear; y += 1) {
+        periods.push(String(y));
+      }
+      return periods;
+    }
   }
-  return periods;
 }
 
 router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
