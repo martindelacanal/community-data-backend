@@ -17560,6 +17560,15 @@ function verifyTokenOptional(req, res, next) {
   }
 }
 
+function mapCalendarEventRow(row) {
+  return {
+    ...row,
+    no_distribution: row?.no_distribution === 1 || row?.no_distribution === true,
+    message_en: row?.message_en ?? '',
+    message_es: row?.message_es ?? ''
+  };
+}
+
 // ============ CALENDAR EVENTS ENDPOINTS ============
 
 // GET /calendar/events - Get all calendar events with optional filters
@@ -17574,10 +17583,10 @@ function verifyTokenOptional(req, res, next) {
 // - pageSize: number of items per page
 router.get('/calendar/events', async (req, res) => {
   try {
-    const { fromToday, daysLimit, month, year, location_id, lang = 'en', page, pageSize } = req.query;
+    const { fromToday, daysLimit, month, year, location_id, lang = 'en', language: languageParam, page, pageSize } = req.query;
 
     // Validate language parameter
-    const language = ['en', 'es'].includes(lang) ? lang : 'en';
+    const language = ['en', 'es'].includes(languageParam) ? languageParam : (['en', 'es'].includes(lang) ? lang : 'en');
 
     // Check if pagination parameters are provided
     const usePagination = page !== undefined || pageSize !== undefined;
@@ -17714,6 +17723,9 @@ router.get('/calendar/events', async (req, res) => {
           ce.id,
           DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
           ce.time,
+          ce.no_distribution,
+          ce.message_en,
+          ce.message_es,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
@@ -17730,7 +17742,7 @@ router.get('/calendar/events', async (req, res) => {
       );
 
       res.json({
-        events: rows,
+        events: rows.map(mapCalendarEventRow),
         total: total,
         page: pageNum,
         pageSize: pageSizeNum,
@@ -17743,6 +17755,9 @@ router.get('/calendar/events', async (req, res) => {
           ce.id,
           DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
           ce.time,
+          ce.no_distribution,
+          ce.message_en,
+          ce.message_es,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
@@ -17757,7 +17772,7 @@ router.get('/calendar/events', async (req, res) => {
         queryParams
       );
       
-      res.json(rows);
+      res.json(rows.map(mapCalendarEventRow));
     }
   } catch (err) {
     console.log(err);
@@ -17771,16 +17786,19 @@ router.get('/calendar/events', async (req, res) => {
 router.get('/calendar/events/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { lang = 'en' } = req.query;
+    const { lang = 'en', language: languageParam } = req.query;
 
     // Validate language parameter
-    const language = ['en', 'es'].includes(lang) ? lang : 'en';
+    const language = ['en', 'es'].includes(languageParam) ? languageParam : (['en', 'es'].includes(lang) ? lang : 'en');
 
     const [rows] = await mysqlConnection.promise().query(
       `SELECT 
         ce.id,
         DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
         ce.time,
+        ce.no_distribution,
+        ce.message_en,
+        ce.message_es,
         ${language === 'en' ? 'l.description_en' : 'l.description_es'} as description,
         ce.location_id,
         l.organization as location_name,
@@ -17800,7 +17818,7 @@ router.get('/calendar/events/:id', async (req, res) => {
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    res.json(rows[0]);
+    res.json(mapCalendarEventRow(rows[0]));
   } catch (err) {
     console.log(err);
     res.status(500).json('Internal server error');
@@ -17813,17 +17831,22 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     const { date, time, location_id } = req.body;
 
+    const noDistributionRaw = req.body?.no_distribution;
+    const no_distribution = (noDistributionRaw === true || noDistributionRaw === 'true' || noDistributionRaw === 1 || noDistributionRaw === '1') ? 1 : 0;
+    const message_en = req.body?.message_en == null ? '' : String(req.body.message_en);
+    const message_es = req.body?.message_es == null ? '' : String(req.body.message_es);
+
     if (!date || !time || !location_id) {
       return res.status(400).json('Missing required fields: date, time, location_id');
     }
 
-    const date_formatted = date.split('T')[0];
+    const date_formatted = typeof date === 'string' ? date.split('T')[0] : date;
 
     try {
       // Insert the new event
       const [result] = await mysqlConnection.promise().query(
-        'INSERT INTO calendar_event (date, time, location_id) VALUES (?, ?, ?)',
-        [date_formatted, time, location_id]
+        'INSERT INTO calendar_event (date, time, location_id, no_distribution, message_en, message_es) VALUES (?, ?, ?, ?, ?, ?)',
+        [date_formatted, time, location_id, no_distribution, message_en, message_es]
       );
 
       // Get the created event with location details
@@ -17832,6 +17855,9 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
           ce.id,
           DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
           ce.time,
+          ce.no_distribution,
+          ce.message_en,
+          ce.message_es,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
@@ -17844,7 +17870,7 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
         [result.insertId]
       );
 
-      res.status(201).json(rows[0]);
+      res.status(201).json(mapCalendarEventRow(rows[0]));
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
@@ -17861,17 +17887,22 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
     const { id } = req.params;
     const { date, time, location_id } = req.body;
 
+    const noDistributionRaw = req.body?.no_distribution;
+    const no_distribution = (noDistributionRaw === true || noDistributionRaw === 'true' || noDistributionRaw === 1 || noDistributionRaw === '1') ? 1 : 0;
+    const message_en = req.body?.message_en == null ? '' : String(req.body.message_en);
+    const message_es = req.body?.message_es == null ? '' : String(req.body.message_es);
+
     if (!date || !time || !location_id) {
       return res.status(400).json('Missing required fields: date, time, location_id');
     }
 
-    const date_formatted = date.split('T')[0];
+    const date_formatted = typeof date === 'string' ? date.split('T')[0] : date;
 
     try {
       // Update the event
       const [result] = await mysqlConnection.promise().query(
-        'UPDATE calendar_event SET date = ?, time = ?, location_id = ? WHERE id = ? AND enabled = "Y"',
-        [date_formatted, time, location_id, id]
+        'UPDATE calendar_event SET date = ?, time = ?, location_id = ?, no_distribution = ?, message_en = ?, message_es = ? WHERE id = ? AND enabled = "Y"',
+        [date_formatted, time, location_id, no_distribution, message_en, message_es, id]
       );
 
       if (result.affectedRows === 0) {
@@ -17884,6 +17915,9 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
           ce.id,
           DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
           ce.time,
+          ce.no_distribution,
+          ce.message_en,
+          ce.message_es,
           ce.location_id,
           l.organization as location_name,
           l.community_city as location_city,
@@ -17896,7 +17930,7 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
         [id]
       );
 
-      res.json(rows[0]);
+      res.json(mapCalendarEventRow(rows[0]));
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');
