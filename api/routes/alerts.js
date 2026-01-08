@@ -27,7 +27,7 @@ function verifyToken(req, res, next) {
 function verifyAdmin(req, res, next) {
   try {
     const cabecera = JSON.parse(req.data.data);
-    if (cabecera.role === 'admin') {
+    if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
       next();
     } else {
       res.status(403).json({ error: 'Forbidden', message: 'Insufficient permissions' });
