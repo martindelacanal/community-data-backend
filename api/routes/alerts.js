@@ -86,6 +86,65 @@ function validateAlertData(data, isUpdate = false) {
   return errors;
 }
 
+function validateAlertContentUpdateData(data) {
+  const errors = [];
+
+  if (!data.id || typeof data.id !== 'number') {
+    errors.push({ field: 'id', message: 'ID is required and must be a number' });
+  }
+
+  if (data.active !== undefined) {
+    errors.push({
+      field: 'active',
+      message: 'Use PUT /api/alerts/:id to update active status'
+    });
+  }
+
+  const updatableFields = ['title_en', 'title_es', 'text_en', 'text_es'];
+  const hasAnyField = updatableFields.some((field) => data[field] !== undefined);
+  if (!hasAnyField) {
+    errors.push({
+      field: 'body',
+      message: 'At least one of title_en, title_es, text_en, text_es is required'
+    });
+    return errors;
+  }
+
+  if (data.title_en !== undefined) {
+    if (typeof data.title_en !== 'string' || data.title_en.trim().length === 0) {
+      errors.push({ field: 'title_en', message: 'Title in English must be a non-empty string' });
+    } else if (data.title_en.length > 200) {
+      errors.push({ field: 'title_en', message: 'Title in English must not exceed 200 characters' });
+    }
+  }
+
+  if (data.title_es !== undefined) {
+    if (typeof data.title_es !== 'string' || data.title_es.trim().length === 0) {
+      errors.push({ field: 'title_es', message: 'Title in Spanish must be a non-empty string' });
+    } else if (data.title_es.length > 200) {
+      errors.push({ field: 'title_es', message: 'Title in Spanish must not exceed 200 characters' });
+    }
+  }
+
+  if (data.text_en !== undefined) {
+    if (typeof data.text_en !== 'string' || data.text_en.trim().length === 0) {
+      errors.push({ field: 'text_en', message: 'Text in English must be a non-empty string' });
+    } else if (data.text_en.length > 1000) {
+      errors.push({ field: 'text_en', message: 'Text in English must not exceed 1000 characters' });
+    }
+  }
+
+  if (data.text_es !== undefined) {
+    if (typeof data.text_es !== 'string' || data.text_es.trim().length === 0) {
+      errors.push({ field: 'text_es', message: 'Text in Spanish must be a non-empty string' });
+    } else if (data.text_es.length > 1000) {
+      errors.push({ field: 'text_es', message: 'Text in Spanish must not exceed 1000 characters' });
+    }
+  }
+
+  return errors;
+}
+
 // ============ ALERTS ENDPOINTS ============
 
 // GET /api/alerts - Get all alerts (admin only)
@@ -193,6 +252,41 @@ router.get('/alerts/active', async (req, res) => {
   } catch (error) {
     logger.error('Error retrieving active alert:', error);
     res.status(500).json({ error: 'Internal Server Error', message: 'Error retrieving active alert' });
+  }
+});
+
+// GET /api/alerts/:id - Get an alert by id (admin only)
+router.get('/alerts/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const alertId = parseInt(req.params.id);
+    if (isNaN(alertId)) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: 'Invalid alert ID'
+      });
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, title_en, title_es, text_en, text_es,
+              CASE WHEN active = 'Y' THEN true ELSE false END as active,
+              created_at, updated_at
+       FROM alerts
+       WHERE id = ?
+       LIMIT 1`,
+      [alertId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Alert not found'
+      });
+    }
+
+    res.status(200).json(rows[0]);
+  } catch (error) {
+    logger.error('Error retrieving alert by id:', error);
+    res.status(500).json({ error: 'Internal Server Error', message: 'Error retrieving alert' });
   }
 });
 
@@ -325,6 +419,82 @@ router.put('/alerts/:id', verifyToken, verifyAdmin, async (req, res) => {
   } catch (error) {
     logger.error('Error updating alert:', error);
     res.status(500).json({ error: 'Internal Server Error', message: 'Error updating alert' });
+  }
+});
+
+// PUT /api/alerts/:id/content - Update alert content (admin only)
+router.put('/alerts/:id/content', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const alertId = parseInt(req.params.id);
+    if (isNaN(alertId)) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: 'Invalid alert ID'
+      });
+    }
+
+    const validationData = { id: alertId, ...req.body };
+    const validationErrors = validateAlertContentUpdateData(validationData);
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: 'Invalid input data',
+        details: validationErrors
+      });
+    }
+
+    const [existingAlert] = await mysqlConnection.promise().query(
+      'SELECT id FROM alerts WHERE id = ?',
+      [alertId]
+    );
+
+    if (existingAlert.length === 0) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Alert not found'
+      });
+    }
+
+    const fieldsToUpdate = [];
+    const values = [];
+
+    if (req.body.title_en !== undefined) {
+      fieldsToUpdate.push('title_en = ?');
+      values.push(req.body.title_en);
+    }
+    if (req.body.title_es !== undefined) {
+      fieldsToUpdate.push('title_es = ?');
+      values.push(req.body.title_es);
+    }
+    if (req.body.text_en !== undefined) {
+      fieldsToUpdate.push('text_en = ?');
+      values.push(req.body.text_en);
+    }
+    if (req.body.text_es !== undefined) {
+      fieldsToUpdate.push('text_es = ?');
+      values.push(req.body.text_es);
+    }
+
+    fieldsToUpdate.push('updated_at = NOW()');
+
+    await mysqlConnection.promise().query(
+      `UPDATE alerts SET ${fieldsToUpdate.join(', ')} WHERE id = ?`,
+      [...values, alertId]
+    );
+
+    const [updatedAlert] = await mysqlConnection.promise().query(
+      `SELECT id, title_en, title_es, text_en, text_es,
+              CASE WHEN active = 'Y' THEN true ELSE false END as active,
+              created_at, updated_at
+       FROM alerts
+       WHERE id = ?`,
+      [alertId]
+    );
+
+    res.status(200).json(updatedAlert[0]);
+  } catch (error) {
+    logger.error('Error updating alert content:', error);
+    res.status(500).json({ error: 'Internal Server Error', message: 'Error updating alert content' });
   }
 });
 
