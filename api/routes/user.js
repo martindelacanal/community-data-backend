@@ -124,17 +124,13 @@ router.post('/signin', (req, res) => {
             }
           }
           if (validUsers.length === 1) {
-            logger.info(`user id: ${validUsers[0].id} logueado`);
             res.status(200).json({ token: validUsers[0].token, reset_password: validUsers[0].reset_password });
           } else if (validUsers.length > 1) {
-            logger.info(`multiple users found for ${email}`);
             res.status(200).json(validUsers);
           } else {
-            logger.info(`user ${email} no logueado`);
             res.status(401).send();
           }
         } else {
-          logger.info(`user ${email} no logueado`);
           res.status(401).send();
         }
       } else {
@@ -15781,10 +15777,8 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     let processedContentSpanish = contentSpanish;
 
     try {
-      logger.info(`Processing content images for article ${articleId}...`);
       processedContentEnglish = await processContentImages(contentEnglish, articleId, 'en');
       processedContentSpanish = await processContentImages(contentSpanish, articleId, 'es');
-      logger.info(`Content images processed successfully for article ${articleId}`);
     } catch (contentImageError) {
       logger.error('Error processing content images:', contentImageError);
       // Delete the article if image processing fails critically
@@ -17131,7 +17125,6 @@ router.delete('/article/:id', verifyToken, async (req, res) => {
 
         const deleteCommand = new DeleteObjectsCommand(deleteParams);
         await s3.send(deleteCommand);
-        logger.info(`Deleted ${images.length} images from S3 for article ${id}`);
       } catch (s3Error) {
         logger.error('Error deleting images from S3:', s3Error);
         // Continue with article deletion even if S3 cleanup fails
