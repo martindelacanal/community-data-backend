@@ -12,6 +12,16 @@ const { sendVolunteerConfirmation } = require('../email/email');
 const multer = require('multer');
 const storage = multer.memoryStorage();
 
+// Client logo upload (single image)
+// Field name expected from frontend: "logo"
+const clientLogoUpload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB
+    files: 1,
+  },
+}).single('logo');
+
 // S3 INICIO
 const S3Client = require("@aws-sdk/client-s3").S3Client;
 const PutObjectCommand = require("@aws-sdk/client-s3").PutObjectCommand;
@@ -2244,9 +2254,11 @@ router.get('/new/client/:id', verifyToken, async (req, res) => {
         c.phone,
         c.address,
         c.webpage,
+        clo.file as logo_file,
         GROUP_CONCAT(DISTINCT cl.location_id) as location_ids
         from client as c
         left join client_location as cl on c.id = cl.client_id
+        left join client_logo as clo on c.id = clo.client_id
         where c.id = ?
         group by c.id
         order by c.id
@@ -2265,6 +2277,14 @@ router.get('/new/client/:id', verifyToken, async (req, res) => {
         // Convert location_ids from string to array of integers
         rows[0].location_ids = rows[0].location_ids ? rows[0].location_ids.split(',').map(Number) : [];
         rows[0].emails_for_reporting = rows_emails;
+
+        // Optional signed URL for client logo
+        if (rows[0].logo_file) {
+          rows[0].logo_url = await getSignedUrlForImage(rows[0].logo_file);
+        } else {
+          rows[0].logo_url = null;
+        }
+
         res.json(rows[0]);
       } else {
         res.status(404).json('Client not found');
@@ -2278,19 +2298,44 @@ router.get('/new/client/:id', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/new/client', verifyToken, async (req, res) => {
+router.post('/new/client', verifyToken, clientLogoUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
     try {
-      formulario = req.body;
+      let formulario = req.body;
+      // Support multipart/form-data with a JSON field named "form"
+      if (req.body && req.body.form) {
+        try {
+          formulario = JSON.parse(req.body.form);
+        } catch (e) {
+          return res.status(400).json('Invalid form JSON');
+        }
+      }
+
       const name = formulario.name || null;
       const short_name = formulario.short_name || null;
       const email = formulario.email || null;
       const phone = formulario.phone || null;
       const address = formulario.address || null;
       const webpage = formulario.webpage || null;
-      const location_ids = formulario.location_ids || [];
-      const emails_for_reporting = formulario.emails_for_reporting || [];
+      let location_ids = formulario.location_ids || [];
+      let emails_for_reporting = formulario.emails_for_reporting || [];
+
+      // When sent as multipart, arrays often arrive as JSON strings
+      if (typeof location_ids === 'string') {
+        try {
+          location_ids = JSON.parse(location_ids);
+        } catch (e) {
+          location_ids = [];
+        }
+      }
+      if (typeof emails_for_reporting === 'string') {
+        try {
+          emails_for_reporting = JSON.parse(emails_for_reporting);
+        } catch (e) {
+          emails_for_reporting = [];
+        }
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         'insert into client (name, short_name, email, phone, address, webpage) values(?,?,?,?,?,?)',
@@ -2299,6 +2344,30 @@ router.post('/new/client', verifyToken, async (req, res) => {
 
       if (rows.affectedRows > 0) {
         const client_id = rows.insertId;
+
+        // Upload and persist client logo if provided
+        if (req.file) {
+          if (!req.file.mimetype || !req.file.mimetype.startsWith('image/')) {
+            return res.status(400).json('Client logo must be an image');
+          }
+
+          const s3Key = `client/${client_id}/logo/${randomImageName()}`;
+          const uploadParams = {
+            Bucket: bucketName,
+            Key: s3Key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+          };
+
+          const command = new PutObjectCommand(uploadParams);
+          await s3.send(command);
+
+          await mysqlConnection.promise().query(
+            'insert into client_logo(client_id, file) values(?,?)',
+            [client_id, s3Key]
+          );
+        }
+
         if (location_ids.length > 0) {
           for (let i = 0; i < location_ids.length; i++) {
             await mysqlConnection.promise().query(
@@ -2331,20 +2400,45 @@ router.post('/new/client', verifyToken, async (req, res) => {
   }
 });
 
-router.put('/new/client/:id', verifyToken, async (req, res) => {
+router.put('/new/client/:id', verifyToken, clientLogoUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin') {
     try {
       const id = req.params.id || null;
-      formulario = req.body;
+      let formulario = req.body;
+      // Support multipart/form-data with a JSON field named "form"
+      if (req.body && req.body.form) {
+        try {
+          formulario = JSON.parse(req.body.form);
+        } catch (e) {
+          return res.status(400).json('Invalid form JSON');
+        }
+      }
+
       const name = formulario.name || null;
       const short_name = formulario.short_name || null;
       const email = formulario.email || null;
       const phone = formulario.phone || null;
       const address = formulario.address || null;
       const webpage = formulario.webpage || null;
-      const location_ids = formulario.location_ids || [];
-      const emails_for_reporting = formulario.emails_for_reporting || [];
+      let location_ids = formulario.location_ids || [];
+      let emails_for_reporting = formulario.emails_for_reporting || [];
+
+      // When sent as multipart, arrays often arrive as JSON strings
+      if (typeof location_ids === 'string') {
+        try {
+          location_ids = JSON.parse(location_ids);
+        } catch (e) {
+          location_ids = [];
+        }
+      }
+      if (typeof emails_for_reporting === 'string') {
+        try {
+          emails_for_reporting = JSON.parse(emails_for_reporting);
+        } catch (e) {
+          emails_for_reporting = [];
+        }
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         'update client set name = ?, short_name = ?, email = ?, phone = ?, address = ?, webpage = ? where id = ?',
@@ -2352,6 +2446,50 @@ router.put('/new/client/:id', verifyToken, async (req, res) => {
       );
 
       if (rows.affectedRows > 0) {
+        // Replace client logo if provided
+        if (req.file) {
+          if (!req.file.mimetype || !req.file.mimetype.startsWith('image/')) {
+            return res.status(400).json('Client logo must be an image');
+          }
+
+          // Get previous logo (if any) and delete from S3
+          const [prevLogoRows] = await mysqlConnection.promise().query(
+            'select file from client_logo where client_id = ?',
+            [id]
+          );
+
+          const prevKey = prevLogoRows.length > 0 ? prevLogoRows[0].file : null;
+          if (prevKey) {
+            try {
+              await s3.send(
+                new DeleteObjectCommand({
+                  Bucket: bucketName,
+                  Key: prevKey,
+                })
+              );
+            } catch (e) {
+              console.log(e);
+              logger.error(e);
+              return res.status(500).json('Could not replace client logo');
+            }
+          }
+
+          const s3Key = `client/${id}/logo/${randomImageName()}`;
+          const uploadParams = {
+            Bucket: bucketName,
+            Key: s3Key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+          };
+
+          await s3.send(new PutObjectCommand(uploadParams));
+
+          await mysqlConnection.promise().query(
+            'insert into client_logo(client_id, file) values(?,?) on duplicate key update file = values(file)',
+            [id, s3Key]
+          );
+        }
+
         // delete all client_location records for the client
         await mysqlConnection.promise().query(
           'delete from client_location where client_id = ?',
@@ -14184,6 +14322,7 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
           c.address,
           c.webpage,
           c.enabled,
+          clo.file as logo_file,
           DATE_FORMAT(CONVERT_TZ(c.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
           DATE_FORMAT(CONVERT_TZ(c.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS modification_date,
           l.id as location_id,
@@ -14193,6 +14332,7 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
         FROM client as c
         LEFT JOIN client_location as cl ON c.id = cl.client_id
         LEFT JOIN location as l ON cl.location_id = l.id
+        LEFT JOIN client_logo as clo ON c.id = clo.client_id
         WHERE c.id = ?`,
         [idClient]
       );
@@ -14230,6 +14370,14 @@ router.get('/view/client/:idClient', verifyToken, async (req, res) => {
         client["locations"] = locations;
 
         client["emails_for_reporting"] = rows_emails;
+
+        // Optional signed URL for client logo
+        client["logo_file"] = rows[0].logo_file || null;
+        if (client["logo_file"]) {
+          client["logo_url"] = await getSignedUrlForImage(client["logo_file"]);
+        } else {
+          client["logo_url"] = null;
+        }
 
         res.json(client);
       } else {
