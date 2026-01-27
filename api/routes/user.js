@@ -17872,10 +17872,14 @@ router.get('/calendar/events', async (req, res) => {
           l.community_city as location_city,
           l.address as location_address,
           CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
+          c.id as client_id,
+          c.name as client_name,
+          c.short_name as client_short_name,
           DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
           DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
         FROM calendar_event ce
         INNER JOIN location l ON ce.location_id = l.id
+        LEFT JOIN client c ON ce.client_id = c.id
         WHERE ${whereClause}
         ORDER BY ce.date ASC, ce.time ASC
         LIMIT ? OFFSET ?`,
@@ -17904,10 +17908,14 @@ router.get('/calendar/events', async (req, res) => {
           l.community_city as location_city,
           l.address as location_address,
           CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
+          c.id as client_id,
+          c.name as client_name,
+          c.short_name as client_short_name,
           DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
           DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
         FROM calendar_event ce
         INNER JOIN location l ON ce.location_id = l.id
+        LEFT JOIN client c ON ce.client_id = c.id
         WHERE ${whereClause}
         ORDER BY ce.date ASC, ce.time ASC`,
         queryParams
@@ -17946,10 +17954,13 @@ router.get('/calendar/events/:id', async (req, res) => {
         l.community_city as location_city,
         l.address as location_address,
         CONCAT(ST_Y(l.coordinates), ',', ST_X(l.coordinates)) as coordinates,
+        ce.client_id,
+        clo.file as client_logo_file,
         DATE_FORMAT(CONVERT_TZ(ce.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS created_at,
         DATE_FORMAT(CONVERT_TZ(ce.modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") AS updated_at
       FROM calendar_event ce
       INNER JOIN location l ON ce.location_id = l.id
+      LEFT JOIN client_logo clo ON ce.client_id = clo.client_id
       WHERE ce.id = ? AND ce.enabled = "Y"
       LIMIT 1`,
       [id]
@@ -17959,7 +17970,17 @@ router.get('/calendar/events/:id', async (req, res) => {
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    res.json(mapCalendarEventRow(rows[0]));
+    const event = mapCalendarEventRow(rows[0]);
+    event.client_id = event.client_id ?? null;
+
+    if (event.client_logo_file) {
+      event.client_logo_url = await getSignedUrlForImage(event.client_logo_file);
+    } else {
+      event.client_logo_url = null;
+    }
+    delete event.client_logo_file;
+
+    res.json(event);
   } catch (err) {
     console.log(err);
     res.status(500).json('Internal server error');
@@ -17971,6 +17992,22 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     const { date, time, location_id } = req.body;
+
+    // Optional client_id
+    const hasClientId = Object.prototype.hasOwnProperty.call(req.body || {}, 'client_id');
+    let client_id = null;
+    if (hasClientId) {
+      const clientIdRaw = req.body?.client_id;
+      if (clientIdRaw === undefined || clientIdRaw === null || clientIdRaw === '') {
+        client_id = null;
+      } else {
+        const parsedClientId = parseInt(clientIdRaw, 10);
+        if (isNaN(parsedClientId)) {
+          return res.status(400).json('client_id must be an integer');
+        }
+        client_id = parsedClientId;
+      }
+    }
 
     const noDistributionRaw = req.body?.no_distribution;
     const no_distribution = (noDistributionRaw === true || noDistributionRaw === 'true' || noDistributionRaw === 1 || noDistributionRaw === '1') ? 1 : 0;
@@ -17986,8 +18023,8 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
     try {
       // Insert the new event
       const [result] = await mysqlConnection.promise().query(
-        'INSERT INTO calendar_event (date, time, location_id, no_distribution, message_en, message_es) VALUES (?, ?, ?, ?, ?, ?)',
-        [date_formatted, time, location_id, no_distribution, message_en, message_es]
+        'INSERT INTO calendar_event (date, time, location_id, no_distribution, message_en, message_es, client_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [date_formatted, time, location_id, no_distribution, message_en, message_es, client_id]
       );
 
       // Get the created event with location details
@@ -18000,6 +18037,7 @@ router.post('/calendar/events', verifyToken, async (req, res) => {
           ce.message_en,
           ce.message_es,
           ce.location_id,
+          ce.client_id,
           l.organization as location_name,
           l.community_city as location_city,
           l.address as location_address,
@@ -18028,6 +18066,22 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
     const { id } = req.params;
     const { date, time, location_id } = req.body;
 
+    // Optional client_id (if omitted, keep existing value)
+    const hasClientId = Object.prototype.hasOwnProperty.call(req.body || {}, 'client_id');
+    let client_id = null;
+    if (hasClientId) {
+      const clientIdRaw = req.body?.client_id;
+      if (clientIdRaw === undefined || clientIdRaw === null || clientIdRaw === '') {
+        client_id = null;
+      } else {
+        const parsedClientId = parseInt(clientIdRaw, 10);
+        if (isNaN(parsedClientId)) {
+          return res.status(400).json('client_id must be an integer');
+        }
+        client_id = parsedClientId;
+      }
+    }
+
     const noDistributionRaw = req.body?.no_distribution;
     const no_distribution = (noDistributionRaw === true || noDistributionRaw === 'true' || noDistributionRaw === 1 || noDistributionRaw === '1') ? 1 : 0;
     const message_en = req.body?.message_en == null ? '' : String(req.body.message_en);
@@ -18041,10 +18095,14 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
 
     try {
       // Update the event
-      const [result] = await mysqlConnection.promise().query(
-        'UPDATE calendar_event SET date = ?, time = ?, location_id = ?, no_distribution = ?, message_en = ?, message_es = ? WHERE id = ? AND enabled = "Y"',
-        [date_formatted, time, location_id, no_distribution, message_en, message_es, id]
-      );
+      const updateQuery = hasClientId
+        ? 'UPDATE calendar_event SET date = ?, time = ?, location_id = ?, no_distribution = ?, message_en = ?, message_es = ?, client_id = ? WHERE id = ? AND enabled = "Y"'
+        : 'UPDATE calendar_event SET date = ?, time = ?, location_id = ?, no_distribution = ?, message_en = ?, message_es = ? WHERE id = ? AND enabled = "Y"';
+      const updateParams = hasClientId
+        ? [date_formatted, time, location_id, no_distribution, message_en, message_es, client_id, id]
+        : [date_formatted, time, location_id, no_distribution, message_en, message_es, id];
+
+      const [result] = await mysqlConnection.promise().query(updateQuery, updateParams);
 
       if (result.affectedRows === 0) {
         return res.status(404).json('Event not found');
@@ -18060,6 +18118,7 @@ router.put('/calendar/events/:id', verifyToken, async (req, res) => {
           ce.message_en,
           ce.message_es,
           ce.location_id,
+          ce.client_id,
           l.organization as location_name,
           l.community_city as location_city,
           l.address as location_address,
