@@ -3108,7 +3108,7 @@ router.get('/locations', verifyToken, async (req, res) => {
         if (cabecera.role === 'beneficiary') {
           try {
             let query = 'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y"';
-            
+
             // Si withFilterEvent es true, filtrar por eventos del día actual
             if (withFilterEvent) {
               query += ` AND id IN (
@@ -3118,9 +3118,9 @@ router.get('/locations', verifyToken, async (req, res) => {
                 AND enabled = 'Y'
               )`;
             }
-            
+
             query += ' order by community_city';
-            
+
             const [rows] = await mysqlConnection.promise().query(query);
             res.json(rows);
           } catch (err) {
@@ -5360,12 +5360,12 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           }
           [rows] = await mysqlConnection.promise().query(
             `SELECT
-                SUM(total_weight) AS value,
-                DATE_FORMAT(date, '%m/%Y') AS name
-              FROM donation_ticket
-              WHERE enabled = 'Y'
-              GROUP BY YEAR(date), MONTH(date)
-              ORDER BY date`
+              SUM(total_weight) AS value,
+              DATE_FORMAT(date, '%m/%Y') AS name
+            FROM donation_ticket
+            WHERE enabled = 'Y'
+            GROUP BY DATE_FORMAT(date, '%m/%Y')
+            ORDER BY MIN(date)`
           );
           isTabSelectedCorrect = true;
           break;
@@ -8311,7 +8311,7 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
     try {
       const filters = req.body;
       const language = req.query.language || 'en';
-      
+
       // Validación temprana de filtros para evitar consultas innecesarias
       const locations = Array.isArray(filters.locations) ? filters.locations.filter(x => x !== null && x !== '') : [];
       const genders = Array.isArray(filters.genders) ? filters.genders.filter(x => x !== null && x !== '') : [];
@@ -9946,7 +9946,7 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
       const zipcode = filters.zipcode || null;
       const interval = filters.interval || 'month';
       const language = req.query.language || 'en';
-      
+
       const laTimeZone = "'America/Los_Angeles'";
       const utcTimeZone = "'+00:00'";
 
@@ -17920,7 +17920,7 @@ router.get('/calendar/events', async (req, res) => {
         ORDER BY ce.date ASC, ce.time ASC`,
         queryParams
       );
-      
+
       res.json(rows.map(mapCalendarEventRow));
     }
   } catch (err) {
@@ -18179,7 +18179,7 @@ router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
 router.get('/search', async (req, res) => {
   try {
     const { query, language } = req.query;
-    
+
     // Validate required parameters
     if (!query || !language) {
       return res.status(400).json({ error: 'Missing required parameters: query and language' });
@@ -18340,7 +18340,7 @@ router.get('/search', async (req, res) => {
       })),
       articles: articlesArray
     };
-    
+
     res.json(response);
   } catch (err) {
     console.log(err);
