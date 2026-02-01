@@ -17881,7 +17881,7 @@ router.get('/calendar/events', async (req, res) => {
         INNER JOIN location l ON ce.location_id = l.id
         LEFT JOIN client c ON ce.client_id = c.id
         WHERE ${whereClause}
-        ORDER BY ce.date ASC, ce.time ASC
+        ORDER BY ce.date DESC, ce.time DESC
         LIMIT ? OFFSET ?`,
         [...queryParams, pageSizeNum, offset]
       );
