@@ -17724,7 +17724,7 @@ function mapCalendarEventRow(row) {
 // - pageSize: number of items per page
 router.get('/calendar/events', async (req, res) => {
   try {
-    const { fromToday, daysLimit, month, year, location_id, lang = 'en', language: languageParam, page, pageSize } = req.query;
+    const { fromToday, daysLimit, month, year, location_id, date, lang = 'en', language: languageParam, page, pageSize } = req.query;
 
     // Validate language parameter
     const language = ['en', 'es'].includes(languageParam) ? languageParam : (['en', 'es'].includes(lang) ? lang : 'en');
@@ -17773,6 +17773,12 @@ router.get('/calendar/events', async (req, res) => {
     if (location_id) {
       whereConditions.push('ce.location_id = ?');
       queryParams.push(location_id);
+    }
+
+    // Filter by exact date if provided
+    if (date) {
+      whereConditions.push('DATE(ce.date) = ?');
+      queryParams.push(date);
     }
 
     // Filter by date range: from today onwards with optional days limit
