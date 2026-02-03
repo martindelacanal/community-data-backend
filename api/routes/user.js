@@ -9088,6 +9088,8 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
       const locations = filters.locations || [];
+      const locationIds = locations.map(Number);
+      const locationIdsCsv = locationIds.join(',');
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -9102,20 +9104,20 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
       // Location filter for 'new' users (checks u.first_location_id)
       // and for the new type of 'recurring' users (checks u.first_location_id)
       var query_locations_new_user_first_location = '';
-      if (locations.length > 0) {
-        query_locations_new_user_first_location = `AND u.first_location_id IN (${locations.map(Number).join(',')}) `;
+      if (locationIds.length > 0) {
+        query_locations_new_user_first_location = `AND u.first_location_id IN (${locationIdsCsv}) `;
       }
 
       // Location filter for 'recurring' users (checks db_range.location_id for deliveries within the date range)
       var query_locations_recurring_delivery = '';
-      if (locations.length > 0) {
-        query_locations_recurring_delivery = `AND db_range.location_id IN (${locations.map(Number).join(',')})`;
+      if (locationIds.length > 0) {
+        query_locations_recurring_delivery = `AND db_range.location_id IN (${locationIdsCsv})`;
       }
 
       // Location filter for original 'recurring' logic (checks db_prev_original.location_id for deliveries prior to current one)
       let original_recurring_location_condition_sql = '';
-      if (locations.length > 0) {
-        original_recurring_location_condition_sql = `AND db_prev_original.location_id IN (${locations.map(Number).join(',')})`;
+      if (locationIds.length > 0) {
+        original_recurring_location_condition_sql = `AND db_prev_original.location_id IN (${locationIdsCsv})`;
       }
 
       let params_metrics_participant = [];
@@ -9150,6 +9152,21 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
         params_metrics_participant.push(cabecera.client_id);
       }
 
+      // Params for RECURRING WITHOUT NEW subquery
+      // For db_range.creation_date range:
+      params_metrics_participant.push(from_date); // For db_range.creation_date >= ?
+      params_metrics_participant.push(to_date);   // For db_range.creation_date < DATE_ADD(?, INTERVAL 1 DAY)
+      if (cabecera.role === 'client') {
+        params_metrics_participant.push(cabecera.client_id);
+      }
+      // For the OR (...) part:
+      // Params for the new type of recurring:
+      params_metrics_participant.push(from_date); // For u.creation_date < ?
+      params_metrics_participant.push(from_date); // For db_no_past.creation_date < ?
+      // For excluding new users in the selected range:
+      params_metrics_participant.push(from_date); // For u.creation_date >= ?
+      params_metrics_participant.push(to_date);   // For u.creation_date < DATE_ADD(?, INTERVAL 1 DAY)
+
       // Agregar parámetros para la consulta de participaciones
       params_metrics_participant.push(from_date); // Para participations
       params_metrics_participant.push(to_date);   // Para participations
@@ -9166,14 +9183,14 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
 
       // Fix: Create a separate filter for participations subquery to avoid alias conflicts
       var query_locations_participations = '';
-      if (locations.length > 0) {
-        query_locations_participations = `AND db_participations.location_id IN (${locations.map(Number).join(',')})`;
+      if (locationIds.length > 0) {
+        query_locations_participations = `AND db_participations.location_id IN (${locationIdsCsv})`;
       }
 
       // Fix: Create a separate filter for the registered users without delivery subquery
       var query_locations_new_user_first_location_reg = '';
-      if (locations.length > 0) {
-        query_locations_new_user_first_location_reg = `AND u_reg.first_location_id IN (${locations.map(Number).join(',')}) `;
+      if (locationIds.length > 0) {
+        query_locations_new_user_first_location_reg = `AND u_reg.first_location_id IN (${locationIdsCsv}) `;
       }
 
       const sqlQuery = `
@@ -9227,6 +9244,44 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
                     )
                 )
           ) AS recurring,
+          (SELECT COUNT(DISTINCT db_range.receiving_user_id)
+              FROM delivery_beneficiary db_range
+              INNER JOIN user u ON db_range.receiving_user_id = u.id
+              ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
+              WHERE 
+                CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') >= ? 
+                AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                AND u.role_id = 5 AND u.enabled = 'Y'
+                ${clientCondition}
+                ${query_locations_recurring_delivery}
+                AND (
+                    -- Original recurring: had a delivery prior to this specific db_range delivery (respecting location filter for that prior delivery)
+                    EXISTS (
+                        SELECT 1
+                        FROM delivery_beneficiary db_prev_original
+                        WHERE db_prev_original.receiving_user_id = u.id
+                          AND CONVERT_TZ(db_prev_original.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
+                          ${original_recurring_location_condition_sql}
+                    )
+                    OR
+                    -- New type of recurring: registered before from_date, first_loc matches (if loc filter), AND no deliveries ANYWHERE before from_date
+                    (
+                        CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                        ${query_locations_new_user_first_location} 
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM delivery_beneficiary db_no_past
+                            WHERE db_no_past.receiving_user_id = u.id
+                              AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                        )
+                    )
+                )
+                AND NOT (
+                    CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ?
+                    AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                    ${query_locations_new_user_first_location}
+                )
+          ) AS recurring_without_new,
           (SELECT 
               -- Conteo de delivery_beneficiary con delivering_user_id not null
               COALESCE(
@@ -9273,10 +9328,11 @@ router.post('/metrics/participant/register', verifyToken, async (req, res) => {
           total: rows[0].total,
           new: rows[0].new,
           recurring: rows[0].recurring,
+          recurring_without_new: rows[0].recurring_without_new,
           participations: rows[0].participations
         });
       } else {
-        res.json({ total: 0, new: 0, recurring: 0, participations: 0 });
+        res.json({ total: 0, new: 0, recurring: 0, recurring_without_new: 0, participations: 0 });
       }
     } catch (err) {
       console.log(err);
