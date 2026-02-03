@@ -10,6 +10,7 @@ const JSZip = require('jszip');
 const { sendTicketEmail } = require('../email/email');
 const { sendVolunteerConfirmation } = require('../email/email');
 const multer = require('multer');
+const sharp = require('sharp');
 const storage = multer.memoryStorage();
 
 // Client logo upload (single image)
@@ -15149,6 +15150,43 @@ const articleUpload = multer({
   { name: 'image', maxCount: 1 } // For content images
 ]);
 
+const MAX_ARTICLE_IMAGE_WIDTH = 768;
+
+async function resizeArticleImageBuffer(buffer, mimeType, label = 'image') {
+  // Avoid rasterizing SVGs
+  if (mimeType === 'image/svg+xml') {
+    return { buffer, resized: false };
+  }
+
+  const isAnimated = mimeType === 'image/gif' || mimeType === 'image/webp';
+
+  try {
+    const metadata = await sharp(buffer, { animated: isAnimated }).metadata();
+
+    if (!metadata.width || metadata.width <= MAX_ARTICLE_IMAGE_WIDTH) {
+      return { buffer, resized: false };
+    }
+
+    let pipeline = sharp(buffer, { animated: isAnimated })
+      .rotate()
+      .resize({ width: MAX_ARTICLE_IMAGE_WIDTH, withoutEnlargement: true });
+
+    if (isAnimated) {
+      if (metadata.format === 'gif') {
+        pipeline = pipeline.gif({ animated: true });
+      } else if (metadata.format === 'webp') {
+        pipeline = pipeline.webp({ animated: true });
+      }
+    }
+
+    const resizedBuffer = await pipeline.toBuffer();
+    return { buffer: resizedBuffer, resized: true };
+  } catch (error) {
+    logger.error(`Error resizing ${label}:`, error);
+    return { buffer, resized: false };
+  }
+}
+
 // Helper function to generate slug from title
 function generateSlug(title) {
   return title
@@ -15201,9 +15239,14 @@ async function processContentImages(htmlContent, articleId, language = 'en') {
 
     for (const imageData of base64Images) {
       try {
-        // Convert base64 to buffer
-        const imageBuffer = Buffer.from(imageData.base64Data, 'base64');
-        const fileHash = calculateFileHash(imageBuffer);
+        // Convert base64 to buffer and resize if needed
+        const originalBuffer = Buffer.from(imageData.base64Data, 'base64');
+        const { buffer: resizedBuffer } = await resizeArticleImageBuffer(
+          originalBuffer,
+          imageData.mimeType,
+          'content image'
+        );
+        const fileHash = calculateFileHash(resizedBuffer);
 
         // Check if image already exists for this article
         const [existingImage] = await mysqlConnection.promise().query(
@@ -15223,7 +15266,7 @@ async function processContentImages(htmlContent, articleId, language = 'en') {
           const uploadParams = {
             Bucket: bucketName,
             Key: s3Key,
-            Body: imageBuffer,
+            Body: resizedBuffer,
             ContentType: imageData.mimeType,
           };
 
@@ -15240,7 +15283,7 @@ async function processContentImages(htmlContent, articleId, language = 'en') {
             [
               articleId, 'content', s3Key, bucketName, fileHash,
               `content_image_${displayOrder}.${imageData.imageFormat}`,
-              imageData.mimeType, imageBuffer.length, imageData.altText,
+              imageData.mimeType, resizedBuffer.length, imageData.altText,
               displayOrder++
             ]
           );
@@ -15453,14 +15496,20 @@ async function managePriority(newPriority, excludeArticleId = null, connection =
 // Helper function to upload image to S3 and save to database
 async function uploadArticleImage(file, articleId, imageType, altTextEn = '', altTextEs = '', captionEn = '', captionEs = '') {
   try {
-    const fileHash = calculateFileHash(file.buffer);
+    const { buffer: resizedBuffer } = await resizeArticleImageBuffer(
+      file.buffer,
+      file.mimetype,
+      `article ${imageType}`
+    );
+    const fileHash = calculateFileHash(resizedBuffer);
+    const fileSize = resizedBuffer.length;
     const fileName = randomImageName();
 
     // Upload to S3
     const uploadParams = {
       Bucket: bucketName,
       Key: fileName,
-      Body: file.buffer,
+      Body: resizedBuffer,
       ContentType: file.mimetype,
     };
 
@@ -15476,7 +15525,7 @@ async function uploadArticleImage(file, articleId, imageType, altTextEn = '', al
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         articleId, imageType, fileName, bucketName, fileHash,
-        file.originalname, file.mimetype, file.size, altTextEn,
+        file.originalname, file.mimetype, fileSize, altTextEn,
         altTextEs, captionEn, captionEs
       ]
     );
@@ -17368,12 +17417,17 @@ router.post('/article/upload-image', verifyToken, articleUpload, async (req, res
 
     const file = req.files.image[0];
     const fileName = randomImageName();
+    const { buffer: resizedBuffer } = await resizeArticleImageBuffer(
+      file.buffer,
+      file.mimetype,
+      'article content upload'
+    );
 
     // Upload to S3
     const uploadParams = {
       Bucket: bucketName,
       Key: fileName,
-      Body: file.buffer,
+      Body: resizedBuffer,
       ContentType: file.mimetype,
     };
 
