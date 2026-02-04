@@ -18635,7 +18635,8 @@ function calculateCurrentStatus(schedules, language = 'en') {
     return `${displayHour}:${min.toString().padStart(2, '0')} ${period}`;
   };
 
-  const todayHours = `${formatTime(todaySchedule.openTime)} to ${formatTime(todaySchedule.closeTime)}`;
+  const separator = language === 'en' ? 'to' : 'a';
+  const todayHours = `${formatTime(todaySchedule.openTime)} ${separator} ${formatTime(todaySchedule.closeTime)}`;
 
   return {
     isOpen,
@@ -18735,9 +18736,22 @@ router.get('/trusted-resources/public', async (req, res) => {
     let whereConditions = ['tr.is_active = 1'];
     let queryParams = [];
 
-    // Filter by open now
+    // Filter by open now (based on schedules in Los Angeles timezone)
+    let scheduleJoin = '';
     if (openNow === 'true') {
-      whereConditions.push('tr.is_open = 1');
+      scheduleJoin = 'INNER JOIN resource_schedules rs ON rs.resource_id = tr.id';
+
+      const laNow = "CONVERT_TZ(NOW(), @@session.time_zone, 'America/Los_Angeles')";
+      const laDay = `(DAYOFWEEK(${laNow}) - 1)`; // 0 = Sunday, 6 = Saturday
+      const laTime = `TIME(${laNow})`;
+
+      whereConditions.push('rs.is_open = 1');
+      whereConditions.push(`rs.day_of_week = ${laDay}`);
+      whereConditions.push(`(
+        (rs.open_time <= rs.close_time AND ${laTime} BETWEEN rs.open_time AND rs.close_time)
+        OR
+        (rs.open_time > rs.close_time AND (${laTime} >= rs.open_time OR ${laTime} <= rs.close_time))
+      )`);
     }
 
     // Filter by filter IDs
@@ -18759,6 +18773,7 @@ router.get('/trusted-resources/public', async (req, res) => {
       SELECT COUNT(DISTINCT tr.id) as total
       FROM trusted_resources tr
       ${filterJoin}
+      ${scheduleJoin}
       WHERE ${whereClause}
     `;
     const [countResult] = await mysqlConnection.promise().query(countQuery, queryParams);
@@ -18781,6 +18796,7 @@ router.get('/trusted-resources/public', async (req, res) => {
         tr.is_open
       FROM trusted_resources tr
       ${filterJoin}
+      ${scheduleJoin}
       WHERE ${whereClause}
       ORDER BY tr.created_at DESC
       LIMIT ? OFFSET ?
