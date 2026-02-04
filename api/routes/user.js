@@ -18288,7 +18288,7 @@ router.delete('/calendar/events/:id', verifyToken, async (req, res) => {
 
 // ============ SEARCH ENDPOINT ============
 
-// GET /search - Global search for calendar events and articles
+// GET /search - Global search for calendar events, articles and trusted resources
 // Query params:
 // - query: search text (required)
 // - language: 'en' or 'es' (required)
@@ -18309,6 +18309,7 @@ router.get('/search', async (req, res) => {
     const searchTerm = `%${query}%`;
     const maxEvents = 20;
     const maxArticles = 30;
+    const maxTrustedResources = 20;
 
     // ===== SEARCH CALENDAR EVENTS =====
     const eventsQuery = `
@@ -18370,6 +18371,56 @@ router.get('/search', async (req, res) => {
     const [articles] = await mysqlConnection.promise().query(
       articlesQuery,
       [searchTerm, searchTerm, searchTerm, searchTerm, maxArticles]
+    );
+
+    // ===== SEARCH TRUSTED RESOURCES =====
+    const trustedResourcesQuery = `
+      SELECT DISTINCT
+        tr.id,
+        ${language === 'en' ? 'tr.title_english' : 'tr.title_spanish'} as title,
+        tr.address,
+        tr.image_url
+      FROM trusted_resources tr
+      LEFT JOIN resource_filter_relations rfr ON tr.id = rfr.resource_id
+      LEFT JOIN resource_filters rf ON rfr.filter_id = rf.id
+      LEFT JOIN resource_service_relations rsr ON tr.id = rsr.resource_id
+      LEFT JOIN resource_services rs ON rsr.service_id = rs.id
+      LEFT JOIN resource_price_relations rpr ON tr.id = rpr.resource_id
+      LEFT JOIN resource_prices rp ON rpr.price_id = rp.id
+      WHERE tr.is_active = 1
+        AND (
+          ${language === 'en' ? 'tr.title_english' : 'tr.title_spanish'} LIKE ?
+          OR ${language === 'en' ? 'tr.description_english' : 'tr.description_spanish'} LIKE ?
+          OR ${language === 'en' ? 'tr.information_english' : 'tr.information_spanish'} LIKE ?
+          OR tr.address LIKE ?
+          OR tr.phone_number LIKE ?
+          OR tr.email LIKE ?
+          OR tr.website LIKE ?
+          OR ${language === 'en' ? 'rf.name_english' : 'rf.name_spanish'} LIKE ?
+          OR ${language === 'en' ? 'rs.name_english' : 'rs.name_spanish'} LIKE ?
+          OR ${language === 'en' ? 'rp.name_english' : 'rp.name_spanish'} LIKE ?
+        )
+      ORDER BY tr.created_at DESC
+      LIMIT ?
+    `;
+
+    const trustedResourcesParams = [
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      maxTrustedResources
+    ];
+
+    const [trustedResources] = await mysqlConnection.promise().query(
+      trustedResourcesQuery,
+      trustedResourcesParams
     );
 
     // Get article IDs for fetching categories
@@ -18440,6 +18491,50 @@ router.get('/search', async (req, res) => {
       articles: articlesGroupedByCategory[categoryName]
     }));
 
+    // Prepare trusted resources response
+    const trustedResourceIds = trustedResources.map(resource => resource.id);
+
+    let trustedResourcesFormatted = [];
+
+    if (trustedResourceIds.length > 0) {
+      const [filtersMap, schedulesMap] = await Promise.all([
+        getFiltersForResources(trustedResourceIds),
+        getSchedulesForResources(trustedResourceIds)
+      ]);
+
+      const trustedS3Keys = trustedResources
+        .filter(resource => resource.image_url)
+        .map(resource => resource.image_url);
+
+      const trustedSignedUrls = await getSignedUrlsForImages(trustedS3Keys);
+
+      const trustedUrlMap = new Map();
+      trustedS3Keys.forEach((key, index) => {
+        if (trustedSignedUrls[index]) {
+          trustedUrlMap.set(key, trustedSignedUrls[index]);
+        }
+      });
+
+      trustedResourcesFormatted = trustedResources.map(resource => {
+        const schedules = schedulesMap.get(resource.id) || [];
+        const status = calculateCurrentStatus(schedules, language);
+        const filters = (filtersMap.get(resource.id) || []).map(f =>
+          language === 'en' ? f.nameEnglish : f.nameSpanish
+        );
+
+        return {
+          id: resource.id,
+          title: resource.title || '',
+          imageUrl: resource.image_url ? (trustedUrlMap.get(resource.image_url) || null) : null,
+          address: resource.address || '',
+          filters,
+          isOpen: status.isOpen,
+          currentStatus: status.currentStatus,
+          todayHours: status.todayHours
+        };
+      });
+    }
+
     // Build final response
     const response = {
       calendarEvents: calendarEvents.map(event => ({
@@ -18454,7 +18549,8 @@ router.get('/search', async (req, res) => {
         created_at: event.creation_date,
         updated_at: event.modification_date
       })),
-      articles: articlesArray
+      articles: articlesArray,
+      trustedResources: trustedResourcesFormatted
     };
 
     res.json(response);
