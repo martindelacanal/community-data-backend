@@ -1458,7 +1458,7 @@ router.put('/beneficiary/reset-password', async (req, res) => {
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
       const { idUser } = req.params;
       const { password } = req.body;
@@ -3034,7 +3034,7 @@ router.get('/answer-types', verifyToken, async (req, res) => {
 
 router.get('/workers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'contentmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,username \
@@ -3080,7 +3080,7 @@ router.get('/locations', verifyToken, async (req, res) => {
       res.status(500).json('Internal server error');
     }
   } else {
-    if (cabecera.role === 'admin') {
+    if (cabecera.role === 'admin' || cabecera.role === 'contentmanager') {
       try {
         const [rows] = await mysqlConnection.promise().query(
           'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location order by community_city'
@@ -3138,7 +3138,7 @@ router.get('/locations', verifyToken, async (req, res) => {
 
 router.get('/delivered-by', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id, name from delivered_by where enabled = "Y" order by name'
@@ -3155,7 +3155,7 @@ router.get('/delivered-by', verifyToken, async (req, res) => {
 
 router.get('/transported-by', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id, name from transported_by where enabled = "Y" order by name'
@@ -3186,7 +3186,7 @@ router.get('/register/locations', async (req, res) => {
 
 router.get('/providers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select id,name from provider order by name',
@@ -3203,7 +3203,7 @@ router.get('/providers', verifyToken, async (req, res) => {
 
 router.get('/stocker-upload', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
       const [rows] = await mysqlConnection.promise().query(
         'select DISTINCT u.id, u.username as name from user as u inner join stocker_log as sl on u.id = sl.user_id where sl.operation_id = 5 and u.enabled = "Y" order by u.username',
@@ -3239,7 +3239,7 @@ router.get('/product_types', verifyToken, async (req, res) => {
   const id = req.query.id || null;
   const language = req.query.language || 'en';
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
       const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name 
                   FROM product_type ${id ? ' WHERE id = ?' : ''} ORDER BY name`;
@@ -3777,7 +3777,8 @@ router.get('/client/locations', verifyToken, async (req, res) => {
     cabecera.role === 'admin' ||
     cabecera.role === 'opsmanager' ||
     cabecera.role === 'director' ||
-    cabecera.role === 'auditor'
+    cabecera.role === 'auditor' ||
+    cabecera.role === 'contentmanager'
   ) {
     try {
       // Get all enabled clients with their locations
@@ -6033,7 +6034,7 @@ ${language === 'en' ? 'Date' : 'Fecha'}: ${new Date().toLocaleString()}
 router.put('/settings/password', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
       const user_id = cabecera.id;
       const { actual_password, new_password } = req.body;
@@ -13638,7 +13639,7 @@ router.post('/table/client', verifyToken, async (req, res) => {
 
 router.post('/table/article', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'contentmanager') {
     const language = req.query.language || 'en';
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
@@ -15911,7 +15912,7 @@ async function getAudienceTargetingForArticles(articleIds) {
 router.post('/article', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -16991,7 +16992,7 @@ router.get('/article/slug/:slug', async (req, res) => {
 router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -17342,7 +17343,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 router.delete('/article/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -17406,7 +17407,7 @@ router.delete('/article/:id', verifyToken, async (req, res) => {
 router.post('/article/upload-image', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role !== 'admin') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -17505,7 +17506,7 @@ router.get('/filters', async (req, res) => {
 // Get all tags
 router.get('/tags', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'contentmanager') {
     try {
       const { lang = 'en', search } = req.query;
 
@@ -17550,7 +17551,7 @@ router.get('/tags', verifyToken, async (req, res) => {
 
 router.get('/article_status', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'contentmanager') {
     try {
       const { lang = 'en' } = req.query;
       const query = `
@@ -19066,7 +19067,7 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
 // GET /trusted-resources - Get all trusted resources (ADMIN)
 router.get('/trusted-resources', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -19241,7 +19242,7 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
 // GET /trusted-resources/:id - Get single trusted resource by ID (ADMIN)
 router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -19337,7 +19338,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
 // POST /trusted-resources - Create a new trusted resource (ADMIN)
 router.post('/trusted-resources', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -19508,7 +19509,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
 // PUT /trusted-resources/:id - Update a trusted resource (ADMIN)
 router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -19695,7 +19696,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
 // DELETE /trusted-resources/:id - Delete a trusted resource (ADMIN)
 router.delete('/trusted-resources/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
@@ -19752,7 +19753,7 @@ router.delete('/trusted-resources/:id', verifyToken, async (req, res) => {
 // POST /trusted-resources/:id/image - Upload image for a trusted resource (ADMIN)
 router.post('/trusted-resources/:id/image', verifyToken, trustedResourceUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager' && cabecera.role !== 'contentmanager') {
     return res.status(401).json('Unauthorized');
   }
 
