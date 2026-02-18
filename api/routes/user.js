@@ -337,6 +337,21 @@ router.post('/signup', async (req, res) => {
   firstForm = req.body.firstForm;
   secondForm = req.body.secondForm;
 
+  const zipcodeRaw = firstForm.zipcode;
+  const householdRaw = firstForm.householdSize;
+
+  const zipcode = zipcodeRaw == null ? null : String(zipcodeRaw).trim();
+
+  const householdParsed = Number.parseInt(String(householdRaw ?? '').trim(), 10);
+  const householdSize = Number.isInteger(householdParsed) ? householdParsed : null;
+
+  if (householdSize === null || householdSize < 1 || householdSize > 999) {
+    return res.status(400).json({
+      code: 'INVALID_HOUSEHOLD_SIZE',
+      message: 'householdSize must be an integer between 1 and 999'
+    });
+  }
+
   const role_id = 5;
   const username = firstForm.username || null;
   let passwordHash = await bcryptjs.hash(firstForm.password, 8);
@@ -344,10 +359,8 @@ router.post('/signup', async (req, res) => {
   const lastname = firstForm.lastName || null;
   const dateOfBirth = firstForm.dateOfBirth || null;
   const email = firstForm.email || null;
-  const phone = firstForm.phone.toString() || null;
-  const zipcode = firstForm.zipcode.toString() || null;
+  const phone = firstForm.phone == null ? null : String(firstForm.phone).trim();
   const location_id = firstForm.destination || null;
-  const householdSize = firstForm.householdSize || null;
   const gender = firstForm.gender || null;
   const ethnicity = firstForm.ethnicity || null;
   const otherEthnicity = firstForm.otherEthnicity || null;
