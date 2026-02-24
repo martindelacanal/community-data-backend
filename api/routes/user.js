@@ -4300,6 +4300,118 @@ router.post('/survey/location', verifyToken, async (req, res) => {
   }
 });
 
+router.post('/survey/location/bulk', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const body = req.body || {};
+  const question_id = parseSurveyPositiveInt(body.question_id);
+  const location_ids = body.location_ids;
+
+  if (!question_id) {
+    return res.status(400).json('question_id is required and must be a positive integer');
+  }
+  if (!Array.isArray(location_ids)) {
+    return res.status(400).json('location_ids is required and must be an array');
+  }
+
+  const normalizedLocationIds = [];
+  const seenLocationIds = new Set();
+  for (let i = 0; i < location_ids.length; i++) {
+    const locationId = parseSurveyPositiveInt(location_ids[i]);
+    if (!locationId) {
+      return res.status(400).json(`location_ids[${i}] must be a positive integer`);
+    }
+    if (!seenLocationIds.has(locationId)) {
+      seenLocationIds.add(locationId);
+      normalizedLocationIds.push(locationId);
+    }
+  }
+
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [questionRows] = await connection.query(
+      'select id from question where id = ? limit 1',
+      [question_id]
+    );
+    if (questionRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json('Question not found');
+    }
+
+    if (normalizedLocationIds.length > 0) {
+      const locationPlaceholders = normalizedLocationIds.map(() => '?').join(',');
+
+      const [validLocationRows] = await connection.query(
+        `select id from location where id in (${locationPlaceholders})`,
+        normalizedLocationIds
+      );
+      const validLocationIdSet = new Set(validLocationRows.map(row => row.id));
+      const invalidLocationIds = normalizedLocationIds.filter(id => !validLocationIdSet.has(id));
+      if (invalidLocationIds.length > 0) {
+        await connection.rollback();
+        return res.status(400).json(`Invalid location_ids: ${invalidLocationIds.join(', ')}`);
+      }
+
+      const [existingQuestionLocationRows] = await connection.query(
+        `select location_id from question_location where question_id = ? and location_id in (${locationPlaceholders})`,
+        [question_id, ...normalizedLocationIds]
+      );
+      const existingLocationIdSet = new Set(existingQuestionLocationRows.map(row => row.location_id));
+      const missingLocationIds = normalizedLocationIds.filter(id => !existingLocationIdSet.has(id));
+
+      if (missingLocationIds.length > 0) {
+        const insertValues = missingLocationIds.map(() => '(?,?,?)').join(',');
+        const insertParams = [];
+        for (let i = 0; i < missingLocationIds.length; i++) {
+          insertParams.push(question_id, missingLocationIds[i], 'Y');
+        }
+        await connection.query(
+          `insert into question_location(question_id, location_id, enabled) values ${insertValues}`,
+          insertParams
+        );
+      }
+
+      await connection.query(
+        `update question_location set enabled = 'Y' where question_id = ? and location_id in (${locationPlaceholders})`,
+        [question_id, ...normalizedLocationIds]
+      );
+
+      await connection.query(
+        `update question_location set enabled = 'N' where question_id = ? and location_id not in (${locationPlaceholders})`,
+        [question_id, ...normalizedLocationIds]
+      );
+    } else {
+      await connection.query(
+        'update question_location set enabled = ? where question_id = ?',
+        ['N', question_id]
+      );
+    }
+
+    await connection.commit();
+    res.json({
+      question_id,
+      enabled_location_ids: normalizedLocationIds,
+      updated_count: normalizedLocationIds.length
+    });
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
 router.post('/survey/answer', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
@@ -4344,26 +4456,28 @@ router.post('/survey/answer', verifyToken, async (req, res) => {
   }
 });
 
-async function disableQuestions(connection, question_id, enabled, answer_id = null) {
+async function disableQuestions(connection, question_id, enabled, answer_id = null, visited = new Set()) {
+  const visitKey = `${question_id}:${answer_id || 0}:${enabled}`;
+  if (visited.has(visitKey)) {
+    return;
+  }
+  visited.add(visitKey);
 
   var rows = null;
   if (!answer_id) {
-    // Desactivar la pregunta
     [rows] = await connection.query(
       'update question set enabled = ? where id = ?',
       [enabled, question_id]
     );
   }
   if ((rows && rows.affectedRows > 0) || answer_id) {
-    // Buscar todas las preguntas que dependen de esta pregunta y, opcionalmente, de una respuesta específica
     const [dependentQuestions] = await connection.query(
       'select id from question where depends_on_question_id = ?' + (answer_id ? ' and depends_on_answer_id = ?' : ''),
-      [question_id, answer_id].filter(Boolean)
+      answer_id ? [question_id, answer_id] : [question_id]
     );
 
-    // Desactivar todas las preguntas dependientes
     for (let question of dependentQuestions) {
-      await disableQuestions(connection, question.id, enabled);
+      await disableQuestions(connection, question.id, enabled, null, visited);
     }
   } else {
     throw new Error('Could not update question');
@@ -4373,62 +4487,781 @@ async function disableQuestions(connection, question_id, enabled, answer_id = nu
 router.post('/survey/modify-checkbox', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const body = req.body || {};
+  const sourceParsed = parseSurveySource(body.source);
+  const editedAtClientParsed = parseSurveyClientDate(body.edited_at);
+  if (sourceParsed.error) {
+    return res.status(400).json('source must be a string with a maximum length of 64 characters');
+  }
+  if (editedAtClientParsed.error) {
+    return res.status(400).json('edited_at must be a valid ISO date string');
+  }
+
+  const hasQuestionsField = Object.prototype.hasOwnProperty.call(body, 'questions');
+  const hasAnswersField = Object.prototype.hasOwnProperty.call(body, 'answers');
+  const isBatchMode = hasQuestionsField || hasAnswersField;
+  const source = sourceParsed.value || (isBatchMode ? SURVEY_STATUS_SOURCE_BATCH : SURVEY_STATUS_SOURCE_SINGLE);
+  const editedAtClient = editedAtClientParsed.value;
+
+  if (isBatchMode) {
+    if ((hasQuestionsField && !Array.isArray(body.questions)) || (hasAnswersField && !Array.isArray(body.answers))) {
+      return res.status(400).json('questions and answers must be arrays when provided');
+    }
+
+    const questionsInput = Array.isArray(body.questions) ? body.questions : [];
+    const answersInput = Array.isArray(body.answers) ? body.answers : [];
+    if (questionsInput.length + answersInput.length === 0) {
+      return res.status(400).json('At least one question or answer change is required');
+    }
+
+    const normalizedQuestions = [];
+    for (let i = 0; i < questionsInput.length; i++) {
+      const questionItem = questionsInput[i] || {};
+      const questionId = parseSurveyPositiveInt(questionItem.question_id);
+      const enabled = normalizeSurveyEnabled(questionItem.enabled);
+      if (!questionId || !enabled) {
+        return res.status(400).json(`questions[${i}] is invalid`);
+      }
+      normalizedQuestions.push({ question_id: questionId, enabled });
+    }
+
+    const normalizedAnswers = [];
+    for (let i = 0; i < answersInput.length; i++) {
+      const answerItem = answersInput[i] || {};
+      const questionId = parseSurveyPositiveInt(answerItem.question_id);
+      const answerId = parseSurveyPositiveInt(answerItem.answer_id);
+      const enabled = normalizeSurveyEnabled(answerItem.enabled);
+      if (!questionId || !answerId || !enabled) {
+        return res.status(400).json(`answers[${i}] is invalid`);
+      }
+      normalizedAnswers.push({ question_id: questionId, answer_id: answerId, enabled });
+    }
+
     const connection = await mysqlConnection.promise().getConnection();
     try {
-      const { question_id, answer_id, location_id, enabled } = req.body;
-
       await connection.beginTransaction();
 
-      // modificar answer
-      if (answer_id) {
-        const [rows] = await connection.query(
-          'update answer set enabled = ? where id = ? and question_id = ?',
-          [enabled, answer_id, question_id]
+      const updatedQuestions = [];
+      const updatedAnswers = [];
+
+      for (let i = 0; i < normalizedQuestions.length; i++) {
+        const questionItem = normalizedQuestions[i];
+        const [questionRows] = await connection.query(
+          'select enabled from question where id = ? limit 1',
+          [questionItem.question_id]
         );
-        if (rows.affectedRows > 0) {
-          // tambien modificar las question que dependen de esta respuesta
-          await disableQuestions(connection, question_id, enabled, answer_id);
-          await connection.commit();
-          res.json('Answer updated');
-        } else {
+        if (questionRows.length === 0) {
           await connection.rollback();
-          res.status(500).json('Could not update answer');
+          return res.status(404).json(`Question not found: ${questionItem.question_id}`);
         }
-      } else {
-        // modificar question_location
-        if (location_id) {
-          const [rows] = await connection.query(
-            'update question_location set enabled = ? where question_id = ? and location_id = ?',
-            [enabled, question_id, location_id]
-          );
-          if (rows.affectedRows > 0) {
-            await connection.commit();
-            res.json('Location updated');
-          } else {
-            await connection.rollback();
-            res.status(500).json('Could not update location');
-          }
-        } else {
-          // modificar question y las question que dependen de esta pregunta
-          await disableQuestions(connection, question_id, enabled);
-          await connection.commit();
-          res.json('Question updated');
+
+        const beforeEnabled = normalizeSurveyEnabled(questionRows[0].enabled) || 'N';
+        await disableQuestions(connection, questionItem.question_id, questionItem.enabled);
+        updatedQuestions.push(questionItem);
+
+        if (beforeEnabled !== questionItem.enabled) {
+          await insertSurveyStatusHistory(connection, {
+            question_id: questionItem.question_id,
+            answer_id: null,
+            entity_type: 'question',
+            before_enabled: beforeEnabled,
+            after_enabled: questionItem.enabled,
+            edited_by_user_id: cabecera.id || null,
+            source,
+            edited_at_client: editedAtClient
+          });
         }
       }
+
+      for (let i = 0; i < normalizedAnswers.length; i++) {
+        const answerItem = normalizedAnswers[i];
+        const [answerRows] = await connection.query(
+          'select enabled from answer where question_id = ? and id = ? limit 1',
+          [answerItem.question_id, answerItem.answer_id]
+        );
+        if (answerRows.length === 0) {
+          await connection.rollback();
+          return res.status(404).json(`Answer not found: question_id=${answerItem.question_id}, answer_id=${answerItem.answer_id}`);
+        }
+
+        const beforeEnabled = normalizeSurveyEnabled(answerRows[0].enabled) || 'N';
+        const [answerUpdateRows] = await connection.query(
+          'update answer set enabled = ? where question_id = ? and id = ?',
+          [answerItem.enabled, answerItem.question_id, answerItem.answer_id]
+        );
+        if (beforeEnabled !== answerItem.enabled && answerUpdateRows.affectedRows === 0) {
+          throw new Error('Could not update answer');
+        }
+
+        await disableQuestions(connection, answerItem.question_id, answerItem.enabled, answerItem.answer_id);
+        updatedAnswers.push(answerItem);
+
+        if (beforeEnabled !== answerItem.enabled) {
+          await insertSurveyStatusHistory(connection, {
+            question_id: answerItem.question_id,
+            answer_id: answerItem.answer_id,
+            entity_type: 'answer',
+            before_enabled: beforeEnabled,
+            after_enabled: answerItem.enabled,
+            edited_by_user_id: cabecera.id || null,
+            source,
+            edited_at_client: editedAtClient
+          });
+        }
+      }
+
+      await connection.commit();
+      return res.json({
+        updated_questions: updatedQuestions,
+        updated_answers: updatedAnswers,
+        count: updatedQuestions.length + updatedAnswers.length
+      });
     } catch (err) {
       if (connection) {
         await connection.rollback();
       }
       console.log(err);
-      res.status(500).json('Internal server error');
+      return res.status(500).json('Internal server error');
     } finally {
       if (connection) {
         connection.release();
       }
     }
-  } else {
-    res.status(401).json('Unauthorized');
+  }
+
+  const question_id = parseSurveyPositiveInt(body.question_id);
+  const hasAnswerId = hasSurveyValue(body.answer_id);
+  const hasLocationId = hasSurveyValue(body.location_id);
+  const answer_id = hasAnswerId ? parseSurveyPositiveInt(body.answer_id) : null;
+  const location_id = hasLocationId ? parseSurveyPositiveInt(body.location_id) : null;
+  const enabled = normalizeSurveyEnabled(body.enabled);
+
+  if (!question_id) {
+    return res.status(400).json('question_id must be a positive integer');
+  }
+  if (!enabled) {
+    return res.status(400).json('enabled must be Y or N');
+  }
+  if (hasAnswerId && !answer_id) {
+    return res.status(400).json('answer_id must be a positive integer when provided');
+  }
+  if (hasLocationId && !location_id) {
+    return res.status(400).json('location_id must be a positive integer when provided');
+  }
+
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    if (answer_id) {
+      const [answerRows] = await connection.query(
+        'select enabled from answer where id = ? and question_id = ? limit 1',
+        [answer_id, question_id]
+      );
+      if (answerRows.length === 0) {
+        await connection.rollback();
+        return res.status(404).json('Answer not found for the provided question_id');
+      }
+
+      const beforeEnabled = normalizeSurveyEnabled(answerRows[0].enabled) || 'N';
+      const [answerUpdateRows] = await connection.query(
+        'update answer set enabled = ? where id = ? and question_id = ?',
+        [enabled, answer_id, question_id]
+      );
+      if (beforeEnabled !== enabled && answerUpdateRows.affectedRows === 0) {
+        throw new Error('Could not update answer');
+      }
+
+      await disableQuestions(connection, question_id, enabled, answer_id);
+      if (beforeEnabled !== enabled) {
+        await insertSurveyStatusHistory(connection, {
+          question_id,
+          answer_id,
+          entity_type: 'answer',
+          before_enabled: beforeEnabled,
+          after_enabled: enabled,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: editedAtClient
+        });
+      }
+
+      await connection.commit();
+      return res.json('Answer updated');
+    }
+
+    if (location_id) {
+      const [locationRows] = await connection.query(
+        'update question_location set enabled = ? where question_id = ? and location_id = ?',
+        [enabled, question_id, location_id]
+      );
+      if (locationRows.affectedRows > 0) {
+        await connection.commit();
+        return res.json('Location updated');
+      }
+
+      await connection.rollback();
+      return res.status(500).json('Could not update location');
+    }
+
+    const [questionRows] = await connection.query(
+      'select enabled from question where id = ? limit 1',
+      [question_id]
+    );
+    if (questionRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json('Question not found');
+    }
+
+    const beforeEnabled = normalizeSurveyEnabled(questionRows[0].enabled) || 'N';
+    await disableQuestions(connection, question_id, enabled);
+    if (beforeEnabled !== enabled) {
+      await insertSurveyStatusHistory(connection, {
+        question_id,
+        answer_id: null,
+        entity_type: 'question',
+        before_enabled: beforeEnabled,
+        after_enabled: enabled,
+        edited_by_user_id: cabecera.id || null,
+        source,
+        edited_at_client: editedAtClient
+      });
+    }
+
+    await connection.commit();
+    return res.json('Question updated');
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    return res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+const SURVEY_EDIT_TEXT_MAX_LENGTH = 500;
+const SURVEY_HISTORY_DEFAULT_LIMIT = 20;
+const SURVEY_HISTORY_MAX_LIMIT = 100;
+const SURVEY_STATUS_SOURCE_SINGLE = 'admin-survey-status-single';
+const SURVEY_STATUS_SOURCE_BATCH = 'admin-survey-status-batch';
+
+function hasSurveyValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function normalizeSurveyEnabled(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toUpperCase();
+  if (normalized !== 'Y' && normalized !== 'N') {
+    return null;
+  }
+
+  return normalized;
+}
+
+function getSurveyStatusLabels(enabled) {
+  if (enabled === 'Y') {
+    return {
+      name: 'Enabled',
+      name_es: 'Habilitada'
+    };
+  }
+
+  return {
+    name: 'Disabled',
+    name_es: 'Deshabilitada'
+  };
+}
+
+async function insertSurveyStatusHistory(connection, payload) {
+  const beforeLabels = getSurveyStatusLabels(payload.before_enabled);
+  const afterLabels = getSurveyStatusLabels(payload.after_enabled);
+
+  const [historyRows] = await connection.query(
+    `insert into survey_edit_history
+      (question_id, answer_id, entity_type, before_name, before_name_es, after_name, after_name_es, edited_by_user_id, source, edited_at_client)
+    values(?,?,?,?,?,?,?,?,?,?)`,
+    [
+      payload.question_id,
+      payload.answer_id,
+      payload.entity_type,
+      beforeLabels.name,
+      beforeLabels.name_es,
+      afterLabels.name,
+      afterLabels.name_es,
+      payload.edited_by_user_id,
+      payload.source,
+      payload.edited_at_client
+    ]
+  );
+
+  if (historyRows.affectedRows === 0) {
+    throw new Error('Could not insert survey status history');
+  }
+}
+
+function parseSurveyPositiveInt(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseSurveyNonNegativeInt(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+  if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseSurveyDateOnly(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function normalizeSurveySnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return null;
+  }
+
+  const name = typeof snapshot.name === 'string' ? snapshot.name.trim() : null;
+  const name_es = typeof snapshot.name_es === 'string' ? snapshot.name_es.trim() : null;
+
+  if (name === null || name_es === null) {
+    return null;
+  }
+
+  return { name, name_es };
+}
+
+function parseSurveyClientDate(value) {
+  if (!hasSurveyValue(value)) {
+    return { value: null };
+  }
+
+  if (typeof value !== 'string') {
+    return { value: null, error: true };
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return { value: null, error: true };
+  }
+
+  return { value: parsed };
+}
+
+function parseSurveySource(value) {
+  if (!hasSurveyValue(value)) {
+    return { value: null };
+  }
+
+  if (typeof value !== 'string') {
+    return { value: null, error: true };
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { value: null };
+  }
+
+  if (trimmed.length > 64) {
+    return { value: null, error: true };
+  }
+
+  return { value: trimmed };
+}
+
+router.post('/survey/edit', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const question_id = parseSurveyPositiveInt(req.body.question_id);
+  const hasAnswerId = req.body.answer_id !== undefined && req.body.answer_id !== null;
+  const answer_id = hasAnswerId ? parseSurveyPositiveInt(req.body.answer_id) : null;
+  const before = normalizeSurveySnapshot(req.body.before);
+  const after = normalizeSurveySnapshot(req.body.after);
+  const sourceParsed = parseSurveySource(req.body.source);
+  const editedAtClientParsed = parseSurveyClientDate(req.body.edited_at);
+
+  if (!question_id) {
+    return res.status(400).json('question_id is required and must be a positive integer');
+  }
+  if (hasAnswerId && !answer_id) {
+    return res.status(400).json('answer_id must be a positive integer when provided');
+  }
+  if (!before || !after) {
+    return res.status(400).json('before and after are required and must include name and name_es');
+  }
+  if (!after.name || !after.name_es) {
+    return res.status(400).json('after.name and after.name_es are required');
+  }
+  if (
+    before.name.length > SURVEY_EDIT_TEXT_MAX_LENGTH ||
+    before.name_es.length > SURVEY_EDIT_TEXT_MAX_LENGTH ||
+    after.name.length > SURVEY_EDIT_TEXT_MAX_LENGTH ||
+    after.name_es.length > SURVEY_EDIT_TEXT_MAX_LENGTH
+  ) {
+    return res.status(400).json(`name and name_es cannot exceed ${SURVEY_EDIT_TEXT_MAX_LENGTH} characters`);
+  }
+  if (sourceParsed.error) {
+    return res.status(400).json('source must be a string with a maximum length of 64 characters');
+  }
+  if (editedAtClientParsed.error) {
+    return res.status(400).json('edited_at must be a valid ISO date string');
+  }
+
+  const noChanges = before.name === after.name && before.name_es === after.name_es;
+  if (noChanges) {
+    return res.status(200).json({
+      history_id: null,
+      question_id,
+      answer_id: answer_id || undefined,
+      updated_at: new Date().toISOString()
+    });
+  }
+
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [questionRows] = await connection.query(
+      'select id from question where id = ? limit 1',
+      [question_id]
+    );
+    if (questionRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json('Question not found');
+    }
+
+    if (answer_id) {
+      const [answerRows] = await connection.query(
+        'select id from answer where question_id = ? and id = ? limit 1',
+        [question_id, answer_id]
+      );
+      if (answerRows.length === 0) {
+        await connection.rollback();
+        return res.status(404).json('Answer not found for the provided question_id');
+      }
+
+      const [answerUpdateRows] = await connection.query(
+        'update answer set name = ?, name_es = ? where question_id = ? and id = ?',
+        [after.name, after.name_es, question_id, answer_id]
+      );
+      if (answerUpdateRows.affectedRows === 0) {
+        throw new Error('Could not update answer');
+      }
+    } else {
+      const [questionUpdateRows] = await connection.query(
+        'update question set name = ?, name_es = ? where id = ?',
+        [after.name, after.name_es, question_id]
+      );
+      if (questionUpdateRows.affectedRows === 0) {
+        throw new Error('Could not update question');
+      }
+    }
+
+    const [historyRows] = await connection.query(
+      `insert into survey_edit_history
+        (question_id, answer_id, entity_type, before_name, before_name_es, after_name, after_name_es, edited_by_user_id, source, edited_at_client)
+       values(?,?,?,?,?,?,?,?,?,?)`,
+      [
+        question_id,
+        answer_id,
+        answer_id ? 'answer' : 'question',
+        before.name,
+        before.name_es,
+        after.name,
+        after.name_es,
+        cabecera.id || null,
+        sourceParsed.value,
+        editedAtClientParsed.value
+      ]
+    );
+    if (historyRows.affectedRows === 0) {
+      throw new Error('Could not insert survey edit history');
+    }
+
+    const history_id = historyRows.insertId;
+    const [insertedHistoryRows] = await connection.query(
+      'select created_at from survey_edit_history where id = ? limit 1',
+      [history_id]
+    );
+    const updated_at = insertedHistoryRows.length > 0 && insertedHistoryRows[0].created_at
+      ? new Date(insertedHistoryRows[0].created_at).toISOString()
+      : new Date().toISOString();
+
+    await connection.commit();
+
+    res.json({
+      history_id,
+      question_id,
+      answer_id: answer_id || undefined,
+      updated_at
+    });
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
+router.get('/survey/history', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const hasQuestionId = hasSurveyValue(req.query.question_id);
+  const hasAnswerId = hasSurveyValue(req.query.answer_id);
+  const hasEditorUserId = hasSurveyValue(req.query.editor_user_id);
+  const hasLimit = hasSurveyValue(req.query.limit);
+  const hasOffset = hasSurveyValue(req.query.offset);
+  const hasFromDate = hasSurveyValue(req.query.from_date);
+  const hasToDate = hasSurveyValue(req.query.to_date);
+
+  const question_id = hasQuestionId ? parseSurveyPositiveInt(req.query.question_id) : null;
+  const answer_id = hasAnswerId ? parseSurveyPositiveInt(req.query.answer_id) : null;
+  const editor_user_id = hasEditorUserId ? parseSurveyPositiveInt(req.query.editor_user_id) : null;
+  const limitParsed = hasLimit ? parseSurveyPositiveInt(req.query.limit) : SURVEY_HISTORY_DEFAULT_LIMIT;
+  const offsetParsed = hasOffset ? parseSurveyNonNegativeInt(req.query.offset) : 0;
+  const from_date = hasFromDate ? parseSurveyDateOnly(req.query.from_date) : null;
+  const to_date = hasToDate ? parseSurveyDateOnly(req.query.to_date) : null;
+  const editor = typeof req.query.editor === 'string' ? req.query.editor.trim() : '';
+
+  if (hasQuestionId && !question_id) {
+    return res.status(400).json('question_id must be a positive integer');
+  }
+  if (hasAnswerId && !answer_id) {
+    return res.status(400).json('answer_id must be a positive integer');
+  }
+  if (hasEditorUserId && !editor_user_id) {
+    return res.status(400).json('editor_user_id must be a positive integer');
+  }
+  if (hasLimit && !limitParsed) {
+    return res.status(400).json('limit must be a positive integer');
+  }
+  if (hasOffset && offsetParsed === null) {
+    return res.status(400).json('offset must be a non-negative integer');
+  }
+  if (hasFromDate && !from_date) {
+    return res.status(400).json('from_date must be in YYYY-MM-DD format');
+  }
+  if (hasToDate && !to_date) {
+    return res.status(400).json('to_date must be in YYYY-MM-DD format');
+  }
+  if (from_date && to_date && from_date > to_date) {
+    return res.status(400).json('from_date must be less than or equal to to_date');
+  }
+
+  const limit = Math.min(limitParsed || SURVEY_HISTORY_DEFAULT_LIMIT, SURVEY_HISTORY_MAX_LIMIT);
+  const offset = offsetParsed || 0;
+  const whereConditions = [];
+  const whereParams = [];
+
+  if (question_id) {
+    whereConditions.push('h.question_id = ?');
+    whereParams.push(question_id);
+  }
+  if (answer_id) {
+    whereConditions.push('h.answer_id = ?');
+    whereParams.push(answer_id);
+  }
+  if (editor_user_id) {
+    whereConditions.push('h.edited_by_user_id = ?');
+    whereParams.push(editor_user_id);
+  }
+  if (editor) {
+    whereConditions.push('(concat(coalesce(u.firstname, ""), " ", coalesce(u.lastname, "")) like ? or u.email like ?)');
+    whereParams.push(`%${editor}%`, `%${editor}%`);
+  }
+  if (from_date) {
+    whereConditions.push('h.created_at >= ?');
+    whereParams.push(`${from_date} 00:00:00`);
+  }
+  if (to_date) {
+    whereConditions.push('h.created_at <= ?');
+    whereParams.push(`${to_date} 23:59:59`);
+  }
+
+  const whereClause = whereConditions.length > 0 ? `where ${whereConditions.join(' and ')}` : '';
+  const fromClause = `
+    from survey_edit_history h
+    left join user u on h.edited_by_user_id = u.id
+    left join question q on h.question_id = q.id
+    left join answer a on h.question_id = a.question_id and h.answer_id = a.id
+  `;
+
+  try {
+    const [items] = await mysqlConnection.promise().query(
+      `select
+        h.id,
+        h.question_id,
+        h.answer_id,
+        h.entity_type,
+        h.before_name,
+        h.before_name_es,
+        h.after_name,
+        h.after_name_es,
+        h.edited_by_user_id,
+        trim(concat(coalesce(u.firstname, ''), ' ', coalesce(u.lastname, ''))) as edited_by_name,
+        u.email as edited_by_email,
+        h.source,
+        h.edited_at_client,
+        h.created_at,
+        q.name as question_name,
+        q.name_es as question_name_es,
+        a.name as answer_name,
+        a.name_es as answer_name_es
+      ${fromClause}
+      ${whereClause}
+      order by h.created_at desc, h.id desc
+      limit ? offset ?`,
+      [...whereParams, limit, offset]
+    );
+
+    const [countRows] = await mysqlConnection.promise().query(
+      `select count(*) as total
+      ${fromClause}
+      ${whereClause}`,
+      whereParams
+    );
+
+    res.json({
+      items,
+      total: countRows[0]?.total || 0,
+      limit,
+      offset
+    });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/survey/history/editors', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      `select
+        h.edited_by_user_id as user_id,
+        trim(concat(coalesce(u.firstname, ''), ' ', coalesce(u.lastname, ''))) as name,
+        u.email
+      from survey_edit_history h
+      left join user u on h.edited_by_user_id = u.id
+      where h.edited_by_user_id is not null
+      group by h.edited_by_user_id, u.firstname, u.lastname, u.email
+      order by name asc, u.email asc`
+    );
+
+    res.json(rows);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/survey/history/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const id = parseSurveyPositiveInt(req.params.id);
+  if (!id) {
+    return res.status(400).json('id must be a positive integer');
+  }
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      `select
+        h.id,
+        h.question_id,
+        h.answer_id,
+        h.entity_type,
+        h.before_name,
+        h.before_name_es,
+        h.after_name,
+        h.after_name_es,
+        h.edited_by_user_id,
+        trim(concat(coalesce(u.firstname, ''), ' ', coalesce(u.lastname, ''))) as edited_by_name,
+        u.email as edited_by_email,
+        h.source,
+        h.edited_at_client,
+        h.created_at,
+        q.name as question_name,
+        q.name_es as question_name_es,
+        a.name as answer_name,
+        a.name_es as answer_name_es
+      from survey_edit_history h
+      left join user u on h.edited_by_user_id = u.id
+      left join question q on h.question_id = q.id
+      left join answer a on h.question_id = a.question_id and h.answer_id = a.id
+      where h.id = ?
+      limit 1`,
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json('Survey edit history not found');
+    }
+
+    res.json(rows[0]);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
   }
 });
 
