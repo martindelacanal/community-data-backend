@@ -3334,91 +3334,245 @@ router.get('/roles', verifyToken, async (req, res) => {
 
 router.post('/onBoard/answers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  console.log("req.body", req.body);
-  if (cabecera.role === 'beneficiary') {
-    const secondForm = req.body;
-    const location_id = req.query.location_id || null;
+  if (cabecera.role !== 'beneficiary') {
+    return res.status(401).json('Unauthorized');
+  }
 
-    try {
+  const secondForm = req.body;
+  if (!Array.isArray(secondForm)) {
+    return res.status(400).json('Body must be an array of answers');
+  }
 
-      // recuperar el client_id de la location_id, para eso se debe revisar primero en la tabla delivery log en la fecha actual, si no hay registros, se debe buscar en la tabla client_location un client_id asociado a la location_id
-      const [rows_client_id] = await mysqlConnection.promise().query('SELECT client_id FROM delivery_log WHERE date(creation_date) = CURDATE() and location_id = ?', [location_id]);
-      let client_id = null;
-      if (rows_client_id.length > 0) {
-        client_id = rows_client_id[0].client_id;
-      } else {
-        const [rows_client_id2] = await mysqlConnection.promise().query('SELECT client_id FROM client_location WHERE location_id = ?', [location_id]);
-        if (rows_client_id2.length > 0) {
-          client_id = rows_client_id2[0].client_id;
-        }
+  const location_id = parseSurveyPositiveInt(req.query.location_id);
+  if (!location_id) {
+    return res.status(400).json('location_id query param is required and must be a positive integer');
+  }
+
+  const user_id = cabecera.id;
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [rows_client_id] = await connection.query(
+      'SELECT client_id FROM delivery_log WHERE date(creation_date) = CURDATE() and location_id = ?',
+      [location_id]
+    );
+    let client_id = null;
+    if (rows_client_id.length > 0) {
+      client_id = rows_client_id[0].client_id;
+    } else {
+      const [rows_client_id2] = await connection.query(
+        'SELECT client_id FROM client_location WHERE location_id = ?',
+        [location_id]
+      );
+      if (rows_client_id2.length > 0) {
+        client_id = rows_client_id2[0].client_id;
       }
+    }
 
-      // save inserted user id
-      const user_id = cabecera.id;
-      // insertar en tabla client_user el client_id y el user_id si client_id no es null
-      if (client_id) {
-        // Check if record already exists before inserting
-        const [existingRows] = await mysqlConnection.promise().query(
-          'SELECT 1 FROM client_user WHERE client_id = ? AND user_id = ?',
+    if (client_id) {
+      const [existingClientUserRows] = await connection.query(
+        'SELECT 1 FROM client_user WHERE client_id = ? AND user_id = ?',
+        [client_id, user_id]
+      );
+      if (existingClientUserRows.length === 0) {
+        await connection.query(
+          'insert into client_user(client_id, user_id) values(?,?)',
           [client_id, user_id]
         );
-
-        if (existingRows.length === 0) {
-          // Only insert if it doesn't exist
-          const [rows_client_user] = await mysqlConnection.promise().query(
-            'insert into client_user(client_id, user_id) values(?,?)',
-            [client_id, user_id]
-          );
-        }
       }
-      // insert user_question, iterate array of questions and insert each question with its answer
-      for (let i = 0; i < secondForm.length; i++) {
-        const question_id = secondForm[i].question_id;
-        const answer_type_id = secondForm[i].answer_type_id;
-        const answer = secondForm[i].answer;
-        var user_question_id = null;
-        if (answer) {
-          switch (answer_type_id) {
-            case 1: // texto
-              const [rows] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_text) values(?,?,?,?)',
-                [user_id, question_id, answer_type_id, answer]);
-              break;
-            case 2: // numero
-              const [rows2] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id, answer_number) values(?,?,?,?)',
-                [user_id, question_id, answer_type_id, answer]);
-              break;
-            case 3: // opcion simple
-              const [rows3] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
-                [user_id, question_id, answer_type_id]);
-              user_question_id = rows3.insertId;
-              const [rows4] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                [user_question_id, answer]);
-              break;
-            case 4: // opcion multiple
-              if (answer.length > 0) {
-                const [rows5] = await mysqlConnection.promise().query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
-                  [user_id, question_id, answer_type_id]);
-                user_question_id = rows5.insertId;
-                for (let j = 0; j < answer.length; j++) {
-                  const answer_id = answer[j];
-                  const [rows6] = await mysqlConnection.promise().query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
-                    [user_question_id, answer_id]);
-                }
-              }
-              break;
-            default:
-              break;
+    }
+
+    for (let i = 0; i < secondForm.length; i++) {
+      const answerItem = secondForm[i] || {};
+      const question_id = parseSurveyPositiveInt(answerItem.question_id);
+      if (!question_id) {
+        await connection.rollback();
+        return res.status(400).json(`question_id invalid at index ${i}`);
+      }
+
+      const sourceParsed = parseSurveySource(answerItem.source);
+      if (sourceParsed.error) {
+        await connection.rollback();
+        return res.status(400).json(`source invalid at index ${i}`);
+      }
+      const submittedAtParsed = parseSurveyClientDate(answerItem.submitted_at);
+      if (submittedAtParsed.error) {
+        await connection.rollback();
+        return res.status(400).json(`submitted_at invalid at index ${i}`);
+      }
+
+      const [questionRows] = await connection.query(
+        `select q.id, q.answer_type_id
+         from question q
+         inner join question_location ql on q.id = ql.question_id
+         where q.id = ? and q.enabled = 'Y' and ql.location_id = ? and ql.enabled = 'Y'
+         limit 1`,
+        [question_id, location_id]
+      );
+      if (questionRows.length === 0) {
+        await connection.rollback();
+        return res.status(400).json(`Question not enabled for location: question_id=${question_id}, location_id=${location_id}`);
+      }
+
+      const answer_type_id = questionRows[0].answer_type_id;
+      const answerTypePayload = parseSurveyNullablePositiveInt(answerItem.answer_type_id);
+      if (answerTypePayload && answerTypePayload !== answer_type_id) {
+        await connection.rollback();
+        return res.status(400).json(`answer_type_id mismatch for question_id=${question_id}`);
+      }
+
+      const answerValue = answerItem.answer;
+      let normalizedTextAnswer = null;
+      let normalizedNumberAnswer = null;
+      let normalizedAnswerIds = [];
+
+      if (answer_type_id === 1) {
+        if (!hasSurveyValue(answerValue)) {
+          continue;
+        }
+        normalizedTextAnswer = String(answerValue).trim();
+        if (!normalizedTextAnswer) {
+          continue;
+        }
+      } else if (answer_type_id === 2) {
+        if (!hasSurveyValue(answerValue)) {
+          continue;
+        }
+        const parsedNumber = Number(answerValue);
+        if (!Number.isFinite(parsedNumber)) {
+          await connection.rollback();
+          return res.status(400).json(`Invalid numeric answer for question_id=${question_id}`);
+        }
+        normalizedNumberAnswer = parsedNumber;
+      } else if (answer_type_id === 3) {
+        if (!hasSurveyValue(answerValue)) {
+          continue;
+        }
+        const answerId = parseSurveyPositiveInt(answerValue);
+        if (!answerId) {
+          await connection.rollback();
+          return res.status(400).json(`Invalid single-choice answer for question_id=${question_id}`);
+        }
+        const [validAnswerRows] = await connection.query(
+          'select id from answer where question_id = ? and id = ? and enabled = ? limit 1',
+          [question_id, answerId, 'Y']
+        );
+        if (validAnswerRows.length === 0) {
+          await connection.rollback();
+          return res.status(400).json(`Answer not enabled for question_id=${question_id}, answer_id=${answerId}`);
+        }
+        normalizedAnswerIds = [answerId];
+      } else if (answer_type_id === 4) {
+        if (!hasSurveyValue(answerValue)) {
+          continue;
+        }
+        if (!Array.isArray(answerValue)) {
+          await connection.rollback();
+          return res.status(400).json(`Invalid multi-choice answer for question_id=${question_id}`);
+        }
+        const seenAnswerIds = new Set();
+        for (let j = 0; j < answerValue.length; j++) {
+          const parsedAnswerId = parseSurveyPositiveInt(answerValue[j]);
+          if (!parsedAnswerId) {
+            await connection.rollback();
+            return res.status(400).json(`Invalid multi-choice answer_id at index ${i}:${j}`);
+          }
+          if (!seenAnswerIds.has(parsedAnswerId)) {
+            seenAnswerIds.add(parsedAnswerId);
+            normalizedAnswerIds.push(parsedAnswerId);
+          }
+        }
+        if (normalizedAnswerIds.length === 0) {
+          continue;
+        }
+
+        const answerPlaceholders = normalizedAnswerIds.map(() => '?').join(',');
+        const [validMultiAnswerRows] = await connection.query(
+          `select id from answer where question_id = ? and enabled = ? and id in (${answerPlaceholders})`,
+          [question_id, 'Y', ...normalizedAnswerIds]
+        );
+        const validAnswerIdSet = new Set(validMultiAnswerRows.map(row => row.id));
+        const invalidAnswerIds = normalizedAnswerIds.filter(answerId => !validAnswerIdSet.has(answerId));
+        if (invalidAnswerIds.length > 0) {
+          await connection.rollback();
+          return res.status(400).json(`Answer(s) not enabled for question_id=${question_id}: ${invalidAnswerIds.join(', ')}`);
+        }
+      } else {
+        await connection.rollback();
+        return res.status(400).json(`Unsupported answer_type_id for question_id=${question_id}`);
+      }
+
+      const existingUserQuestion = await getLatestUserQuestionRow(connection, user_id, question_id);
+      const previousSnapshot = await getUserQuestionSnapshot(connection, existingUserQuestion);
+      let userQuestionId = null;
+
+      if (existingUserQuestion) {
+        const [updateRows] = await connection.query(
+          `update user_question
+           set answer_type_id = ?, answer_text = ?, answer_number = ?
+           where id = ?`,
+          [answer_type_id, normalizedTextAnswer, normalizedNumberAnswer, existingUserQuestion.id]
+        );
+        if (updateRows.affectedRows === 0) {
+          throw new Error(`Could not update user_question for question_id=${question_id}`);
+        }
+        userQuestionId = existingUserQuestion.id;
+
+        await connection.query(
+          'delete from user_question_answer where user_question_id = ?',
+          [userQuestionId]
+        );
+      } else {
+        const [insertRows] = await connection.query(
+          'insert into user_question(user_id, question_id, answer_type_id, answer_text, answer_number) values(?,?,?,?,?)',
+          [user_id, question_id, answer_type_id, normalizedTextAnswer, normalizedNumberAnswer]
+        );
+        if (insertRows.affectedRows === 0) {
+          throw new Error(`Could not insert user_question for question_id=${question_id}`);
+        }
+        userQuestionId = insertRows.insertId;
+      }
+
+      if (answer_type_id === 3 || answer_type_id === 4) {
+        for (let j = 0; j < normalizedAnswerIds.length; j++) {
+          const [insertAnswerRows] = await connection.query(
+            'insert into user_question_answer(user_question_id, answer_id) values(?,?)',
+            [userQuestionId, normalizedAnswerIds[j]]
+          );
+          if (insertAnswerRows.affectedRows === 0) {
+            throw new Error(`Could not insert user_question_answer for question_id=${question_id}`);
           }
         }
       }
-      res.status(200).json('Data inserted successfully');
 
-    } catch (err) {
-      console.log(err);
-      res.status(500).json('Internal server error');
+      if (existingUserQuestion) {
+        const updatedUserQuestion = await getLatestUserQuestionRow(connection, user_id, question_id);
+        const newSnapshot = await getUserQuestionSnapshot(connection, updatedUserQuestion);
+        await insertBeneficiaryAnswerHistory(connection, {
+          user_id,
+          location_id,
+          question_id,
+          old_answer_json: previousSnapshot ? JSON.stringify(previousSnapshot) : null,
+          new_answer_json: JSON.stringify(newSnapshot),
+          source: sourceParsed.value || BENEFICIARY_ANSWER_SOURCE_DEFAULT,
+          submitted_at_client: submittedAtParsed.value
+        });
+      }
     }
-  } else {
-    res.status(401).json('Unauthorized');
+
+    await connection.commit();
+    return res.status(200).json('Data inserted successfully');
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    return res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 });
 
@@ -4169,10 +4323,16 @@ router.post('/survey/question', verifyToken, async (req, res) => {
 
       await connection.beginTransaction();
 
+      const [nextQuestionOrderRows] = await connection.query(
+        'select ifnull(max(`order`), 0) + 1 as next_order from question'
+      );
+      const nextQuestionOrder = nextQuestionOrderRows[0]?.next_order || 1;
+      const questionOrder = parseSurveyPositiveInt(req.body.order) || nextQuestionOrder;
+
       // Insertar la pregunta
       const [rows] = await connection.query(
-        'insert into question(name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id) values(?,?,?,?,?)',
-        [name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id]
+        'insert into question(name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, `order`) values(?,?,?,?,?,?)',
+        [name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, questionOrder]
       );
       if (rows.affectedRows === 0) {
         throw new Error('Could not insert question');
@@ -4181,10 +4341,12 @@ router.post('/survey/question', verifyToken, async (req, res) => {
 
       // Si answer_type_id es 3 o 4, insertar las respuestas
       if (answer_type_id === 3 || answer_type_id === 4) {
-        for (let answer of answers) {
+        for (let i = 0; i < answers.length; i++) {
+          const answer = answers[i];
+          const answerOrder = parseSurveyPositiveInt(answer.order) || (i + 1);
           const [rows] = await connection.query(
-            'insert into answer(question_id, id, name, name_es) values(?,?,?,?)',
-            [question_id, answer.id, answer.name, answer.name_es]
+            'insert into answer(question_id, id, name, name_es, `order`) values(?,?,?,?,?)',
+            [question_id, answer.id, answer.name, answer.name_es, answerOrder]
           );
           if (rows.affectedRows === 0) {
             throw new Error('Could not insert answer');
@@ -4427,11 +4589,28 @@ router.post('/survey/answer', verifyToken, async (req, res) => {
 
       await connection.beginTransaction();
 
+      const [questionRows] = await connection.query(
+        'select id from question where id = ? limit 1',
+        [question_id]
+      );
+      if (questionRows.length === 0) {
+        await connection.rollback();
+        return res.status(404).json('Question not found');
+      }
+
+      const [maxOrderRows] = await connection.query(
+        'select ifnull(max(`order`), 0) as max_order from answer where question_id = ?',
+        [question_id]
+      );
+      let nextAnswerOrder = (maxOrderRows[0]?.max_order || 0) + 1;
+
       // El array de answers tiene id, name y name_es, agregar a la tabla answer
       for (let answer of answers) {
+        const answerOrder = parseSurveyPositiveInt(answer.order) || nextAnswerOrder;
+        nextAnswerOrder += 1;
         const [rows] = await connection.query(
-          'insert into answer(question_id, id, name, name_es) values(?,?,?,?)',
-          [question_id, answer.id, answer.name, answer.name_es]
+          'insert into answer(question_id, id, name, name_es, `order`) values(?,?,?,?,?)',
+          [question_id, answer.id, answer.name, answer.name_es, answerOrder]
         );
         if (rows.affectedRows === 0) {
           throw new Error('Could not insert answer');
@@ -4751,6 +4930,8 @@ const SURVEY_HISTORY_DEFAULT_LIMIT = 20;
 const SURVEY_HISTORY_MAX_LIMIT = 100;
 const SURVEY_STATUS_SOURCE_SINGLE = 'admin-survey-status-single';
 const SURVEY_STATUS_SOURCE_BATCH = 'admin-survey-status-batch';
+const SURVEY_REORDER_SOURCE_DEFAULT = 'admin-survey-ui';
+const BENEFICIARY_ANSWER_SOURCE_DEFAULT = 'beneficiary-onboard-ui';
 
 function hasSurveyValue(value) {
   return value !== undefined && value !== null && value !== '';
@@ -4783,10 +4964,7 @@ function getSurveyStatusLabels(enabled) {
   };
 }
 
-async function insertSurveyStatusHistory(connection, payload) {
-  const beforeLabels = getSurveyStatusLabels(payload.before_enabled);
-  const afterLabels = getSurveyStatusLabels(payload.after_enabled);
-
+async function insertSurveyHistoryRecord(connection, payload) {
   const [historyRows] = await connection.query(
     `insert into survey_edit_history
       (question_id, answer_id, entity_type, before_name, before_name_es, after_name, after_name_es, edited_by_user_id, source, edited_at_client)
@@ -4795,10 +4973,10 @@ async function insertSurveyStatusHistory(connection, payload) {
       payload.question_id,
       payload.answer_id,
       payload.entity_type,
-      beforeLabels.name,
-      beforeLabels.name_es,
-      afterLabels.name,
-      afterLabels.name_es,
+      payload.before_name,
+      payload.before_name_es,
+      payload.after_name,
+      payload.after_name_es,
       payload.edited_by_user_id,
       payload.source,
       payload.edited_at_client
@@ -4806,8 +4984,41 @@ async function insertSurveyStatusHistory(connection, payload) {
   );
 
   if (historyRows.affectedRows === 0) {
-    throw new Error('Could not insert survey status history');
+    throw new Error('Could not insert survey history');
   }
+}
+
+async function insertSurveyStatusHistory(connection, payload) {
+  const beforeLabels = getSurveyStatusLabels(payload.before_enabled);
+  const afterLabels = getSurveyStatusLabels(payload.after_enabled);
+
+  await insertSurveyHistoryRecord(connection, {
+    question_id: payload.question_id,
+    answer_id: payload.answer_id,
+    entity_type: payload.entity_type,
+    before_name: beforeLabels.name,
+    before_name_es: beforeLabels.name_es,
+    after_name: afterLabels.name,
+    after_name_es: afterLabels.name_es,
+    edited_by_user_id: payload.edited_by_user_id,
+    source: payload.source,
+    edited_at_client: payload.edited_at_client
+  });
+}
+
+async function insertSurveyReorderHistory(connection, payload) {
+  await insertSurveyHistoryRecord(connection, {
+    question_id: payload.question_id,
+    answer_id: payload.answer_id || null,
+    entity_type: payload.entity_type,
+    before_name: payload.before_name,
+    before_name_es: payload.before_name_es,
+    after_name: payload.after_name,
+    after_name_es: payload.after_name_es,
+    edited_by_user_id: payload.edited_by_user_id,
+    source: payload.source,
+    edited_at_client: payload.edited_at_client
+  });
 }
 
 function parseSurveyPositiveInt(value) {
@@ -4822,6 +5033,13 @@ function parseSurveyPositiveInt(value) {
     return null;
   }
   return parsed;
+}
+
+function parseSurveyNullablePositiveInt(value) {
+  if (!hasSurveyValue(value)) {
+    return null;
+  }
+  return parseSurveyPositiveInt(value);
 }
 
 function parseSurveyNonNegativeInt(value) {
@@ -4906,6 +5124,76 @@ function parseSurveySource(value) {
   }
 
   return { value: trimmed };
+}
+
+async function getLatestUserQuestionRow(connection, userId, questionId) {
+  const [rows] = await connection.query(
+    `select id, user_id, question_id, answer_type_id, answer_text, answer_number
+     from user_question
+     where user_id = ? and question_id = ?
+     order by id desc
+     limit 1`,
+    [userId, questionId]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+async function getUserQuestionSnapshot(connection, userQuestionRow) {
+  if (!userQuestionRow) {
+    return null;
+  }
+
+  const snapshot = {
+    user_question_id: userQuestionRow.id,
+    user_id: userQuestionRow.user_id,
+    question_id: userQuestionRow.question_id,
+    answer_type_id: userQuestionRow.answer_type_id,
+    answer: null
+  };
+
+  if (userQuestionRow.answer_type_id === 1) {
+    snapshot.answer = userQuestionRow.answer_text;
+    return snapshot;
+  }
+
+  if (userQuestionRow.answer_type_id === 2) {
+    snapshot.answer = userQuestionRow.answer_number;
+    return snapshot;
+  }
+
+  const [answerRows] = await connection.query(
+    'select answer_id from user_question_answer where user_question_id = ? order by answer_id asc',
+    [userQuestionRow.id]
+  );
+  const answerIds = answerRows.map(row => row.answer_id);
+  if (userQuestionRow.answer_type_id === 3) {
+    snapshot.answer = answerIds.length > 0 ? answerIds[0] : null;
+  } else {
+    snapshot.answer = answerIds;
+  }
+
+  return snapshot;
+}
+
+async function insertBeneficiaryAnswerHistory(connection, payload) {
+  const [rows] = await connection.query(
+    `insert into beneficiary_answer_history
+      (user_id, location_id, question_id, old_answer_json, new_answer_json, source, submitted_at_client)
+     values(?,?,?,?,?,?,?)`,
+    [
+      payload.user_id,
+      payload.location_id,
+      payload.question_id,
+      payload.old_answer_json,
+      payload.new_answer_json,
+      payload.source,
+      payload.submitted_at_client
+    ]
+  );
+
+  if (rows.affectedRows === 0) {
+    throw new Error('Could not insert beneficiary answer history');
+  }
 }
 
 router.post('/survey/edit', verifyToken, async (req, res) => {
@@ -5044,6 +5332,380 @@ router.post('/survey/edit', verifyToken, async (req, res) => {
     }
     console.log(err);
     res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
+router.post('/survey/reorder', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const body = req.body || {};
+  const sourceParsed = parseSurveySource(body.source);
+  const reorderedAtParsed = parseSurveyClientDate(body.reordered_at);
+  if (sourceParsed.error) {
+    return res.status(400).json('source must be a string with a maximum length of 64 characters');
+  }
+  if (reorderedAtParsed.error) {
+    return res.status(400).json('reordered_at must be a valid ISO date string');
+  }
+
+  const hasQuestionsField = Object.prototype.hasOwnProperty.call(body, 'questions');
+  const hasAnswersField = Object.prototype.hasOwnProperty.call(body, 'answers');
+  if ((hasQuestionsField && !Array.isArray(body.questions)) || (hasAnswersField && !Array.isArray(body.answers))) {
+    return res.status(400).json('questions and answers must be arrays when provided');
+  }
+
+  const questionsInput = Array.isArray(body.questions) ? body.questions : [];
+  const answersInput = Array.isArray(body.answers) ? body.answers : [];
+  if (questionsInput.length + answersInput.length === 0) {
+    return res.status(400).json('At least one question or answer change is required');
+  }
+
+  const normalizedQuestions = [];
+  const seenQuestionIds = new Set();
+  for (let i = 0; i < questionsInput.length; i++) {
+    const questionItem = questionsInput[i] || {};
+    const questionId = parseSurveyPositiveInt(questionItem.question_id);
+    const questionOrder = parseSurveyPositiveInt(questionItem.order);
+    const dependsOnQuestionId = parseSurveyNullablePositiveInt(questionItem.depends_on_question_id);
+    const dependsOnAnswerId = parseSurveyNullablePositiveInt(questionItem.depends_on_answer_id);
+
+    if (!questionId || !questionOrder) {
+      return res.status(400).json(`questions[${i}] is invalid`);
+    }
+    if ((dependsOnQuestionId && !dependsOnAnswerId) || (!dependsOnQuestionId && dependsOnAnswerId)) {
+      return res.status(400).json(`questions[${i}] has invalid dependency pairing`);
+    }
+    if (seenQuestionIds.has(questionId)) {
+      return res.status(400).json(`Duplicate question_id in payload: ${questionId}`);
+    }
+    seenQuestionIds.add(questionId);
+    normalizedQuestions.push({
+      question_id: questionId,
+      order: questionOrder,
+      depends_on_question_id: dependsOnQuestionId,
+      depends_on_answer_id: dependsOnAnswerId
+    });
+  }
+
+  const normalizedAnswers = [];
+  const seenAnswerKeys = new Set();
+  for (let i = 0; i < answersInput.length; i++) {
+    const answerItem = answersInput[i] || {};
+    const questionId = parseSurveyPositiveInt(answerItem.question_id);
+    const answerId = parseSurveyPositiveInt(answerItem.answer_id);
+    const answerOrder = parseSurveyPositiveInt(answerItem.order);
+    if (!questionId || !answerId || !answerOrder) {
+      return res.status(400).json(`answers[${i}] is invalid`);
+    }
+
+    const answerKey = `${questionId}:${answerId}`;
+    if (seenAnswerKeys.has(answerKey)) {
+      return res.status(400).json(`Duplicate answer in payload: question_id=${questionId}, answer_id=${answerId}`);
+    }
+    seenAnswerKeys.add(answerKey);
+    normalizedAnswers.push({
+      question_id: questionId,
+      answer_id: answerId,
+      order: answerOrder
+    });
+  }
+
+  const source = sourceParsed.value || SURVEY_REORDER_SOURCE_DEFAULT;
+  const reorderedAtClient = reorderedAtParsed.value;
+
+  const formatOrderLabel = (orderValue, isSpanish = false) => isSpanish
+    ? `Orden: ${orderValue}`
+    : `Order: ${orderValue}`;
+  const formatDependencyLabel = (dependsQuestionId, dependsAnswerId, isSpanish = false) => {
+    if (!dependsQuestionId) {
+      return isSpanish ? 'Sin dependencia' : 'No dependency';
+    }
+    return isSpanish
+      ? `Depende de pregunta ${dependsQuestionId}, respuesta ${dependsAnswerId}`
+      : `Depends on question ${dependsQuestionId}, answer ${dependsAnswerId}`;
+  };
+
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [questionRows] = await connection.query(
+      'select id, `order`, depends_on_question_id, depends_on_answer_id from question'
+    );
+    const questionById = new Map();
+    for (let i = 0; i < questionRows.length; i++) {
+      const row = questionRows[i];
+      questionById.set(row.id, {
+        question_id: row.id,
+        order: row.order,
+        depends_on_question_id: row.depends_on_question_id,
+        depends_on_answer_id: row.depends_on_answer_id
+      });
+    }
+
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      if (!questionById.has(questionItem.question_id)) {
+        await connection.rollback();
+        return res.status(404).json(`Question not found: ${questionItem.question_id}`);
+      }
+    }
+
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      if (questionItem.depends_on_question_id && questionItem.depends_on_answer_id) {
+        const [dependencyAnswerRows] = await connection.query(
+          'select id from answer where question_id = ? and id = ? limit 1',
+          [questionItem.depends_on_question_id, questionItem.depends_on_answer_id]
+        );
+        if (dependencyAnswerRows.length === 0) {
+          await connection.rollback();
+          return res.status(400).json(`Invalid dependency in question_id=${questionItem.question_id}`);
+        }
+      }
+    }
+
+    const finalQuestionById = new Map();
+    for (const [questionId, questionData] of questionById.entries()) {
+      finalQuestionById.set(questionId, {
+        question_id: questionData.question_id,
+        order: questionData.order,
+        depends_on_question_id: questionData.depends_on_question_id,
+        depends_on_answer_id: questionData.depends_on_answer_id
+      });
+    }
+
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      const finalQuestion = finalQuestionById.get(questionItem.question_id);
+      finalQuestion.order = questionItem.order;
+      finalQuestion.depends_on_question_id = questionItem.depends_on_question_id;
+      finalQuestion.depends_on_answer_id = questionItem.depends_on_answer_id;
+    }
+
+    const orphanedQuestionSet = new Set();
+    if (normalizedQuestions.length > 0) {
+      for (const [questionId, questionData] of finalQuestionById.entries()) {
+        if (questionData.depends_on_question_id) {
+          const parentQuestion = finalQuestionById.get(questionData.depends_on_question_id);
+          const isOrphan = !parentQuestion || questionData.order <= parentQuestion.order;
+          if (isOrphan) {
+            questionData.depends_on_question_id = null;
+            questionData.depends_on_answer_id = null;
+            orphanedQuestionSet.add(questionId);
+          }
+        }
+      }
+
+      const questionOrderToId = new Map();
+      for (const [questionId, questionData] of finalQuestionById.entries()) {
+        if (questionOrderToId.has(questionData.order)) {
+          await connection.rollback();
+          return res.status(400).json(
+            `Duplicate question order detected in final state: ${questionData.order} (question_id ${questionOrderToId.get(questionData.order)} and ${questionId})`
+          );
+        }
+        questionOrderToId.set(questionData.order, questionId);
+      }
+    }
+
+    const affectedAnswerQuestionIds = [...new Set(normalizedAnswers.map(item => item.question_id))];
+    const answerByKey = new Map();
+    const answerOrdersByQuestion = new Map();
+    if (affectedAnswerQuestionIds.length > 0) {
+      const answerQuestionPlaceholders = affectedAnswerQuestionIds.map(() => '?').join(',');
+      const [answerRows] = await connection.query(
+        `select question_id, id as answer_id, \`order\` as answer_order
+         from answer
+         where question_id in (${answerQuestionPlaceholders})`,
+        affectedAnswerQuestionIds
+      );
+
+      for (let i = 0; i < answerRows.length; i++) {
+        const answerRow = answerRows[i];
+        const key = `${answerRow.question_id}:${answerRow.answer_id}`;
+        answerByKey.set(key, answerRow);
+
+        if (!answerOrdersByQuestion.has(answerRow.question_id)) {
+          answerOrdersByQuestion.set(answerRow.question_id, new Map());
+        }
+        answerOrdersByQuestion.get(answerRow.question_id).set(answerRow.answer_id, answerRow.answer_order);
+      }
+
+      for (let i = 0; i < normalizedAnswers.length; i++) {
+        const answerItem = normalizedAnswers[i];
+        const key = `${answerItem.question_id}:${answerItem.answer_id}`;
+        if (!answerByKey.has(key)) {
+          await connection.rollback();
+          return res.status(404).json(`Answer not found: question_id=${answerItem.question_id}, answer_id=${answerItem.answer_id}`);
+        }
+      }
+
+      for (let i = 0; i < normalizedAnswers.length; i++) {
+        const answerItem = normalizedAnswers[i];
+        answerOrdersByQuestion.get(answerItem.question_id).set(answerItem.answer_id, answerItem.order);
+      }
+
+      for (const [questionId, answerOrderMap] of answerOrdersByQuestion.entries()) {
+        const orderToAnswerId = new Map();
+        for (const [answerId, answerOrder] of answerOrderMap.entries()) {
+          if (orderToAnswerId.has(answerOrder)) {
+            await connection.rollback();
+            return res.status(400).json(
+              `Duplicate answer order detected for question_id=${questionId}: order ${answerOrder} (answer_id ${orderToAnswerId.get(answerOrder)} and ${answerId})`
+            );
+          }
+          orderToAnswerId.set(answerOrder, answerId);
+        }
+      }
+    }
+
+    let updatedQuestions = 0;
+    let updatedAnswers = 0;
+    const payloadQuestionIdSet = new Set(normalizedQuestions.map(item => item.question_id));
+
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      const beforeQuestion = questionById.get(questionItem.question_id);
+      const afterQuestion = finalQuestionById.get(questionItem.question_id);
+
+      const orderChanged = beforeQuestion.order !== afterQuestion.order;
+      const dependencyChanged =
+        (beforeQuestion.depends_on_question_id || null) !== (afterQuestion.depends_on_question_id || null) ||
+        (beforeQuestion.depends_on_answer_id || null) !== (afterQuestion.depends_on_answer_id || null);
+
+      if (!orderChanged && !dependencyChanged) {
+        continue;
+      }
+
+      const [questionUpdateRows] = await connection.query(
+        'update question set `order` = ?, depends_on_question_id = ?, depends_on_answer_id = ? where id = ?',
+        [afterQuestion.order, afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, questionItem.question_id]
+      );
+      if (questionUpdateRows.affectedRows === 0) {
+        throw new Error(`Could not update question ${questionItem.question_id}`);
+      }
+      updatedQuestions += 1;
+
+      if (orderChanged) {
+        await insertSurveyReorderHistory(connection, {
+          question_id: questionItem.question_id,
+          answer_id: null,
+          entity_type: 'question',
+          before_name: formatOrderLabel(beforeQuestion.order),
+          before_name_es: formatOrderLabel(beforeQuestion.order, true),
+          after_name: formatOrderLabel(afterQuestion.order),
+          after_name_es: formatOrderLabel(afterQuestion.order, true),
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: reorderedAtClient
+        });
+      }
+
+      if (dependencyChanged) {
+        await insertSurveyReorderHistory(connection, {
+          question_id: questionItem.question_id,
+          answer_id: null,
+          entity_type: 'question',
+          before_name: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id),
+          before_name_es: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id, true),
+          after_name: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id),
+          after_name_es: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, true),
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: reorderedAtClient
+        });
+      }
+    }
+
+    for (const orphanedQuestionId of orphanedQuestionSet) {
+      if (payloadQuestionIdSet.has(orphanedQuestionId)) {
+        continue;
+      }
+      const beforeQuestion = questionById.get(orphanedQuestionId);
+      const afterQuestion = finalQuestionById.get(orphanedQuestionId);
+      const dependencyChanged =
+        (beforeQuestion.depends_on_question_id || null) !== (afterQuestion.depends_on_question_id || null) ||
+        (beforeQuestion.depends_on_answer_id || null) !== (afterQuestion.depends_on_answer_id || null);
+      if (!dependencyChanged) {
+        continue;
+      }
+
+      const [questionUpdateRows] = await connection.query(
+        'update question set depends_on_question_id = ?, depends_on_answer_id = ? where id = ?',
+        [afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, orphanedQuestionId]
+      );
+      if (questionUpdateRows.affectedRows === 0) {
+        throw new Error(`Could not update orphaned question ${orphanedQuestionId}`);
+      }
+      updatedQuestions += 1;
+
+      await insertSurveyReorderHistory(connection, {
+        question_id: orphanedQuestionId,
+        answer_id: null,
+        entity_type: 'question',
+        before_name: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id),
+        before_name_es: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id, true),
+        after_name: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id),
+        after_name_es: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, true),
+        edited_by_user_id: cabecera.id || null,
+        source,
+        edited_at_client: reorderedAtClient
+      });
+    }
+
+    for (let i = 0; i < normalizedAnswers.length; i++) {
+      const answerItem = normalizedAnswers[i];
+      const answerKey = `${answerItem.question_id}:${answerItem.answer_id}`;
+      const beforeAnswer = answerByKey.get(answerKey);
+      const beforeOrder = beforeAnswer.answer_order;
+      if (beforeOrder === answerItem.order) {
+        continue;
+      }
+
+      const [answerUpdateRows] = await connection.query(
+        'update answer set `order` = ? where question_id = ? and id = ?',
+        [answerItem.order, answerItem.question_id, answerItem.answer_id]
+      );
+      if (answerUpdateRows.affectedRows === 0) {
+        throw new Error(`Could not update answer order question_id=${answerItem.question_id} answer_id=${answerItem.answer_id}`);
+      }
+      updatedAnswers += 1;
+
+      await insertSurveyReorderHistory(connection, {
+        question_id: answerItem.question_id,
+        answer_id: answerItem.answer_id,
+        entity_type: 'answer',
+        before_name: formatOrderLabel(beforeOrder),
+        before_name_es: formatOrderLabel(beforeOrder, true),
+        after_name: formatOrderLabel(answerItem.order),
+        after_name_es: formatOrderLabel(answerItem.order, true),
+        edited_by_user_id: cabecera.id || null,
+        source,
+        edited_at_client: reorderedAtClient
+      });
+    }
+
+    await connection.commit();
+    return res.json({
+      updated_questions: updatedQuestions,
+      updated_answers: updatedAnswers,
+      orphaned_questions: [...orphanedQuestionSet],
+      updated_at: new Date().toISOString()
+    });
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    return res.status(500).json('Internal server error');
   } finally {
     if (connection) {
       connection.release();
@@ -5275,6 +5937,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
       const query = `SELECT q.id as question_id, 
                   q.name AS question_name, 
                   q.name_es AS question_name_es, 
+                  q.\`order\` AS question_order,
                   q.answer_type_id,
                   ${language === 'en' ? 'at.name' : 'at.name_es'}  AS answer_type_name,
                   q.depends_on_question_id,
@@ -5283,6 +5946,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
                   a.id as answer_id, 
                   a.name AS answer_name,
                   a.name_es AS answer_name_es,
+                  a.\`order\` AS answer_order,
                   a.enabled as answer_enabled,
                   l.id as location_id, 
                   l.community_city AS location_name,
@@ -5292,11 +5956,12 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
                   LEFT JOIN answer as a ON q.id = a.question_id
                   LEFT JOIN question_location as ql ON q.id = ql.question_id
                   LEFT JOIN location as l ON ql.location_id = l.id
-                  ORDER BY q.id, a.id, ql.location_id ASC`;
+                  ORDER BY q.\`order\` ASC, q.id ASC, a.\`order\` ASC, a.id ASC, ql.location_id ASC`;
       const [rows] = await mysqlConnection.promise().query(query);
       var questions = [];
       var question_id = 0;
       var answer_id = 0;
+      var location_id = 0;
       var stop_save_locations = false;
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -5305,6 +5970,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
             id: row.question_id,
             name: row.question_name,
             name_es: row.question_name_es,
+            order: row.question_order,
             depends_on_question_id: row.depends_on_question_id,
             depends_on_answer_id: row.depends_on_answer_id,
             answer_type_id: row.answer_type_id,
@@ -5325,6 +5991,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
             id: row.answer_id,
             name: row.answer_name,
             name_es: row.answer_name_es,
+            order: row.answer_order,
             enabled: row.answer_enabled,
             loading: 'N',
           });
@@ -5366,51 +6033,102 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
   if (cabecera.role === 'beneficiary') {
     const language = req.query.language || 'en';
     const location_id = req.query.location_id || null;
+    const includeGenealogy = String(req.query.include_genealogy || 'false').toLowerCase() === 'true';
     try {
-      const query = `
-      WITH RECURSIVE answered_or_dependent_questions AS (
-        SELECT question_id FROM user_question WHERE user_id = ${cabecera.id}
-        UNION ALL
-        SELECT q.id FROM question q INNER JOIN answered_or_dependent_questions adq ON q.depends_on_question_id = adq.question_id
-      )
-      SELECT q.id as question_id, 
-        ${language === 'en' ? 'q.name' : 'q.name_es'} AS question_name, 
-        q.answer_type_id,
-        q.depends_on_question_id,
-        q.depends_on_answer_id,
-        a.id as answer_id, 
-        ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
-      FROM question as q
-      INNER JOIN question_location as ql ON q.id = ql.question_id
-      LEFT JOIN answer as a ON q.id = a.question_id
-      WHERE q.enabled = 'Y' AND (a.enabled = 'Y' OR a.id IS NULL) AND (ql.location_id = ? AND ql.enabled = 'Y')
-      AND q.id NOT IN (SELECT question_id FROM answered_or_dependent_questions)
-      ORDER BY q.id, a.id ASC`;
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+          q.id as question_id,
+          ${language === 'en' ? 'q.name' : 'q.name_es'} AS question_name,
+          q.\`order\` AS question_order,
+          q.answer_type_id,
+          q.depends_on_question_id,
+          q.depends_on_answer_id,
+          a.id as answer_id,
+          a.\`order\` AS answer_order,
+          ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
+        FROM question as q
+        INNER JOIN question_location as ql ON q.id = ql.question_id
+        LEFT JOIN answer as a ON q.id = a.question_id AND a.enabled = 'Y'
+        WHERE q.enabled = 'Y' AND (ql.location_id = ? AND ql.enabled = 'Y')
+        ORDER BY q.\`order\` ASC, q.id ASC, a.\`order\` ASC, a.id ASC`,
+        [location_id]
+      );
 
-      const [rows] = await mysqlConnection.promise().query(query, [location_id]);
-      var questions = [];
-      var question_id = 0;
+      const questionById = new Map();
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
-        if (row.question_id !== question_id) {
-          questions.push({
+        if (!questionById.has(row.question_id)) {
+          questionById.set(row.question_id, {
             id: row.question_id,
             name: row.question_name,
+            order: row.question_order,
             depends_on_question_id: row.depends_on_question_id,
             depends_on_answer_id: row.depends_on_answer_id,
             answer_type_id: row.answer_type_id,
             answers: []
           });
-          question_id = row.question_id;
         }
+
         if (row.answer_id) {
-          questions[questions.length - 1].answers.push({
+          questionById.get(row.question_id).answers.push({
             question_id: row.question_id,
             id: row.answer_id,
+            order: row.answer_order,
             name: row.answer_name
           });
         }
       }
+
+      const [answeredRows] = await mysqlConnection.promise().query(
+        'select distinct question_id from user_question where user_id = ?',
+        [cabecera.id]
+      );
+      const answeredQuestionIds = new Set(answeredRows.map(row => row.question_id));
+
+      const pendingQuestionIds = [];
+      for (const questionId of questionById.keys()) {
+        if (!answeredQuestionIds.has(questionId)) {
+          pendingQuestionIds.push(questionId);
+        }
+      }
+
+      const selectedQuestionIds = new Set();
+      if (includeGenealogy) {
+        for (let i = 0; i < pendingQuestionIds.length; i++) {
+          let currentQuestionId = pendingQuestionIds[i];
+          const visited = new Set();
+          while (currentQuestionId && !visited.has(currentQuestionId)) {
+            visited.add(currentQuestionId);
+            selectedQuestionIds.add(currentQuestionId);
+
+            const currentQuestion = questionById.get(currentQuestionId);
+            if (!currentQuestion || !currentQuestion.depends_on_question_id) {
+              break;
+            }
+            currentQuestionId = currentQuestion.depends_on_question_id;
+          }
+        }
+      } else {
+        for (let i = 0; i < pendingQuestionIds.length; i++) {
+          selectedQuestionIds.add(pendingQuestionIds[i]);
+        }
+      }
+
+      const questions = [...questionById.values()]
+        .filter(question => selectedQuestionIds.has(question.id))
+        .sort((a, b) => {
+          if (a.order !== b.order) return a.order - b.order;
+          return a.id - b.id;
+        })
+        .map(question => ({
+          ...question,
+          requires_reanswer: includeGenealogy ? true : false,
+          previously_answered: answeredQuestionIds.has(question.id),
+          answers: [...question.answers].sort((a, b) => {
+            if (a.order !== b.order) return a.order - b.order;
+            return a.id - b.id;
+          })
+        }));
 
       res.json(questions);
 
@@ -5441,10 +6159,12 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
     // get all questions and answers from table question and answer, if language === 'es' then get name_es, else get name
     const query = `SELECT q.id as question_id, 
                   ${language === 'en' ? 'q.name' : 'q.name_es'} AS question_name, 
+                  q.\`order\` AS question_order,
                   q.answer_type_id,
                   q.depends_on_question_id,
                   q.depends_on_answer_id,
                   a.id as answer_id, 
+                  a.\`order\` AS answer_order,
                   ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
                   FROM question as q
                   ${location_id ? 'INNER JOIN question_location as ql ON q.id = ql.question_id' : ''}
@@ -5452,8 +6172,9 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
                   WHERE q.enabled = 'Y' AND (a.enabled = 'Y' OR a.id IS NULL) 
                   ${location_id ? 'AND (ql.location_id = ? AND ql.enabled = \'Y\')' : 'AND q.answer_type_id IN (3, 4)'}
                   ${client_questions}
-                  ORDER BY q.id, a.id ASC`;
-    const [rows] = await mysqlConnection.promise().query(query, [location_id]);
+                  ORDER BY q.\`order\` ASC, q.id ASC, a.\`order\` ASC, a.id ASC`;
+    const queryParams = location_id ? [location_id] : [];
+    const [rows] = await mysqlConnection.promise().query(query, queryParams);
     var questions = [];
     var question_id = 0;
     for (let i = 0; i < rows.length; i++) {
@@ -5462,6 +6183,7 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
         questions.push({
           id: row.question_id,
           name: row.question_name,
+          order: row.question_order,
           depends_on_question_id: row.depends_on_question_id,
           depends_on_answer_id: row.depends_on_answer_id,
           answer_type_id: row.answer_type_id,
@@ -5473,6 +6195,7 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
         questions[questions.length - 1].answers.push({
           question_id: row.question_id,
           id: row.answer_id,
+          order: row.answer_order,
           name: row.answer_name
         });
       }
