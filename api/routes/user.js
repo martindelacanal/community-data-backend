@@ -2732,7 +2732,7 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
           // Verificar si el usuario se registró hoy y no tiene delivery aprobado
           const [check_user_conditions] = await mysqlConnection.promise().query(
             `SELECT 
-                DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles')) as registered_today,
+                DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
                 (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
               FROM user WHERE id = ?`,
             [receiving_user_id, receiving_user_id]
@@ -2898,7 +2898,7 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
         // Verificar si el usuario se registró hoy y no tiene delivery aprobado
         const [check_user_conditions] = await mysqlConnection.promise().query(
           `SELECT 
-              DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles')) as registered_today,
+              DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
               (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
             FROM user WHERE id = ?`,
           [receiving_user_id, receiving_user_id]
@@ -3079,7 +3079,7 @@ router.get('/locations', verifyToken, async (req, res) => {
         whereClause = ` where id IN (
           SELECT location_id 
           FROM calendar_event 
-          WHERE date = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
+          WHERE date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
           AND enabled = 'Y'
         )`;
       }
@@ -3128,7 +3128,7 @@ router.get('/locations', verifyToken, async (req, res) => {
               query += ` AND id IN (
                 SELECT location_id 
                 FROM calendar_event 
-                WHERE date = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
+                WHERE date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
                 AND enabled = 'Y'
               )`;
             }
@@ -3401,6 +3401,32 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
         await connection.rollback();
         return res.status(400).json(`submitted_at invalid at index ${i}`);
       }
+      if (hasSurveyValue(answerItem.order) && !parseSurveyPositiveInt(answerItem.order)) {
+        await connection.rollback();
+        return res.status(400).json(`order invalid at index ${i}`);
+      }
+
+      if (hasSurveyValue(answerItem.requires_reanswer) && parseSurveyBoolean(answerItem.requires_reanswer) === null) {
+        await connection.rollback();
+        return res.status(400).json(`requires_reanswer invalid at index ${i}`);
+      }
+      if (hasSurveyValue(answerItem.previously_answered) && parseSurveyBoolean(answerItem.previously_answered) === null) {
+        await connection.rollback();
+        return res.status(400).json(`previously_answered invalid at index ${i}`);
+      }
+
+      if (hasSurveyValue(answerItem.genealogy_question_ids)) {
+        if (!Array.isArray(answerItem.genealogy_question_ids)) {
+          await connection.rollback();
+          return res.status(400).json(`genealogy_question_ids invalid at index ${i}`);
+        }
+        for (let j = 0; j < answerItem.genealogy_question_ids.length; j++) {
+          if (!parseSurveyPositiveInt(answerItem.genealogy_question_ids[j])) {
+            await connection.rollback();
+            return res.status(400).json(`genealogy_question_ids invalid at index ${i}:${j}`);
+          }
+        }
+      }
 
       const [questionRows] = await connection.query(
         `select q.id, q.answer_type_id
@@ -3646,7 +3672,7 @@ router.post('/onBoard', verifyToken, async (req, res) => {
         const [rows5_client_id] = await mysqlConnection.promise().query(
           `select dl.client_id
           from delivery_log as dl
-          where date(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
+          where date(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
           AND dl.operation_id = 3 
           AND dl.client_id IS NOT NULL 
           AND dl.location_id = ?
@@ -3679,7 +3705,7 @@ router.post('/onBoard', verifyToken, async (req, res) => {
              FROM delivery_beneficiary AS db
              WHERE db.delivering_user_id IS NULL
                AND db.receiving_user_id = ?
-               AND DATE(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))
+               AND DATE(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
              ORDER BY db.creation_date DESC
              LIMIT 1`,
             [user_id]
@@ -3687,7 +3713,7 @@ router.post('/onBoard', verifyToken, async (req, res) => {
           // ver los client_id del receiving_user_id en la tabla client_user y si no existe el client_id, insertarlo
           const [rows2_client_id] = await mysqlConnection.promise().query(
             `SELECT cu.client_id, cu.checked, 
-                    IF(DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(cu.creation_date, '+00:00', 'America/Los_Angeles')), 'Y', 'N') as client_same_date
+                    IF(DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(cu.creation_date, '+00:00', 'America/Los_Angeles')), 'Y', 'N') as client_same_date
            FROM client_user AS cu 
            WHERE cu.user_id = ?`,
             [user_id]
@@ -4311,154 +4337,411 @@ router.get('/location/exists/search', verifyToken, async (req, res) => {
 router.post('/survey/question', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin') {
-    const connection = await mysqlConnection.promise().getConnection();
-    try {
-      const { name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, answers, locations } = req.body;
+  if (cabecera.role !== 'admin') {
+    res.status(401).json('Unauthorized');
+    return;
+  }
 
-      // si depends_on_question_id tiene valor, entonces depends_on_answer_id debe tener valor
-      if (depends_on_question_id && !depends_on_answer_id) {
-        throw new Error('depends_on_answer_id is required when depends_on_question_id is provided');
+  const body = req.body || {};
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const name_es = typeof body.name_es === 'string' ? body.name_es.trim() : '';
+  const answer_type_id = parseSurveyPositiveInt(body.answer_type_id);
+  const depends_on_question_id = parseSurveyNullablePositiveInt(body.depends_on_question_id);
+  const depends_on_answer_id = parseSurveyNullablePositiveInt(body.depends_on_answer_id);
+  const requestedQuestionOrder = parseSurveyNullablePositiveInt(body.order);
+
+  if (!name || !name_es) {
+    return res.status(400).json('name and name_es are required');
+  }
+  if (!answer_type_id) {
+    return res.status(400).json('answer_type_id is required and must be a positive integer');
+  }
+  if (!depends_on_question_id && depends_on_answer_id) {
+    return res.status(400).json(buildSurveyErrorPayload(
+      'SURVEY_DEP_ANSWER_INVALID',
+      'depends_on_answer_id must be null when depends_on_question_id is null',
+      { depends_on_answer_id }
+    ));
+  }
+  if (depends_on_question_id && !depends_on_answer_id) {
+    return res.status(400).json(buildSurveyErrorPayload(
+      'SURVEY_DEP_ANSWER_REQUIRED',
+      'depends_on_answer_id is required when depends_on_question_id is provided',
+      { depends_on_question_id }
+    ));
+  }
+
+  const answersInput = Array.isArray(body.answers) ? body.answers : [];
+  const normalizedAnswers = [];
+  if (isSurveySelectableAnswerType(answer_type_id)) {
+    if (!Array.isArray(body.answers) || body.answers.length === 0) {
+      return res.status(400).json('answers is required for single or multiple choice questions');
+    }
+
+    const seenAnswerIds = new Set();
+    const seenAnswerOrders = new Set();
+    let nextAnswerOrder = 1;
+    for (let i = 0; i < answersInput.length; i++) {
+      const answerItem = answersInput[i] || {};
+      const answerId = parseSurveyPositiveInt(answerItem.id);
+      const answerName = typeof answerItem.name === 'string' ? answerItem.name.trim() : '';
+      const answerNameEs = typeof answerItem.name_es === 'string' ? answerItem.name_es.trim() : '';
+      const answerOrder = parseSurveyPositiveInt(answerItem.order) || nextAnswerOrder;
+      nextAnswerOrder += 1;
+
+      if (!answerId || !answerName || !answerNameEs) {
+        return res.status(400).json(`answers[${i}] is invalid`);
+      }
+      if (seenAnswerIds.has(answerId)) {
+        return res.status(400).json(`Duplicate answer id: ${answerId}`);
+      }
+      if (seenAnswerOrders.has(answerOrder)) {
+        return res.status(400).json(`Duplicate answer order: ${answerOrder}`);
       }
 
-      await connection.beginTransaction();
+      seenAnswerIds.add(answerId);
+      seenAnswerOrders.add(answerOrder);
+      normalizedAnswers.push({
+        id: answerId,
+        name: answerName,
+        name_es: answerNameEs,
+        order: answerOrder
+      });
+    }
+  }
 
-      const [nextQuestionOrderRows] = await connection.query(
-        'select ifnull(max(`order`), 0) + 1 as next_order from question'
+  const locationsInput = Array.isArray(body.locations) ? body.locations : [];
+  const normalizedLocationIds = [];
+  const seenLocationIds = new Set();
+  for (let i = 0; i < locationsInput.length; i++) {
+    const rawLocationId = locationsInput[i];
+    if (rawLocationId === 0 || rawLocationId === '0') {
+      continue;
+    }
+    const locationId = parseSurveyPositiveInt(rawLocationId);
+    if (!locationId) {
+      return res.status(400).json(`locations[${i}] must be a positive integer`);
+    }
+    if (!seenLocationIds.has(locationId)) {
+      seenLocationIds.add(locationId);
+      normalizedLocationIds.push(locationId);
+    }
+  }
+
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    if (normalizedLocationIds.length > 0) {
+      const locationPlaceholders = normalizedLocationIds.map(() => '?').join(',');
+      const [validLocationRows] = await connection.query(
+        `select id from location where id in (${locationPlaceholders})`,
+        normalizedLocationIds
       );
-      const nextQuestionOrder = nextQuestionOrderRows[0]?.next_order || 1;
-      const questionOrder = parseSurveyPositiveInt(req.body.order) || nextQuestionOrder;
-
-      // Insertar la pregunta
-      const [rows] = await connection.query(
-        'insert into question(name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, `order`) values(?,?,?,?,?,?)',
-        [name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, questionOrder]
-      );
-      if (rows.affectedRows === 0) {
-        throw new Error('Could not insert question');
-      }
-      const question_id = rows.insertId;
-
-      // Si answer_type_id es 3 o 4, insertar las respuestas
-      if (answer_type_id === 3 || answer_type_id === 4) {
-        for (let i = 0; i < answers.length; i++) {
-          const answer = answers[i];
-          const answerOrder = parseSurveyPositiveInt(answer.order) || (i + 1);
-          const [rows] = await connection.query(
-            'insert into answer(question_id, id, name, name_es, `order`) values(?,?,?,?,?)',
-            [question_id, answer.id, answer.name, answer.name_es, answerOrder]
-          );
-          if (rows.affectedRows === 0) {
-            throw new Error('Could not insert answer');
-          }
-        }
-      }
-
-      // insertar las ubicaciones (si hay) y agregarlas a todas las preguntas padres
-      if (locations && locations.length > 0) {
-
-        // si hay valor de 0 en el array de locations, quitarlo
-        const index = locations.indexOf(0);
-        if (index > -1) {
-          locations.splice(index, 1);
-        }
-
-        await addLocationsToQuestionAndParent(connection, question_id, locations);
-      }
-
-      await connection.commit();
-
-      // devolver question_id como id
-      res.json({ id: question_id });
-    } catch (err) {
-      if (connection) {
+      const validLocationIdSet = new Set(validLocationRows.map(row => row.id));
+      const invalidLocationIds = normalizedLocationIds.filter(id => !validLocationIdSet.has(id));
+      if (invalidLocationIds.length > 0) {
         await connection.rollback();
-      }
-      console.log(err);
-      res.status(500).json('Internal server error');
-    } finally {
-      if (connection) {
-        connection.release();
+        return res.status(400).json(`Invalid locations: ${invalidLocationIds.join(', ')}`);
       }
     }
-  } else {
-    res.status(401).json('Unauthorized');
+
+    const [nextQuestionOrderRows] = await connection.query(
+      'select ifnull(max(`order`), 0) + 1 as next_order from question'
+    );
+    const nextQuestionOrder = nextQuestionOrderRows[0]?.next_order || 1;
+    const questionOrder = requestedQuestionOrder || nextQuestionOrder;
+
+    if (depends_on_question_id) {
+      const [parentRows] = await connection.query(
+        'select id, enabled, answer_type_id, `order` from question where id = ? limit 1',
+        [depends_on_question_id]
+      );
+      if (parentRows.length === 0) {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_NOT_FOUND',
+          'Parent question was not found',
+          { depends_on_question_id }
+        ));
+      }
+
+      const parent = parentRows[0];
+      if ((normalizeSurveyEnabled(parent.enabled) || 'N') !== 'Y') {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_DISABLED',
+          'Parent question must be enabled',
+          { depends_on_question_id }
+        ));
+      }
+      if (!isSurveySelectableAnswerType(parent.answer_type_id)) {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_INVALID_TYPE',
+          'Parent question must be single choice or multiple choice',
+          { depends_on_question_id, parent_answer_type_id: parent.answer_type_id }
+        ));
+      }
+
+      const [parentAnswerRows] = await connection.query(
+        'select enabled from answer where question_id = ? and id = ? limit 1',
+        [depends_on_question_id, depends_on_answer_id]
+      );
+      if (parentAnswerRows.length === 0 || (normalizeSurveyEnabled(parentAnswerRows[0].enabled) || 'N') !== 'Y') {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_ANSWER_INVALID',
+          'Parent answer must exist and be enabled',
+          { depends_on_question_id, depends_on_answer_id }
+        ));
+      }
+
+      if (parent.order >= questionOrder) {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_ORDER_INVALID',
+          'Parent question order must be strictly lower than child question order',
+          {
+            depends_on_question_id,
+            parent_order: parent.order,
+            child_order: questionOrder
+          }
+        ));
+      }
+
+      if (normalizedLocationIds.length > 0) {
+        const [parentLocationRows] = await connection.query(
+          'select location_id from question_location where question_id = ? and enabled = ?',
+          [depends_on_question_id, 'Y']
+        );
+        const parentLocationSet = new Set(parentLocationRows.map(row => row.location_id));
+        const missingLocationIds = normalizedLocationIds.filter(locationId => !parentLocationSet.has(locationId));
+        if (missingLocationIds.length > 0) {
+          await connection.rollback();
+          return res.status(400).json(buildSurveyErrorPayload(
+            'SURVEY_DEP_LOCATION_MISMATCH',
+            'Parent question must be enabled in all child locations',
+            {
+              depends_on_question_id,
+              missing_location_ids: missingLocationIds.sort((a, b) => a - b)
+            }
+          ));
+        }
+      }
+    }
+
+    const [rows] = await connection.query(
+      'insert into question(name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, `order`) values(?,?,?,?,?,?)',
+      [name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, questionOrder]
+    );
+    if (rows.affectedRows === 0) {
+      throw new Error('Could not insert question');
+    }
+    const question_id = rows.insertId;
+
+    for (let i = 0; i < normalizedAnswers.length; i++) {
+      const answer = normalizedAnswers[i];
+      const [insertAnswerRows] = await connection.query(
+        'insert into answer(question_id, id, name, name_es, `order`) values(?,?,?,?,?)',
+        [question_id, answer.id, answer.name, answer.name_es, answer.order]
+      );
+      if (insertAnswerRows.affectedRows === 0) {
+        throw new Error('Could not insert answer');
+      }
+    }
+
+    if (normalizedLocationIds.length > 0) {
+      const insertValues = normalizedLocationIds.map(() => '(?,?,?)').join(',');
+      const insertParams = [];
+      for (let i = 0; i < normalizedLocationIds.length; i++) {
+        insertParams.push(question_id, normalizedLocationIds[i], 'Y');
+      }
+      await connection.query(
+        `insert into question_location(question_id, location_id, enabled) values ${insertValues}`,
+        insertParams
+      );
+    }
+
+    await connection.commit();
+    res.json({ id: question_id });
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 });
 
-async function addLocationsToQuestionAndParent(connection, question_id, locations) {
-  // Obtener las ubicaciones existentes para la pregunta actual
-  const [existingLocations] = await connection.query(
-    'select location_id from question_location where question_id = ?',
-    [question_id]
-  );
-  const existingLocationIds = existingLocations.map(row => row.location_id);
+async function addLocationsToQuestionAndParent(connection, question_id, locations, touchedQuestionIds = new Set(), visited = new Set()) {
+  const normalizedQuestionId = parseSurveyPositiveInt(question_id);
+  if (!normalizedQuestionId || visited.has(normalizedQuestionId)) {
+    return touchedQuestionIds;
+  }
+  visited.add(normalizedQuestionId);
+  touchedQuestionIds.add(normalizedQuestionId);
 
-  // Agregar las ubicaciones a la pregunta actual, omitiendo las que ya existen
-  for (let location_id of locations) {
-    if (!existingLocationIds.includes(location_id)) {
-      const [rows] = await connection.query(
-        'insert into question_location(question_id, location_id) values(?,?)',
-        [question_id, location_id]
+  const [existingLocations] = await connection.query(
+    'select location_id, enabled from question_location where question_id = ?',
+    [normalizedQuestionId]
+  );
+  const existingLocationEnabledById = new Map();
+  for (let i = 0; i < existingLocations.length; i++) {
+    const row = existingLocations[i];
+    existingLocationEnabledById.set(row.location_id, normalizeSurveyEnabled(row.enabled) || 'N');
+  }
+
+  for (let i = 0; i < locations.length; i++) {
+    const locationId = locations[i];
+    const existingEnabled = existingLocationEnabledById.get(locationId);
+
+    if (existingEnabled === undefined) {
+      const [insertRows] = await connection.query(
+        'insert into question_location(question_id, location_id, enabled) values(?,?,?)',
+        [normalizedQuestionId, locationId, 'Y']
       );
-      if (rows.affectedRows === 0) {
+      if (insertRows.affectedRows === 0) {
         throw new Error('Could not insert location');
+      }
+      continue;
+    }
+
+    if (existingEnabled !== 'Y') {
+      const [updateRows] = await connection.query(
+        'update question_location set enabled = ? where question_id = ? and location_id = ?',
+        ['Y', normalizedQuestionId, locationId]
+      );
+      if (updateRows.affectedRows === 0) {
+        throw new Error('Could not re-enable question location');
       }
     }
   }
 
-  // Buscar la pregunta padre
   const [rows] = await connection.query(
     'select depends_on_question_id from question where id = ?',
-    [question_id]
+    [normalizedQuestionId]
   );
-  const parentQuestionId = rows[0]?.depends_on_question_id;
+  const parentQuestionId = parseSurveyNullablePositiveInt(rows[0]?.depends_on_question_id);
 
-  // Si existe una pregunta padre, agregar las ubicaciones a la pregunta padre
   if (parentQuestionId) {
-    await addLocationsToQuestionAndParent(connection, parentQuestionId, locations);
+    await addLocationsToQuestionAndParent(connection, parentQuestionId, locations, touchedQuestionIds, visited);
   }
+
+  return touchedQuestionIds;
 }
 
 router.post('/survey/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin') {
-    const connection = await mysqlConnection.promise().getConnection();
-    try {
-      const { question_id, locations } = req.body;
+  if (cabecera.role !== 'admin') {
+    res.status(401).json('Unauthorized');
+    return;
+  }
 
-      // si question_id y locations tienen valor
-      if (!question_id || !locations) {
-        throw new Error('Missing question_id or locations');
-      }
+  const body = req.body || {};
+  const question_id = parseSurveyPositiveInt(body.question_id);
+  const locationsInput = body.locations;
 
-      // si hay valor de 0 en el array de locations, quitarlo
-      const index = locations.indexOf(0);
-      if (index > -1) {
-        locations.splice(index, 1);
-      }
+  if (!question_id) {
+    return res.status(400).json('question_id is required and must be a positive integer');
+  }
+  if (!Array.isArray(locationsInput)) {
+    return res.status(400).json('locations is required and must be an array');
+  }
 
-      await connection.beginTransaction();
+  const normalizedLocationIds = [];
+  const seenLocationIds = new Set();
+  for (let i = 0; i < locationsInput.length; i++) {
+    const rawLocationId = locationsInput[i];
+    if (rawLocationId === 0 || rawLocationId === '0') {
+      continue;
+    }
 
-      // Agregar las ubicaciones a la pregunta y a todas sus preguntas padres
-      await addLocationsToQuestionAndParent(connection, question_id, locations);
+    const locationId = parseSurveyPositiveInt(rawLocationId);
+    if (!locationId) {
+      return res.status(400).json(`locations[${i}] must be a positive integer`);
+    }
+    if (!seenLocationIds.has(locationId)) {
+      seenLocationIds.add(locationId);
+      normalizedLocationIds.push(locationId);
+    }
+  }
 
-      await connection.commit();
-      res.json('Locations inserted');
-    } catch (err) {
-      if (connection) {
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [questionRows] = await connection.query(
+      'select id from question where id = ? limit 1',
+      [question_id]
+    );
+    if (questionRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json('Question not found');
+    }
+
+    if (normalizedLocationIds.length > 0) {
+      const locationPlaceholders = normalizedLocationIds.map(() => '?').join(',');
+      const [validLocationRows] = await connection.query(
+        `select id from location where id in (${locationPlaceholders})`,
+        normalizedLocationIds
+      );
+      const validLocationIdSet = new Set(validLocationRows.map(row => row.id));
+      const invalidLocationIds = normalizedLocationIds.filter(id => !validLocationIdSet.has(id));
+      if (invalidLocationIds.length > 0) {
         await connection.rollback();
-      }
-      console.log(err);
-      res.status(500).json('Internal server error');
-    } finally {
-      if (connection) {
-        connection.release();
+        return res.status(400).json(`Invalid locations: ${invalidLocationIds.join(', ')}`);
       }
     }
-  } else {
-    res.status(401).json('Unauthorized');
+
+    if (normalizedLocationIds.length > 0) {
+      await addLocationsToQuestionAndParent(connection, question_id, normalizedLocationIds);
+    }
+
+    const [allQuestionRows] = await connection.query(
+      'select id, `order`, enabled, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
+    );
+    const questionStateById = new Map();
+    const allQuestionIds = [];
+    for (let i = 0; i < allQuestionRows.length; i++) {
+      const row = allQuestionRows[i];
+      questionStateById.set(row.id, {
+        question_id: row.id,
+        order: row.order,
+        enabled: row.enabled,
+        answer_type_id: row.answer_type_id,
+        depends_on_question_id: row.depends_on_question_id,
+        depends_on_answer_id: row.depends_on_answer_id
+      });
+      allQuestionIds.push(row.id);
+    }
+
+    const locationSetByQuestionId = await getEnabledSurveyLocationsByQuestionIds(connection, allQuestionIds);
+    const dependencyValidationError = await validateSurveyDependencyGraphState(connection, questionStateById, {
+      locationSetByQuestionId
+    });
+    if (dependencyValidationError) {
+      await connection.rollback();
+      return res.status(dependencyValidationError.status).json(dependencyValidationError.payload);
+    }
+
+    await connection.commit();
+    res.json('Locations inserted');
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 });
 
@@ -4498,13 +4781,14 @@ router.post('/survey/location/bulk', verifyToken, async (req, res) => {
     await connection.beginTransaction();
 
     const [questionRows] = await connection.query(
-      'select id from question where id = ? limit 1',
+      'select id, depends_on_question_id from question where id = ? limit 1',
       [question_id]
     );
     if (questionRows.length === 0) {
       await connection.rollback();
       return res.status(404).json('Question not found');
     }
+    const dependsOnQuestionId = parseSurveyNullablePositiveInt(questionRows[0].depends_on_question_id);
 
     if (normalizedLocationIds.length > 0) {
       const locationPlaceholders = normalizedLocationIds.map(() => '?').join(',');
@@ -4519,6 +4803,82 @@ router.post('/survey/location/bulk', verifyToken, async (req, res) => {
         await connection.rollback();
         return res.status(400).json(`Invalid location_ids: ${invalidLocationIds.join(', ')}`);
       }
+    }
+
+    if (dependsOnQuestionId) {
+      const [parentRows] = await connection.query(
+        'select id from question where id = ? limit 1',
+        [dependsOnQuestionId]
+      );
+      if (parentRows.length === 0) {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_NOT_FOUND',
+          'Parent question was not found',
+          { question_id, depends_on_question_id: dependsOnQuestionId }
+        ));
+      }
+
+      const parentLocationMap = await getEnabledSurveyLocationsByQuestionIds(connection, [dependsOnQuestionId]);
+      const parentLocationSet = parentLocationMap.get(dependsOnQuestionId) || new Set();
+      const missingLocationIds = normalizedLocationIds.filter(locationId => !parentLocationSet.has(locationId));
+      if (missingLocationIds.length > 0) {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_LOCATION_MISMATCH',
+          'Parent question must be enabled in all child locations',
+          {
+            question_id,
+            depends_on_question_id: dependsOnQuestionId,
+            missing_location_ids: missingLocationIds.sort((a, b) => a - b)
+          }
+        ));
+      }
+    }
+
+    const [childrenRows] = await connection.query(
+      'select id from question where depends_on_question_id = ?',
+      [question_id]
+    );
+    if (childrenRows.length > 0) {
+      const finalLocationSet = new Set(normalizedLocationIds);
+      const childQuestionIds = childrenRows.map(row => row.id);
+      const childLocationMap = await getEnabledSurveyLocationsByQuestionIds(connection, childQuestionIds);
+      const conflictingChildren = [];
+
+      for (let i = 0; i < childQuestionIds.length; i++) {
+        const childQuestionId = childQuestionIds[i];
+        const childLocationSet = childLocationMap.get(childQuestionId) || new Set();
+        const missingLocationIds = [];
+        for (const locationId of childLocationSet.values()) {
+          if (!finalLocationSet.has(locationId)) {
+            missingLocationIds.push(locationId);
+          }
+        }
+        if (missingLocationIds.length > 0) {
+          missingLocationIds.sort((a, b) => a - b);
+          conflictingChildren.push({
+            question_id: childQuestionId,
+            missing_location_ids: missingLocationIds
+          });
+        }
+      }
+
+      if (conflictingChildren.length > 0) {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_CHILDREN_LOCATION_CONFLICT',
+          'One or more child questions would lose required parent locations',
+          {
+            question_id,
+            conflicting_children: conflictingChildren
+          }
+        ));
+      }
+    }
+
+    if (normalizedLocationIds.length > 0) {
+      const locationPlaceholders = normalizedLocationIds.map(() => '?').join(',');
 
       const [existingQuestionLocationRows] = await connection.query(
         `select location_id from question_location where question_id = ? and location_id in (${locationPlaceholders})`,
@@ -4553,6 +4913,33 @@ router.post('/survey/location/bulk', verifyToken, async (req, res) => {
         'update question_location set enabled = ? where question_id = ?',
         ['N', question_id]
       );
+    }
+
+    const [allQuestionRows] = await connection.query(
+      'select id, `order`, enabled, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
+    );
+    const questionStateById = new Map();
+    const allQuestionIds = [];
+    for (let i = 0; i < allQuestionRows.length; i++) {
+      const row = allQuestionRows[i];
+      questionStateById.set(row.id, {
+        question_id: row.id,
+        order: row.order,
+        enabled: row.enabled,
+        answer_type_id: row.answer_type_id,
+        depends_on_question_id: row.depends_on_question_id,
+        depends_on_answer_id: row.depends_on_answer_id
+      });
+      allQuestionIds.push(row.id);
+    }
+
+    const locationSetByQuestionId = await getEnabledSurveyLocationsByQuestionIds(connection, allQuestionIds);
+    const dependencyValidationError = await validateSurveyDependencyGraphState(connection, questionStateById, {
+      locationSetByQuestionId
+    });
+    if (dependencyValidationError) {
+      await connection.rollback();
+      return res.status(dependencyValidationError.status).json(dependencyValidationError.payload);
     }
 
     await connection.commit();
@@ -4967,8 +5354,12 @@ function getSurveyStatusLabels(enabled) {
 async function insertSurveyHistoryRecord(connection, payload) {
   const [historyRows] = await connection.query(
     `insert into survey_edit_history
-      (question_id, answer_id, entity_type, before_name, before_name_es, after_name, after_name_es, edited_by_user_id, source, edited_at_client)
-    values(?,?,?,?,?,?,?,?,?,?)`,
+      (question_id, answer_id, entity_type, before_name, before_name_es, after_name, after_name_es,
+       before_order, after_order,
+       before_depends_on_question_id, after_depends_on_question_id,
+       before_depends_on_answer_id, after_depends_on_answer_id,
+       edited_by_user_id, source, edited_at_client)
+    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       payload.question_id,
       payload.answer_id,
@@ -4977,6 +5368,12 @@ async function insertSurveyHistoryRecord(connection, payload) {
       payload.before_name_es,
       payload.after_name,
       payload.after_name_es,
+      payload.before_order ?? null,
+      payload.after_order ?? null,
+      payload.before_depends_on_question_id ?? null,
+      payload.after_depends_on_question_id ?? null,
+      payload.before_depends_on_answer_id ?? null,
+      payload.after_depends_on_answer_id ?? null,
       payload.edited_by_user_id,
       payload.source,
       payload.edited_at_client
@@ -5015,6 +5412,12 @@ async function insertSurveyReorderHistory(connection, payload) {
     before_name_es: payload.before_name_es,
     after_name: payload.after_name,
     after_name_es: payload.after_name_es,
+    before_order: payload.before_order ?? null,
+    after_order: payload.after_order ?? null,
+    before_depends_on_question_id: payload.before_depends_on_question_id ?? null,
+    after_depends_on_question_id: payload.after_depends_on_question_id ?? null,
+    before_depends_on_answer_id: payload.before_depends_on_answer_id ?? null,
+    after_depends_on_answer_id: payload.after_depends_on_answer_id ?? null,
     edited_by_user_id: payload.edited_by_user_id,
     source: payload.source,
     edited_at_client: payload.edited_at_client
@@ -5040,6 +5443,24 @@ function parseSurveyNullablePositiveInt(value) {
     return null;
   }
   return parseSurveyPositiveInt(value);
+}
+
+function parseSurveyBoolean(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+
+  return null;
 }
 
 function parseSurveyNonNegativeInt(value) {
@@ -5124,6 +5545,293 @@ function parseSurveySource(value) {
   }
 
   return { value: trimmed };
+}
+
+function buildSurveyErrorPayload(error_code, message, details = null) {
+  const payload = { error_code, message };
+  if (details && typeof details === 'object' && Object.keys(details).length > 0) {
+    payload.details = details;
+  }
+  return payload;
+}
+
+function isSurveySelectableAnswerType(answerTypeId) {
+  return answerTypeId === 3 || answerTypeId === 4;
+}
+
+async function getEnabledSurveyLocationsByQuestionIds(connection, questionIds) {
+  const locationMap = new Map();
+  const normalizedQuestionIds = [...new Set((questionIds || []).filter(id => parseSurveyPositiveInt(id)))];
+  for (let i = 0; i < normalizedQuestionIds.length; i++) {
+    locationMap.set(normalizedQuestionIds[i], new Set());
+  }
+
+  if (normalizedQuestionIds.length === 0) {
+    return locationMap;
+  }
+
+  const placeholders = normalizedQuestionIds.map(() => '?').join(',');
+  const [rows] = await connection.query(
+    `select question_id, location_id
+     from question_location
+     where enabled = 'Y' and question_id in (${placeholders})`,
+    normalizedQuestionIds
+  );
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!locationMap.has(row.question_id)) {
+      locationMap.set(row.question_id, new Set());
+    }
+    locationMap.get(row.question_id).add(row.location_id);
+  }
+
+  return locationMap;
+}
+
+async function getSurveyAnswerEnabledStateByQuestionIds(connection, questionIds) {
+  const answerStateByKey = new Map();
+  const normalizedQuestionIds = [...new Set((questionIds || []).filter(id => parseSurveyPositiveInt(id)))];
+  if (normalizedQuestionIds.length === 0) {
+    return answerStateByKey;
+  }
+
+  const placeholders = normalizedQuestionIds.map(() => '?').join(',');
+  const [rows] = await connection.query(
+    `select question_id, id as answer_id, enabled
+     from answer
+     where question_id in (${placeholders})`,
+    normalizedQuestionIds
+  );
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    answerStateByKey.set(
+      `${row.question_id}:${row.answer_id}`,
+      normalizeSurveyEnabled(row.enabled) || 'N'
+    );
+  }
+
+  return answerStateByKey;
+}
+
+function findSurveyDependencyCycle(questionStateById) {
+  const stateByQuestionId = new Map(); // 0: unvisited, 1: visiting, 2: visited
+  const path = [];
+  const indexByQuestionId = new Map();
+  let cyclePath = null;
+
+  const dfs = (questionId) => {
+    stateByQuestionId.set(questionId, 1);
+    indexByQuestionId.set(questionId, path.length);
+    path.push(questionId);
+
+    const currentQuestion = questionStateById.get(questionId);
+    const parentQuestionId = parseSurveyNullablePositiveInt(currentQuestion?.depends_on_question_id);
+
+    if (parentQuestionId && questionStateById.has(parentQuestionId)) {
+      const parentState = stateByQuestionId.get(parentQuestionId) || 0;
+      if (parentState === 0) {
+        if (dfs(parentQuestionId)) {
+          return true;
+        }
+      } else if (parentState === 1) {
+        const cycleStartIndex = indexByQuestionId.get(parentQuestionId) || 0;
+        cyclePath = [...path.slice(cycleStartIndex), parentQuestionId];
+        return true;
+      }
+    }
+
+    path.pop();
+    indexByQuestionId.delete(questionId);
+    stateByQuestionId.set(questionId, 2);
+    return false;
+  };
+
+  for (const [questionId] of questionStateById.entries()) {
+    if ((stateByQuestionId.get(questionId) || 0) === 0) {
+      if (dfs(questionId)) {
+        return cyclePath;
+      }
+    }
+  }
+
+  return null;
+}
+
+async function validateSurveyDependencyGraphState(connection, questionStateById, options = {}) {
+  const dependencyItems = [];
+  const parentQuestionIds = new Set();
+
+  for (const [questionId, questionData] of questionStateById.entries()) {
+    const dependsOnQuestionId = parseSurveyNullablePositiveInt(questionData.depends_on_question_id);
+    const dependsOnAnswerId = parseSurveyNullablePositiveInt(questionData.depends_on_answer_id);
+
+    if (!dependsOnQuestionId) {
+      if (dependsOnAnswerId) {
+        return {
+          status: 400,
+          payload: buildSurveyErrorPayload(
+            'SURVEY_DEP_ANSWER_INVALID',
+            'depends_on_answer_id must be null when depends_on_question_id is null',
+            { question_id: questionId, depends_on_answer_id: dependsOnAnswerId }
+          )
+        };
+      }
+      continue;
+    }
+
+    if (!dependsOnAnswerId) {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_DEP_ANSWER_REQUIRED',
+          'depends_on_answer_id is required when depends_on_question_id is provided',
+          { question_id: questionId, depends_on_question_id: dependsOnQuestionId }
+        )
+      };
+    }
+
+    dependencyItems.push({
+      question_id: questionId,
+      depends_on_question_id: dependsOnQuestionId,
+      depends_on_answer_id: dependsOnAnswerId
+    });
+    parentQuestionIds.add(dependsOnQuestionId);
+  }
+
+  for (let i = 0; i < dependencyItems.length; i++) {
+    const dependencyItem = dependencyItems[i];
+    const childQuestion = questionStateById.get(dependencyItem.question_id);
+    const parentQuestion = questionStateById.get(dependencyItem.depends_on_question_id);
+
+    if (!parentQuestion) {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_NOT_FOUND',
+          'Parent question was not found',
+          {
+            question_id: dependencyItem.question_id,
+            depends_on_question_id: dependencyItem.depends_on_question_id
+          }
+        )
+      };
+    }
+
+    if ((normalizeSurveyEnabled(parentQuestion.enabled) || 'N') !== 'Y') {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_DISABLED',
+          'Parent question must be enabled',
+          {
+            question_id: dependencyItem.question_id,
+            depends_on_question_id: dependencyItem.depends_on_question_id
+          }
+        )
+      };
+    }
+
+    if (!isSurveySelectableAnswerType(parentQuestion.answer_type_id)) {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_INVALID_TYPE',
+          'Parent question must be single choice or multiple choice',
+          {
+            question_id: dependencyItem.question_id,
+            depends_on_question_id: dependencyItem.depends_on_question_id,
+            parent_answer_type_id: parentQuestion.answer_type_id
+          }
+        )
+      };
+    }
+
+    const childOrder = parseSurveyPositiveInt(childQuestion.order);
+    const parentOrder = parseSurveyPositiveInt(parentQuestion.order);
+    if (!childOrder || !parentOrder || parentOrder >= childOrder) {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_ORDER_INVALID',
+          'Parent question order must be strictly lower than child question order',
+          {
+            question_id: dependencyItem.question_id,
+            depends_on_question_id: dependencyItem.depends_on_question_id,
+            child_order: childQuestion.order,
+            parent_order: parentQuestion.order
+          }
+        )
+      };
+    }
+  }
+
+  const cyclePath = findSurveyDependencyCycle(questionStateById);
+  if (cyclePath) {
+    return {
+      status: 409,
+      payload: buildSurveyErrorPayload(
+        'SURVEY_DEP_CYCLE_DETECTED',
+        'Dependency graph contains a cycle',
+        { cycle_question_ids: cyclePath }
+      )
+    };
+  }
+
+  const answerStateByKey = await getSurveyAnswerEnabledStateByQuestionIds(connection, [...parentQuestionIds]);
+  for (let i = 0; i < dependencyItems.length; i++) {
+    const dependencyItem = dependencyItems[i];
+    const answerKey = `${dependencyItem.depends_on_question_id}:${dependencyItem.depends_on_answer_id}`;
+    if (answerStateByKey.get(answerKey) !== 'Y') {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_DEP_ANSWER_INVALID',
+          'Parent answer must exist and be enabled',
+          {
+            question_id: dependencyItem.question_id,
+            depends_on_question_id: dependencyItem.depends_on_question_id,
+            depends_on_answer_id: dependencyItem.depends_on_answer_id
+          }
+        )
+      };
+    }
+  }
+
+  const locationSetByQuestionId = options.locationSetByQuestionId
+    || await getEnabledSurveyLocationsByQuestionIds(connection, [...questionStateById.keys()]);
+
+  for (let i = 0; i < dependencyItems.length; i++) {
+    const dependencyItem = dependencyItems[i];
+    const childLocationSet = locationSetByQuestionId.get(dependencyItem.question_id) || new Set();
+    const parentLocationSet = locationSetByQuestionId.get(dependencyItem.depends_on_question_id) || new Set();
+    const missingLocationIds = [];
+
+    for (const locationId of childLocationSet.values()) {
+      if (!parentLocationSet.has(locationId)) {
+        missingLocationIds.push(locationId);
+      }
+    }
+
+    if (missingLocationIds.length > 0) {
+      missingLocationIds.sort((a, b) => a - b);
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_DEP_LOCATION_MISMATCH',
+          'Parent question must be enabled in all child locations',
+          {
+            question_id: dependencyItem.question_id,
+            depends_on_question_id: dependencyItem.depends_on_question_id,
+            missing_location_ids: missingLocationIds
+          }
+        )
+      };
+    }
+  }
+
+  return null;
 }
 
 async function getLatestUserQuestionRow(connection, userId, questionId) {
@@ -5379,8 +6087,19 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
     if (!questionId || !questionOrder) {
       return res.status(400).json(`questions[${i}] is invalid`);
     }
-    if ((dependsOnQuestionId && !dependsOnAnswerId) || (!dependsOnQuestionId && dependsOnAnswerId)) {
-      return res.status(400).json(`questions[${i}] has invalid dependency pairing`);
+    if (dependsOnQuestionId && !dependsOnAnswerId) {
+      return res.status(400).json(buildSurveyErrorPayload(
+        'SURVEY_DEP_ANSWER_REQUIRED',
+        'depends_on_answer_id is required when depends_on_question_id is provided',
+        { question_id: questionId, depends_on_question_id: dependsOnQuestionId }
+      ));
+    }
+    if (!dependsOnQuestionId && dependsOnAnswerId) {
+      return res.status(400).json(buildSurveyErrorPayload(
+        'SURVEY_DEP_ANSWER_INVALID',
+        'depends_on_answer_id must be null when depends_on_question_id is null',
+        { question_id: questionId, depends_on_answer_id: dependsOnAnswerId }
+      ));
     }
     if (seenQuestionIds.has(questionId)) {
       return res.status(400).json(`Duplicate question_id in payload: ${questionId}`);
@@ -5437,7 +6156,7 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
     await connection.beginTransaction();
 
     const [questionRows] = await connection.query(
-      'select id, `order`, depends_on_question_id, depends_on_answer_id from question'
+      'select id, `order`, enabled, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
     );
     const questionById = new Map();
     for (let i = 0; i < questionRows.length; i++) {
@@ -5445,6 +6164,8 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       questionById.set(row.id, {
         question_id: row.id,
         order: row.order,
+        enabled: row.enabled,
+        answer_type_id: row.answer_type_id,
         depends_on_question_id: row.depends_on_question_id,
         depends_on_answer_id: row.depends_on_answer_id
       });
@@ -5458,25 +6179,13 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       }
     }
 
-    for (let i = 0; i < normalizedQuestions.length; i++) {
-      const questionItem = normalizedQuestions[i];
-      if (questionItem.depends_on_question_id && questionItem.depends_on_answer_id) {
-        const [dependencyAnswerRows] = await connection.query(
-          'select id from answer where question_id = ? and id = ? limit 1',
-          [questionItem.depends_on_question_id, questionItem.depends_on_answer_id]
-        );
-        if (dependencyAnswerRows.length === 0) {
-          await connection.rollback();
-          return res.status(400).json(`Invalid dependency in question_id=${questionItem.question_id}`);
-        }
-      }
-    }
-
     const finalQuestionById = new Map();
     for (const [questionId, questionData] of questionById.entries()) {
       finalQuestionById.set(questionId, {
         question_id: questionData.question_id,
         order: questionData.order,
+        enabled: questionData.enabled,
+        answer_type_id: questionData.answer_type_id,
         depends_on_question_id: questionData.depends_on_question_id,
         depends_on_answer_id: questionData.depends_on_answer_id
       });
@@ -5491,29 +6200,21 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
     }
 
     const orphanedQuestionSet = new Set();
-    if (normalizedQuestions.length > 0) {
-      for (const [questionId, questionData] of finalQuestionById.entries()) {
-        if (questionData.depends_on_question_id) {
-          const parentQuestion = finalQuestionById.get(questionData.depends_on_question_id);
-          const isOrphan = !parentQuestion || questionData.order <= parentQuestion.order;
-          if (isOrphan) {
-            questionData.depends_on_question_id = null;
-            questionData.depends_on_answer_id = null;
-            orphanedQuestionSet.add(questionId);
-          }
-        }
+    const questionOrderToId = new Map();
+    for (const [questionId, questionData] of finalQuestionById.entries()) {
+      if (questionOrderToId.has(questionData.order)) {
+        await connection.rollback();
+        return res.status(400).json(
+          `Duplicate question order detected in final state: ${questionData.order} (question_id ${questionOrderToId.get(questionData.order)} and ${questionId})`
+        );
       }
+      questionOrderToId.set(questionData.order, questionId);
+    }
 
-      const questionOrderToId = new Map();
-      for (const [questionId, questionData] of finalQuestionById.entries()) {
-        if (questionOrderToId.has(questionData.order)) {
-          await connection.rollback();
-          return res.status(400).json(
-            `Duplicate question order detected in final state: ${questionData.order} (question_id ${questionOrderToId.get(questionData.order)} and ${questionId})`
-          );
-        }
-        questionOrderToId.set(questionData.order, questionId);
-      }
+    const dependencyValidationError = await validateSurveyDependencyGraphState(connection, finalQuestionById);
+    if (dependencyValidationError) {
+      await connection.rollback();
+      return res.status(dependencyValidationError.status).json(dependencyValidationError.payload);
     }
 
     const affectedAnswerQuestionIds = [...new Set(normalizedAnswers.map(item => item.question_id))];
@@ -5569,7 +6270,6 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
 
     let updatedQuestions = 0;
     let updatedAnswers = 0;
-    const payloadQuestionIdSet = new Set(normalizedQuestions.map(item => item.question_id));
 
     for (let i = 0; i < normalizedQuestions.length; i++) {
       const questionItem = normalizedQuestions[i];
@@ -5598,11 +6298,13 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
         await insertSurveyReorderHistory(connection, {
           question_id: questionItem.question_id,
           answer_id: null,
-          entity_type: 'question',
+          entity_type: 'question_order',
           before_name: formatOrderLabel(beforeQuestion.order),
           before_name_es: formatOrderLabel(beforeQuestion.order, true),
           after_name: formatOrderLabel(afterQuestion.order),
           after_name_es: formatOrderLabel(afterQuestion.order, true),
+          before_order: beforeQuestion.order,
+          after_order: afterQuestion.order,
           edited_by_user_id: cabecera.id || null,
           source,
           edited_at_client: reorderedAtClient
@@ -5613,52 +6315,20 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
         await insertSurveyReorderHistory(connection, {
           question_id: questionItem.question_id,
           answer_id: null,
-          entity_type: 'question',
+          entity_type: 'question_dependency',
           before_name: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id),
           before_name_es: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id, true),
           after_name: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id),
           after_name_es: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, true),
+          before_depends_on_question_id: beforeQuestion.depends_on_question_id,
+          after_depends_on_question_id: afterQuestion.depends_on_question_id,
+          before_depends_on_answer_id: beforeQuestion.depends_on_answer_id,
+          after_depends_on_answer_id: afterQuestion.depends_on_answer_id,
           edited_by_user_id: cabecera.id || null,
           source,
           edited_at_client: reorderedAtClient
         });
       }
-    }
-
-    for (const orphanedQuestionId of orphanedQuestionSet) {
-      if (payloadQuestionIdSet.has(orphanedQuestionId)) {
-        continue;
-      }
-      const beforeQuestion = questionById.get(orphanedQuestionId);
-      const afterQuestion = finalQuestionById.get(orphanedQuestionId);
-      const dependencyChanged =
-        (beforeQuestion.depends_on_question_id || null) !== (afterQuestion.depends_on_question_id || null) ||
-        (beforeQuestion.depends_on_answer_id || null) !== (afterQuestion.depends_on_answer_id || null);
-      if (!dependencyChanged) {
-        continue;
-      }
-
-      const [questionUpdateRows] = await connection.query(
-        'update question set depends_on_question_id = ?, depends_on_answer_id = ? where id = ?',
-        [afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, orphanedQuestionId]
-      );
-      if (questionUpdateRows.affectedRows === 0) {
-        throw new Error(`Could not update orphaned question ${orphanedQuestionId}`);
-      }
-      updatedQuestions += 1;
-
-      await insertSurveyReorderHistory(connection, {
-        question_id: orphanedQuestionId,
-        answer_id: null,
-        entity_type: 'question',
-        before_name: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id),
-        before_name_es: formatDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id, true),
-        after_name: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id),
-        after_name_es: formatDependencyLabel(afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, true),
-        edited_by_user_id: cabecera.id || null,
-        source,
-        edited_at_client: reorderedAtClient
-      });
     }
 
     for (let i = 0; i < normalizedAnswers.length; i++) {
@@ -5682,11 +6352,13 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       await insertSurveyReorderHistory(connection, {
         question_id: answerItem.question_id,
         answer_id: answerItem.answer_id,
-        entity_type: 'answer',
+        entity_type: 'answer_order',
         before_name: formatOrderLabel(beforeOrder),
         before_name_es: formatOrderLabel(beforeOrder, true),
         after_name: formatOrderLabel(answerItem.order),
         after_name_es: formatOrderLabel(answerItem.order, true),
+        before_order: beforeOrder,
+        after_order: answerItem.order,
         edited_by_user_id: cabecera.id || null,
         source,
         edited_at_client: reorderedAtClient
@@ -5811,6 +6483,12 @@ router.get('/survey/history', verifyToken, async (req, res) => {
         h.before_name_es,
         h.after_name,
         h.after_name_es,
+        h.before_order,
+        h.after_order,
+        h.before_depends_on_question_id,
+        h.after_depends_on_question_id,
+        h.before_depends_on_answer_id,
+        h.after_depends_on_answer_id,
         h.edited_by_user_id,
         trim(concat(coalesce(u.firstname, ''), ' ', coalesce(u.lastname, ''))) as edited_by_name,
         u.email as edited_by_email,
@@ -5897,6 +6575,12 @@ router.get('/survey/history/:id', verifyToken, async (req, res) => {
         h.before_name_es,
         h.after_name,
         h.after_name_es,
+        h.before_order,
+        h.after_order,
+        h.before_depends_on_question_id,
+        h.after_depends_on_question_id,
+        h.before_depends_on_answer_id,
+        h.after_depends_on_answer_id,
         h.edited_by_user_id,
         trim(concat(coalesce(u.firstname, ''), ' ', coalesce(u.lastname, ''))) as edited_by_name,
         u.email as edited_by_email,
@@ -6091,21 +6775,28 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
           pendingQuestionIds.push(questionId);
         }
       }
+      const pendingQuestionIdSet = new Set(pendingQuestionIds);
 
       const selectedQuestionIds = new Set();
+      const genealogyInjectedQuestionIds = new Set();
       if (includeGenealogy) {
         for (let i = 0; i < pendingQuestionIds.length; i++) {
           let currentQuestionId = pendingQuestionIds[i];
           const visited = new Set();
+          let isRootPendingQuestion = true;
           while (currentQuestionId && !visited.has(currentQuestionId)) {
             visited.add(currentQuestionId);
             selectedQuestionIds.add(currentQuestionId);
+            if (!isRootPendingQuestion) {
+              genealogyInjectedQuestionIds.add(currentQuestionId);
+            }
 
             const currentQuestion = questionById.get(currentQuestionId);
             if (!currentQuestion || !currentQuestion.depends_on_question_id) {
               break;
             }
             currentQuestionId = currentQuestion.depends_on_question_id;
+            isRootPendingQuestion = false;
           }
         }
       } else {
@@ -6120,15 +6811,22 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
           if (a.order !== b.order) return a.order - b.order;
           return a.id - b.id;
         })
-        .map(question => ({
-          ...question,
-          requires_reanswer: includeGenealogy ? true : false,
-          previously_answered: answeredQuestionIds.has(question.id),
-          answers: [...question.answers].sort((a, b) => {
-            if (a.order !== b.order) return a.order - b.order;
-            return a.id - b.id;
-          })
-        }));
+        .map(question => {
+          const previouslyAnswered = answeredQuestionIds.has(question.id);
+          const requiresReanswer = includeGenealogy
+            ? pendingQuestionIdSet.has(question.id) || (previouslyAnswered && genealogyInjectedQuestionIds.has(question.id))
+            : false;
+
+          return {
+            ...question,
+            requires_reanswer: requiresReanswer,
+            previously_answered: previouslyAnswered,
+            answers: [...question.answers].sort((a, b) => {
+              if (a.order !== b.order) return a.order - b.order;
+              return a.id - b.id;
+            })
+          };
+        });
 
       res.json(questions);
 
@@ -6556,7 +7254,7 @@ router.get('/total-beneficiaries-registered-today', verifyToken, async (req, res
         `select count(user.id) as total 
         from user
         where user.role_id = 5 
-        and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
+        and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) 
         ${cabecera.role === 'client' ? 'and user.client_id = ?' : ''}`,
         [cabecera.client_id]
       );
@@ -6580,8 +7278,8 @@ router.get('/total-beneficiaries-recurring-today-scanned', verifyToken, async (r
           from user
           inner join delivery_beneficiary as db on user.id = db.receiving_user_id
           where user.role_id = 5 
-          and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
-          and date(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles'))
+          and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) 
+          and date(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
           and db.approved = 'Y'
           ${cabecera.role === 'client' ? 'and db.client_id = ?' : ''}`,
         [cabecera.client_id]
@@ -6606,8 +7304,8 @@ router.get('/total-beneficiaries-recurring-today-not-scanned', verifyToken, asyn
           from user
           inner join delivery_beneficiary as db on user.id = db.receiving_user_id
           where user.role_id = 5 
-          and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
-          and date(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(now(), '+00:00', 'America/Los_Angeles')) 
+          and date(CONVERT_TZ(user.creation_date, '+00:00', 'America/Los_Angeles')) != date(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) 
+          and date(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')) = date(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) 
           and db.approved = 'N'
           ${cabecera.role === 'client' ? 'and db.client_id = ?' : ''}`,
         [cabecera.client_id]
@@ -7745,7 +8443,7 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       SELECT
         u.id AS user_id, u.username, u.email, u.firstname, u.lastname, u.language,
         DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
-        TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS age,
+        TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) AS age,
         u.phone, u.zipcode, u.household_size,
         g.name AS gender, eth.name AS ethnicity, u.other_ethnicity,
         first_loc.community_city AS first_location_visited,
@@ -7840,11 +8538,11 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
       usersParams.push(ethnicities);
     }
     if (filters.min_age != null && filters.min_age !== '') {
-      usersSql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ?`;
+      usersSql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ?`;
       usersParams.push(min_age);
     }
     if (filters.max_age != null && filters.max_age !== '') {
-      usersSql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ?`;
+      usersSql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ?`;
       usersParams.push(max_age);
     }
     if (zipcode !== null && zipcode !== '') {
@@ -8081,11 +8779,11 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -8211,11 +8909,11 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -8344,11 +9042,11 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -8487,11 +9185,11 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -10176,11 +10874,11 @@ function buildDemographicWhere(cabecera, filters) {
   }
 
   if (min_age !== null) {
-    whereParts.push(`TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(),'+00:00','America/Los_Angeles'))) >= ?`);
+    whereParts.push(`TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','America/Los_Angeles'))) >= ?`);
     params.push(min_age);
   }
   if (max_age !== null) {
-    whereParts.push(`TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(),'+00:00','America/Los_Angeles'))) <= ?`);
+    whereParts.push(`TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','America/Los_Angeles'))) <= ?`);
     params.push(max_age);
   }
 
@@ -10234,7 +10932,7 @@ async function demographicMetric(dimensionType, cabecera, filters, language) {
       break;
     case 'age':
       // calcular edad en SELECT para agrupar
-      selectExpr = `TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(),'+00:00','America/Los_Angeles')))`;
+      selectExpr = `TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','America/Los_Angeles')))`;
       joinExpr = '';
       groupExpr = selectExpr;
       orderExpr = selectExpr;
@@ -10427,11 +11125,11 @@ function buildVolunteerWhere(filters) {
     params.push(...ethnicities);
   }
   if (min_age !== null && !Number.isNaN(min_age)) {
-    whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ?`);
+    whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ?`);
     params.push(min_age);
   }
   if (max_age !== null && !Number.isNaN(max_age)) {
-    whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ?`);
+    whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ?`);
     params.push(max_age);
   }
   if (zipcode) {
@@ -10592,11 +11290,11 @@ router.post('/metrics/volunteer/age', verifyToken, async (req, res) => {
         params.push(...ethnicities);
       }
       if (min_age !== null && !Number.isNaN(min_age)) {
-        whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ?`);
+        whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ?`);
         params.push(min_age);
       }
       if (max_age !== null && !Number.isNaN(max_age)) {
-        whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ?`);
+        whereParts.push(`TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ?`);
         params.push(max_age);
       }
       if (zipcode) {
@@ -10606,7 +11304,7 @@ router.post('/metrics/volunteer/age', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
-          TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) AS name,
+          TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) AS name,
           COUNT(DISTINCT(v.id)) AS total
         FROM volunteer AS v
         WHERE ${whereParts.join(' AND ')}
@@ -10961,11 +11659,11 @@ router.post('/metrics/participant/email', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -11053,11 +11751,11 @@ router.post('/metrics/participant/phone', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -11147,11 +11845,11 @@ router.post('/metrics/participant/language', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -11675,11 +12373,11 @@ router.post('/metrics/participant/register_history', verifyToken, async (req, re
         demographicParams.push(...ethnicities.map(Number));
       }
       if (filters.min_age) {
-        demographic_filters_sql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), ${utcTimeZone}, ${laTimeZone}))) >= ?`;
+        demographic_filters_sql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), ${utcTimeZone}, ${laTimeZone}))) >= ?`;
         demographicParams.push(Number(min_age));
       }
       if (filters.max_age) {
-        demographic_filters_sql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), ${utcTimeZone}, ${laTimeZone}))) <= ?`;
+        demographic_filters_sql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), ${utcTimeZone}, ${laTimeZone}))) <= ?`;
         demographicParams.push(Number(max_age));
       }
       if (filters.zipcode) {
@@ -13340,11 +14038,11 @@ router.post('/table/user', verifyToken, async (req, res) => {
     }
     var query_min_age = '';
     if (filters.min_age) {
-      query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      query_min_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
     }
     var query_max_age = '';
     if (filters.max_age) {
-      query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      query_max_age = `AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
     }
     var query_zipcode = '';
     if (filters.zipcode) {
@@ -13551,11 +14249,11 @@ router.post('/table/volunteer', verifyToken, async (req, res) => {
     }
     var query_min_age = '';
     if (filters.min_age) {
-      query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+      query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
     }
     var query_max_age = '';
     if (filters.max_age) {
-      query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+      query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
     }
     var query_zipcode = '';
     if (filters.zipcode) {
@@ -13693,11 +14391,11 @@ router.post('/table/volunteer/download-csv', verifyToken, async (req, res) => {
       }
       var query_min_age = '';
       if (filters.min_age) {
-        query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
+        query_min_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ` + min_age;
       }
       var query_max_age = '';
       if (filters.max_age) {
-        query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
+        query_max_age = `AND TIMESTAMPDIFF(YEAR, v.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ` + max_age;
       }
       var query_zipcode = '';
       if (filters.zipcode) {
@@ -20407,7 +21105,7 @@ router.get('/trusted-resources/public', async (req, res) => {
     if (openNow === 'true') {
       scheduleJoin = 'INNER JOIN resource_schedules rs ON rs.resource_id = tr.id';
 
-      const laNow = "CONVERT_TZ(NOW(), @@session.time_zone, 'America/Los_Angeles')";
+      const laNow = "CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')";
       const laDay = `(DAYOFWEEK(${laNow}) - 1)`; // 0 = Sunday, 6 = Saturday
       const laTime = `TIME(${laNow})`;
 
