@@ -3454,75 +3454,69 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
       let normalizedAnswerIds = [];
 
       if (answer_type_id === 1) {
-        if (!hasSurveyValue(answerValue)) {
-          continue;
-        }
-        normalizedTextAnswer = String(answerValue).trim();
-        if (!normalizedTextAnswer) {
-          continue;
+        if (hasSurveyValue(answerValue)) {
+          const trimmedAnswer = String(answerValue).trim();
+          if (trimmedAnswer) {
+            normalizedTextAnswer = trimmedAnswer;
+          }
         }
       } else if (answer_type_id === 2) {
-        if (!hasSurveyValue(answerValue)) {
-          continue;
-        }
-        const parsedNumber = Number(answerValue);
-        if (!Number.isFinite(parsedNumber)) {
-          await connection.rollback();
-          return res.status(400).json(`Invalid numeric answer for question_id=${question_id}`);
-        }
-        normalizedNumberAnswer = parsedNumber;
-      } else if (answer_type_id === 3) {
-        if (!hasSurveyValue(answerValue)) {
-          continue;
-        }
-        const answerId = parseSurveyPositiveInt(answerValue);
-        if (!answerId) {
-          await connection.rollback();
-          return res.status(400).json(`Invalid single-choice answer for question_id=${question_id}`);
-        }
-        const [validAnswerRows] = await connection.query(
-          'select id from answer where question_id = ? and id = ? and enabled = ? limit 1',
-          [question_id, answerId, 'Y']
-        );
-        if (validAnswerRows.length === 0) {
-          await connection.rollback();
-          return res.status(400).json(`Answer not enabled for question_id=${question_id}, answer_id=${answerId}`);
-        }
-        normalizedAnswerIds = [answerId];
-      } else if (answer_type_id === 4) {
-        if (!hasSurveyValue(answerValue)) {
-          continue;
-        }
-        if (!Array.isArray(answerValue)) {
-          await connection.rollback();
-          return res.status(400).json(`Invalid multi-choice answer for question_id=${question_id}`);
-        }
-        const seenAnswerIds = new Set();
-        for (let j = 0; j < answerValue.length; j++) {
-          const parsedAnswerId = parseSurveyPositiveInt(answerValue[j]);
-          if (!parsedAnswerId) {
+        if (hasSurveyValue(answerValue)) {
+          const parsedNumber = Number(answerValue);
+          if (!Number.isFinite(parsedNumber)) {
             await connection.rollback();
-            return res.status(400).json(`Invalid multi-choice answer_id at index ${i}:${j}`);
+            return res.status(400).json(`Invalid numeric answer for question_id=${question_id}`);
           }
-          if (!seenAnswerIds.has(parsedAnswerId)) {
-            seenAnswerIds.add(parsedAnswerId);
-            normalizedAnswerIds.push(parsedAnswerId);
+          normalizedNumberAnswer = parsedNumber;
+        }
+      } else if (answer_type_id === 3) {
+        if (hasSurveyValue(answerValue)) {
+          const answerId = parseSurveyPositiveInt(answerValue);
+          if (!answerId) {
+            await connection.rollback();
+            return res.status(400).json(`Invalid single-choice answer for question_id=${question_id}`);
           }
+          const [validAnswerRows] = await connection.query(
+            'select id from answer where question_id = ? and id = ? and enabled = ? limit 1',
+            [question_id, answerId, 'Y']
+          );
+          if (validAnswerRows.length === 0) {
+            await connection.rollback();
+            return res.status(400).json(`Answer not enabled for question_id=${question_id}, answer_id=${answerId}`);
+          }
+          normalizedAnswerIds = [answerId];
         }
-        if (normalizedAnswerIds.length === 0) {
-          continue;
-        }
-
-        const answerPlaceholders = normalizedAnswerIds.map(() => '?').join(',');
-        const [validMultiAnswerRows] = await connection.query(
-          `select id from answer where question_id = ? and enabled = ? and id in (${answerPlaceholders})`,
-          [question_id, 'Y', ...normalizedAnswerIds]
-        );
-        const validAnswerIdSet = new Set(validMultiAnswerRows.map(row => row.id));
-        const invalidAnswerIds = normalizedAnswerIds.filter(answerId => !validAnswerIdSet.has(answerId));
-        if (invalidAnswerIds.length > 0) {
-          await connection.rollback();
-          return res.status(400).json(`Answer(s) not enabled for question_id=${question_id}: ${invalidAnswerIds.join(', ')}`);
+      } else if (answer_type_id === 4) {
+        if (hasSurveyValue(answerValue)) {
+          if (!Array.isArray(answerValue)) {
+            await connection.rollback();
+            return res.status(400).json(`Invalid multi-choice answer for question_id=${question_id}`);
+          }
+          const seenAnswerIds = new Set();
+          for (let j = 0; j < answerValue.length; j++) {
+            const parsedAnswerId = parseSurveyPositiveInt(answerValue[j]);
+            if (!parsedAnswerId) {
+              await connection.rollback();
+              return res.status(400).json(`Invalid multi-choice answer_id at index ${i}:${j}`);
+            }
+            if (!seenAnswerIds.has(parsedAnswerId)) {
+              seenAnswerIds.add(parsedAnswerId);
+              normalizedAnswerIds.push(parsedAnswerId);
+            }
+          }
+          if (normalizedAnswerIds.length > 0) {
+            const answerPlaceholders = normalizedAnswerIds.map(() => '?').join(',');
+            const [validMultiAnswerRows] = await connection.query(
+              `select id from answer where question_id = ? and enabled = ? and id in (${answerPlaceholders})`,
+              [question_id, 'Y', ...normalizedAnswerIds]
+            );
+            const validAnswerIdSet = new Set(validMultiAnswerRows.map(row => row.id));
+            const invalidAnswerIds = normalizedAnswerIds.filter(answerId => !validAnswerIdSet.has(answerId));
+            if (invalidAnswerIds.length > 0) {
+              await connection.rollback();
+              return res.status(400).json(`Answer(s) not enabled for question_id=${question_id}: ${invalidAnswerIds.join(', ')}`);
+            }
+          }
         }
       } else {
         await connection.rollback();
@@ -3536,7 +3530,7 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
       if (existingUserQuestion) {
         const [updateRows] = await connection.query(
           `update user_question
-           set answer_type_id = ?, answer_text = ?, answer_number = ?
+           set answer_type_id = ?, answer_text = ?, answer_number = ?, updated_at = NOW()
            where id = ?`,
           [answer_type_id, normalizedTextAnswer, normalizedNumberAnswer, existingUserQuestion.id]
         );
@@ -3572,19 +3566,26 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
         }
       }
 
-      if (existingUserQuestion) {
-        const updatedUserQuestion = await getLatestUserQuestionRow(connection, user_id, question_id);
-        const newSnapshot = await getUserQuestionSnapshot(connection, updatedUserQuestion);
-        await insertBeneficiaryAnswerHistory(connection, {
-          user_id,
-          location_id,
-          question_id,
-          old_answer_json: previousSnapshot ? JSON.stringify(previousSnapshot) : null,
-          new_answer_json: JSON.stringify(newSnapshot),
-          source: sourceParsed.value || BENEFICIARY_ANSWER_SOURCE_DEFAULT,
-          submitted_at_client: submittedAtParsed.value
-        });
-      }
+      const updatedUserQuestion = await getLatestUserQuestionRow(connection, user_id, question_id);
+      const newSnapshot = await getUserQuestionSnapshot(connection, updatedUserQuestion);
+      await insertBeneficiaryAnswerHistory(connection, {
+        user_id,
+        location_id,
+        question_id,
+        old_answer_json: previousSnapshot ? JSON.stringify(previousSnapshot) : null,
+        new_answer_json: JSON.stringify(newSnapshot),
+        source: sourceParsed.value || BENEFICIARY_ANSWER_SOURCE_DEFAULT,
+        submitted_at_client: submittedAtParsed.value
+      });
+    }
+
+    if (secondForm.length > 0) {
+      await clearUnreachableOnboardAnswers(connection, {
+        user_id,
+        location_id,
+        source: BENEFICIARY_ANSWER_SOURCE_AUTO_CLEAR,
+        submitted_at_client: null
+      });
     }
 
     await connection.commit();
@@ -5004,6 +5005,13 @@ router.post('/survey/answer', verifyToken, async (req, res) => {
         }
       }
 
+      // Update question.updated_at so available_since reflects the new answers
+      // and the genealogy system detects the modification
+      await connection.query(
+        'UPDATE question SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [question_id]
+      );
+
       await connection.commit();
       res.json('Answers inserted');
     } catch (err) {
@@ -5163,6 +5171,14 @@ router.post('/survey/modify-checkbox', verifyToken, async (req, res) => {
           throw new Error('Could not update answer');
         }
 
+        // Update question.updated_at so available_since reflects the answer status change
+        if (beforeEnabled !== answerItem.enabled) {
+          await connection.query(
+            'UPDATE question SET updated_at = NOW() WHERE id = ?',
+            [answerItem.question_id]
+          );
+        }
+
         await disableQuestions(connection, answerItem.question_id, answerItem.enabled, answerItem.answer_id);
         updatedAnswers.push(answerItem);
 
@@ -5242,6 +5258,14 @@ router.post('/survey/modify-checkbox', verifyToken, async (req, res) => {
         throw new Error('Could not update answer');
       }
 
+      // Update question.updated_at so available_since reflects the answer status change
+      if (beforeEnabled !== enabled) {
+        await connection.query(
+          'UPDATE question SET updated_at = NOW() WHERE id = ?',
+          [question_id]
+        );
+      }
+
       await disableQuestions(connection, question_id, enabled, answer_id);
       if (beforeEnabled !== enabled) {
         await insertSurveyStatusHistory(connection, {
@@ -5319,9 +5343,26 @@ const SURVEY_STATUS_SOURCE_SINGLE = 'admin-survey-status-single';
 const SURVEY_STATUS_SOURCE_BATCH = 'admin-survey-status-batch';
 const SURVEY_REORDER_SOURCE_DEFAULT = 'admin-survey-ui';
 const BENEFICIARY_ANSWER_SOURCE_DEFAULT = 'beneficiary-onboard-ui';
+const BENEFICIARY_ANSWER_SOURCE_AUTO_CLEAR = 'beneficiary-onboard-auto-clear';
 
 function hasSurveyValue(value) {
   return value !== undefined && value !== null && value !== '';
+}
+
+function hasMeaningfulUserAnswerState(answerTypeId, answerState) {
+  if (answerTypeId === 1) {
+    return typeof answerState?.answer_text === 'string' && answerState.answer_text.trim().length > 0;
+  }
+
+  if (answerTypeId === 2) {
+    return answerState?.answer_number !== null && answerState?.answer_number !== undefined;
+  }
+
+  if (answerTypeId === 3 || answerTypeId === 4) {
+    return Number(answerState?.selected_answer_count || 0) > 0;
+  }
+
+  return false;
 }
 
 function normalizeSurveyEnabled(value) {
@@ -5904,6 +5945,158 @@ async function insertBeneficiaryAnswerHistory(connection, payload) {
   }
 }
 
+async function clearUnreachableOnboardAnswers(connection, payload) {
+  const [questionRows] = await connection.query(
+    `select q.id, q.answer_type_id, q.depends_on_question_id, q.depends_on_answer_id
+     from question q
+     inner join question_location ql on q.id = ql.question_id
+     where q.enabled = 'Y' and ql.location_id = ? and ql.enabled = 'Y'`,
+    [payload.location_id]
+  );
+
+  if (questionRows.length === 0) {
+    return 0;
+  }
+
+  const questionById = new Map();
+  const questionIds = [];
+  for (let i = 0; i < questionRows.length; i++) {
+    const row = questionRows[i];
+    questionById.set(row.id, row);
+    questionIds.push(row.id);
+  }
+
+  const questionPlaceholders = questionIds.map(() => '?').join(',');
+  const [latestUserRows] = await connection.query(
+    `select uq.id, uq.question_id, uq.answer_type_id, uq.answer_text, uq.answer_number
+     from user_question uq
+     inner join (
+       select question_id, max(id) as max_id
+       from user_question
+       where user_id = ? and question_id in (${questionPlaceholders})
+       group by question_id
+     ) latest on latest.max_id = uq.id`,
+    [payload.user_id, ...questionIds]
+  );
+
+  if (latestUserRows.length === 0) {
+    return 0;
+  }
+
+  const latestUserRowByQuestionId = new Map();
+  const latestUserQuestionIds = [];
+  for (let i = 0; i < latestUserRows.length; i++) {
+    const row = latestUserRows[i];
+    latestUserRowByQuestionId.set(row.question_id, row);
+    latestUserQuestionIds.push(row.id);
+  }
+
+  const selectedAnswerIdsByQuestionId = new Map();
+  const userQuestionIdPlaceholders = latestUserQuestionIds.map(() => '?').join(',');
+  const [selectedAnswerRows] = await connection.query(
+    `select uq.question_id, uqa.answer_id
+     from user_question_answer uqa
+     inner join user_question uq on uq.id = uqa.user_question_id
+     where uqa.user_question_id in (${userQuestionIdPlaceholders})`,
+    latestUserQuestionIds
+  );
+  for (let i = 0; i < selectedAnswerRows.length; i++) {
+    const row = selectedAnswerRows[i];
+    if (!selectedAnswerIdsByQuestionId.has(row.question_id)) {
+      selectedAnswerIdsByQuestionId.set(row.question_id, new Set());
+    }
+    selectedAnswerIdsByQuestionId.get(row.question_id).add(row.answer_id);
+  }
+
+  const reachabilityCache = new Map();
+  const isReachable = (questionId, visited = new Set()) => {
+    if (reachabilityCache.has(questionId)) {
+      return reachabilityCache.get(questionId);
+    }
+
+    if (visited.has(questionId)) {
+      reachabilityCache.set(questionId, false);
+      return false;
+    }
+    visited.add(questionId);
+
+    const question = questionById.get(questionId);
+    if (!question) {
+      reachabilityCache.set(questionId, false);
+      return false;
+    }
+
+    if (!question.depends_on_question_id) {
+      reachabilityCache.set(questionId, true);
+      return true;
+    }
+
+    const parentAnswers = selectedAnswerIdsByQuestionId.get(question.depends_on_question_id);
+    if (!parentAnswers || !parentAnswers.has(question.depends_on_answer_id)) {
+      reachabilityCache.set(questionId, false);
+      return false;
+    }
+
+    const parentReachable = isReachable(question.depends_on_question_id, visited);
+    reachabilityCache.set(questionId, parentReachable);
+    return parentReachable;
+  };
+
+  let clearedCount = 0;
+  for (let i = 0; i < questionRows.length; i++) {
+    const questionRow = questionRows[i];
+    if (isReachable(questionRow.id)) {
+      continue;
+    }
+
+    const latestUserRow = latestUserRowByQuestionId.get(questionRow.id);
+    if (!latestUserRow) {
+      continue;
+    }
+
+    const selectedCount = selectedAnswerIdsByQuestionId.get(questionRow.id)?.size || 0;
+    const hasMeaningfulAnswer = hasMeaningfulUserAnswerState(latestUserRow.answer_type_id, {
+      answer_text: latestUserRow.answer_text,
+      answer_number: latestUserRow.answer_number,
+      selected_answer_count: selectedCount
+    });
+    if (!hasMeaningfulAnswer) {
+      continue;
+    }
+
+    const previousSnapshot = await getUserQuestionSnapshot(connection, latestUserRow);
+    const [updateRows] = await connection.query(
+      `update user_question
+       set answer_type_id = ?, answer_text = null, answer_number = null, updated_at = NOW()
+       where id = ?`,
+      [questionRow.answer_type_id, latestUserRow.id]
+    );
+    if (updateRows.affectedRows === 0) {
+      throw new Error(`Could not clear unreachable answer for question_id=${questionRow.id}`);
+    }
+
+    await connection.query(
+      'delete from user_question_answer where user_question_id = ?',
+      [latestUserRow.id]
+    );
+
+    const updatedUserQuestion = await getLatestUserQuestionRow(connection, payload.user_id, questionRow.id);
+    const newSnapshot = await getUserQuestionSnapshot(connection, updatedUserQuestion);
+    await insertBeneficiaryAnswerHistory(connection, {
+      user_id: payload.user_id,
+      location_id: payload.location_id,
+      question_id: questionRow.id,
+      old_answer_json: previousSnapshot ? JSON.stringify(previousSnapshot) : null,
+      new_answer_json: JSON.stringify(newSnapshot),
+      source: payload.source || BENEFICIARY_ANSWER_SOURCE_AUTO_CLEAR,
+      submitted_at_client: payload.submitted_at_client || null
+    });
+    clearedCount += 1;
+  }
+
+  return clearedCount;
+}
+
 router.post('/survey/edit', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
@@ -5986,6 +6179,12 @@ router.post('/survey/edit', verifyToken, async (req, res) => {
       if (answerUpdateRows.affectedRows === 0) {
         throw new Error('Could not update answer');
       }
+
+      // Update question.updated_at so available_since reflects the answer modification
+      await connection.query(
+        'UPDATE question SET updated_at = NOW() WHERE id = ?',
+        [question_id]
+      );
     } else {
       const [questionUpdateRows] = await connection.query(
         'update question set name = ?, name_es = ? where id = ?',
@@ -6729,7 +6928,11 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
           q.depends_on_answer_id,
           a.id as answer_id,
           a.\`order\` AS answer_order,
-          ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
+          ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name,
+          GREATEST(
+            COALESCE(q.updated_at, q.created_at, '2000-01-01'),
+            COALESCE(ql.updated_at, ql.created_at, '2000-01-01')
+          ) AS available_since
         FROM question as q
         INNER JOIN question_location as ql ON q.id = ql.question_id
         LEFT JOIN answer as a ON q.id = a.question_id AND a.enabled = 'Y'
@@ -6749,6 +6952,7 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
             depends_on_question_id: row.depends_on_question_id,
             depends_on_answer_id: row.depends_on_answer_id,
             answer_type_id: row.answer_type_id,
+            available_since: row.available_since || null,
             answers: []
           });
         }
@@ -6763,16 +6967,50 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
         }
       }
 
-      const [answeredRows] = await mysqlConnection.promise().query(
-        'select distinct question_id from user_question where user_id = ?',
+      const [latestUserQuestionRows] = await mysqlConnection.promise().query(
+        `select
+           uq.id,
+           uq.question_id,
+           uq.answer_type_id,
+           uq.answer_text,
+           uq.answer_number,
+           coalesce(uq.updated_at, uq.creation_date) as last_answered_at,
+           (select count(1) from user_question_answer uqa where uqa.user_question_id = uq.id) as selected_answer_count
+         from user_question uq
+         where uq.user_id = ?
+           and uq.id = (
+             select max(uq2.id)
+             from user_question uq2
+             where uq2.user_id = uq.user_id and uq2.question_id = uq.question_id
+           )`,
         [cabecera.id]
       );
-      const answeredQuestionIds = new Set(answeredRows.map(row => row.question_id));
+      const respondedQuestionIds = new Set();
+      const answeredQuestionIds = new Set();
+      const lastAnsweredAtByQuestionId = new Map();
+      for (let i = 0; i < latestUserQuestionRows.length; i++) {
+        const row = latestUserQuestionRows[i];
+        respondedQuestionIds.add(row.question_id);
+        lastAnsweredAtByQuestionId.set(row.question_id, row.last_answered_at);
+        if (hasMeaningfulUserAnswerState(row.answer_type_id, row)) {
+          answeredQuestionIds.add(row.question_id);
+        }
+      }
 
       const pendingQuestionIds = [];
+      // Answered questions that were modified after the user's last answer
+      // (e.g., admin added new answer options) — need to be re-shown
+      const answeredModifiedQuestionIds = [];
       for (const questionId of questionById.keys()) {
         if (!answeredQuestionIds.has(questionId)) {
           pendingQuestionIds.push(questionId);
+        } else if (includeGenealogy) {
+          const q = questionById.get(questionId);
+          const lastAnswered = lastAnsweredAtByQuestionId.get(questionId);
+          if (q && q.available_since && lastAnswered &&
+              new Date(q.available_since) > new Date(lastAnswered)) {
+            answeredModifiedQuestionIds.push(questionId);
+          }
         }
       }
       const pendingQuestionIdSet = new Set(pendingQuestionIds);
@@ -6780,28 +7018,237 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
       const selectedQuestionIds = new Set();
       const genealogyInjectedQuestionIds = new Set();
       if (includeGenealogy) {
+        // Collect all ancestor question IDs that have been previously answered
+        // so we can query the user's actual answer choices for reachability checks
+        const answeredAncestorIds = new Set();
+        // Collect ancestors for pending questions
         for (let i = 0; i < pendingQuestionIds.length; i++) {
-          let currentQuestionId = pendingQuestionIds[i];
-          const visited = new Set();
-          let isRootPendingQuestion = true;
-          while (currentQuestionId && !visited.has(currentQuestionId)) {
-            visited.add(currentQuestionId);
-            selectedQuestionIds.add(currentQuestionId);
-            if (!isRootPendingQuestion) {
-              genealogyInjectedQuestionIds.add(currentQuestionId);
+          const pq = questionById.get(pendingQuestionIds[i]);
+          if (pq && pq.depends_on_question_id) {
+            let curId = pq.depends_on_question_id;
+            const vis = new Set();
+            while (curId && !vis.has(curId)) {
+              vis.add(curId);
+              if (respondedQuestionIds.has(curId)) {
+                answeredAncestorIds.add(curId);
+              }
+              const cur = questionById.get(curId);
+              if (!cur || !cur.depends_on_question_id) break;
+              curId = cur.depends_on_question_id;
+            }
+          }
+        }
+        // Also collect ancestors for answered-but-modified questions
+        for (let i = 0; i < answeredModifiedQuestionIds.length; i++) {
+          const mq = questionById.get(answeredModifiedQuestionIds[i]);
+          if (mq && mq.depends_on_question_id) {
+            let curId = mq.depends_on_question_id;
+            const vis = new Set();
+            while (curId && !vis.has(curId)) {
+              vis.add(curId);
+              if (respondedQuestionIds.has(curId)) {
+                answeredAncestorIds.add(curId);
+              }
+              const cur = questionById.get(curId);
+              if (!cur || !cur.depends_on_question_id) break;
+              curId = cur.depends_on_question_id;
+            }
+          }
+        }
+
+        // Query the user's latest answer_ids for each answered ancestor
+        // (only for selectable types, used for reachability check)
+        const userAnswersByQuestionId = new Map();
+        if (answeredAncestorIds.size > 0) {
+          const ancestorIdArr = [...answeredAncestorIds];
+          const ph = ancestorIdArr.map(() => '?').join(',');
+          const [userAnswerRows] = await mysqlConnection.promise().query(
+            `SELECT uq.question_id, uqa.answer_id
+             FROM user_question uq
+             INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
+             WHERE uq.user_id = ? AND uq.question_id IN (${ph})
+             AND uq.id = (
+               SELECT MAX(uq2.id)
+               FROM user_question uq2
+               WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
+             )`,
+            [cabecera.id, ...ancestorIdArr]
+          );
+          for (let i = 0; i < userAnswerRows.length; i++) {
+            const row = userAnswerRows[i];
+            if (!userAnswersByQuestionId.has(row.question_id)) {
+              userAnswersByQuestionId.set(row.question_id, new Set());
+            }
+            userAnswersByQuestionId.get(row.question_id).add(row.answer_id);
+          }
+        }
+
+        // Check if a question is reachable through the user's current answer chain
+        const reachabilityCache = new Map();
+        function isQuestionReachable(questionId, visited) {
+          if (reachabilityCache.has(questionId)) return reachabilityCache.get(questionId);
+          if (!visited) visited = new Set();
+          if (visited.has(questionId)) {
+            reachabilityCache.set(questionId, false);
+            return false;
+          }
+          visited.add(questionId);
+          const question = questionById.get(questionId);
+          if (!question) {
+            reachabilityCache.set(questionId, false);
+            return false;
+          }
+          // Root question (no dependency) → always reachable
+          if (!question.depends_on_question_id) {
+            reachabilityCache.set(questionId, true);
+            return true;
+          }
+          // Check if user answered the parent with the required answer
+          const parentAnswers = userAnswersByQuestionId.get(question.depends_on_question_id);
+          if (!parentAnswers || !parentAnswers.has(question.depends_on_answer_id)) {
+            reachabilityCache.set(questionId, false);
+            return false;
+          }
+          // Parent has correct answer – check if parent itself is reachable
+          const parentReachable = isQuestionReachable(question.depends_on_question_id, visited);
+          reachabilityCache.set(questionId, parentReachable);
+          return parentReachable;
+        }
+
+        for (let i = 0; i < pendingQuestionIds.length; i++) {
+          const pendingQuestionId = pendingQuestionIds[i];
+          const pendingQuestion = questionById.get(pendingQuestionId);
+
+          // No dependency → always include as regular pending question
+          if (!pendingQuestion || !pendingQuestion.depends_on_question_id) {
+            selectedQuestionIds.add(pendingQuestionId);
+            continue;
+          }
+
+          // If the question is currently reachable through the user's answer chain,
+          // check if it was modified after ancestors were last answered.
+          // If so, include its genealogy for re-answering (e.g., admin added new answer options).
+          if (isQuestionReachable(pendingQuestionId)) {
+            const reachableEffectiveDate = pendingQuestion.available_since;
+            if (reachableEffectiveDate && pendingQuestion.depends_on_question_id) {
+              let reachableMaxAncestorDate = null;
+              let reachableCurId = pendingQuestion.depends_on_question_id;
+              const reachableAncestorChain = [];
+              const reachableVisited = new Set();
+
+              while (reachableCurId && !reachableVisited.has(reachableCurId)) {
+                reachableVisited.add(reachableCurId);
+                reachableAncestorChain.push(reachableCurId);
+                const lastAnswered = lastAnsweredAtByQuestionId.get(reachableCurId);
+                if (lastAnswered) {
+                  if (!reachableMaxAncestorDate || new Date(lastAnswered) > new Date(reachableMaxAncestorDate)) {
+                    reachableMaxAncestorDate = lastAnswered;
+                  }
+                }
+                const curQuestion = questionById.get(reachableCurId);
+                if (!curQuestion || !curQuestion.depends_on_question_id) break;
+                reachableCurId = curQuestion.depends_on_question_id;
+              }
+
+              // Question was modified AFTER ancestors were last answered → include genealogy
+              if (!reachableMaxAncestorDate || new Date(reachableMaxAncestorDate) < new Date(reachableEffectiveDate)) {
+                selectedQuestionIds.add(pendingQuestionId);
+                for (let j = 0; j < reachableAncestorChain.length; j++) {
+                  selectedQuestionIds.add(reachableAncestorChain[j]);
+                  if (respondedQuestionIds.has(reachableAncestorChain[j])) {
+                    genealogyInjectedQuestionIds.add(reachableAncestorChain[j]);
+                  }
+                }
+                continue;
+              }
             }
 
-            const currentQuestion = questionById.get(currentQuestionId);
-            if (!currentQuestion || !currentQuestion.depends_on_question_id) {
-              break;
+            selectedQuestionIds.add(pendingQuestionId);
+            continue;
+          }
+
+          // Question is NOT reachable → check if the ancestry was already addressed
+          // by comparing ancestor answer dates with the question's available_since date
+          const effectiveDate = pendingQuestion.available_since;
+          let maxAncestorAnswerDate = null;
+          let currentQuestionId = pendingQuestion.depends_on_question_id;
+          const ancestorChain = [];
+          const visitedTimestamp = new Set();
+
+          while (currentQuestionId && !visitedTimestamp.has(currentQuestionId)) {
+            visitedTimestamp.add(currentQuestionId);
+            ancestorChain.push(currentQuestionId);
+            const lastAnswered = lastAnsweredAtByQuestionId.get(currentQuestionId);
+            if (lastAnswered) {
+              if (!maxAncestorAnswerDate || new Date(lastAnswered) > new Date(maxAncestorAnswerDate)) {
+                maxAncestorAnswerDate = lastAnswered;
+              }
             }
+            const currentQuestion = questionById.get(currentQuestionId);
+            if (!currentQuestion || !currentQuestion.depends_on_question_id) break;
             currentQuestionId = currentQuestion.depends_on_question_id;
-            isRootPendingQuestion = false;
+          }
+
+          // If any ancestor was answered AFTER the question became available,
+          // the user already had the chance to unlock it and chose not to → skip
+          if (effectiveDate && maxAncestorAnswerDate && new Date(maxAncestorAnswerDate) >= new Date(effectiveDate)) {
+            continue;
+          }
+
+          // Otherwise, include the pending question and its genealogy for re-answering
+          selectedQuestionIds.add(pendingQuestionId);
+          for (let j = 0; j < ancestorChain.length; j++) {
+            selectedQuestionIds.add(ancestorChain[j]);
+            if (respondedQuestionIds.has(ancestorChain[j])) {
+              genealogyInjectedQuestionIds.add(ancestorChain[j]);
+            }
+          }
+        }
+
+        // Include answered-but-modified questions and their ancestor chains
+        // so users can update answers after admin modifications (e.g., new options added)
+        for (let i = 0; i < answeredModifiedQuestionIds.length; i++) {
+          const modifiedQId = answeredModifiedQuestionIds[i];
+          selectedQuestionIds.add(modifiedQId);
+          genealogyInjectedQuestionIds.add(modifiedQId);
+
+          const modifiedQ = questionById.get(modifiedQId);
+          if (modifiedQ && modifiedQ.depends_on_question_id) {
+            let curId = modifiedQ.depends_on_question_id;
+            const vis = new Set();
+            while (curId && !vis.has(curId)) {
+              vis.add(curId);
+              selectedQuestionIds.add(curId);
+              if (respondedQuestionIds.has(curId)) {
+                genealogyInjectedQuestionIds.add(curId);
+              }
+              const cur = questionById.get(curId);
+              if (!cur || !cur.depends_on_question_id) break;
+              curId = cur.depends_on_question_id;
+            }
           }
         }
       } else {
         for (let i = 0; i < pendingQuestionIds.length; i++) {
           selectedQuestionIds.add(pendingQuestionIds[i]);
+        }
+      }
+
+      // Safety pass: ensure all parents of selected questions are included
+      // so the frontend can always render the full dependency chain
+      if (includeGenealogy) {
+        const questionsToCheck = [...selectedQuestionIds];
+        for (let i = 0; i < questionsToCheck.length; i++) {
+          const q = questionById.get(questionsToCheck[i]);
+          if (q && q.depends_on_question_id && questionById.has(q.depends_on_question_id)) {
+            if (!selectedQuestionIds.has(q.depends_on_question_id)) {
+              selectedQuestionIds.add(q.depends_on_question_id);
+              questionsToCheck.push(q.depends_on_question_id);
+              if (respondedQuestionIds.has(q.depends_on_question_id)) {
+                genealogyInjectedQuestionIds.add(q.depends_on_question_id);
+              }
+            }
+          }
         }
       }
 
@@ -6812,7 +7259,7 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
           return a.id - b.id;
         })
         .map(question => {
-          const previouslyAnswered = answeredQuestionIds.has(question.id);
+          const previouslyAnswered = respondedQuestionIds.has(question.id);
           const requiresReanswer = includeGenealogy
             ? pendingQuestionIdSet.has(question.id) || (previouslyAnswered && genealogyInjectedQuestionIds.has(question.id))
             : false;
@@ -8563,6 +9010,11 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
           JOIN user_question_answer uqaf ON uqf.id = uqaf.user_question_id
           WHERE uqf.user_id = u.id
             AND uqf.question_id = ?
+            AND uqf.id = (
+              SELECT MAX(uqf2.id)
+              FROM user_question uqf2
+              WHERE uqf2.user_id = uqf.user_id AND uqf2.question_id = uqf.question_id
+            )
             AND uqaf.answer_id IN (?)
         )
       `);
@@ -8605,12 +9057,16 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
             uq.answer_number,
             a.name AS answer_name
           FROM user_question uq
+          INNER JOIN (
+            SELECT user_id, question_id, MAX(id) AS max_id
+            FROM user_question
+            WHERE user_id IN (?) AND question_id IN (?)
+            GROUP BY user_id, question_id
+          ) uq_latest ON uq_latest.max_id = uq.id
           JOIN question q ON q.id = uq.question_id
           LEFT JOIN answer_type at ON at.id = q.answer_type_id
           LEFT JOIN user_question_answer uqa ON uqa.user_question_id = uq.id
           LEFT JOIN answer a ON a.id = uqa.answer_id AND a.question_id = uq.question_id
-          WHERE uq.user_id IN (?)
-            AND uq.question_id IN (?)
         `;
         const [rowsAns] = await mysqlConnection.promise().query(answersSql, [userIds, questionIds]);
         answersRows = rowsAns;
@@ -10662,6 +11118,11 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
               SELECT uq.user_id FROM user_question uq
               INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
               WHERE uq.question_id = ? AND uqa.answer_id IN (${contentPlaceholders})
+                AND uq.id = (
+                  SELECT MAX(uq2.id)
+                  FROM user_question uq2
+                  WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
+                )
             )`);
             params.push(question_id, ...content);
           } else if (content && !Array.isArray(content)) {
@@ -10669,6 +11130,11 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
               SELECT uq.user_id FROM user_question uq
               INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
               WHERE uq.question_id = ? AND uqa.answer_id = ?
+                AND uq.id = (
+                  SELECT MAX(uq2.id)
+                  FROM user_question uq2
+                  WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
+                )
             )`);
             params.push(question_id, content);
           }
@@ -10699,6 +11165,11 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
         INNER JOIN question q ON q.enabled = 'Y' AND q.answer_type_id IN (3, 4)
         LEFT JOIN user_question uq ON u.id = uq.user_id AND uq.question_id = q.id
+          AND uq.id = (
+            SELECT MAX(uq2.id)
+            FROM user_question uq2
+            WHERE uq2.user_id = u.id AND uq2.question_id = q.id
+          )
         LEFT JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
         LEFT JOIN answer a ON a.id = uqa.answer_id AND a.question_id = q.id
         LEFT JOIN delivery_beneficiary db ON u.id = db.receiving_user_id
