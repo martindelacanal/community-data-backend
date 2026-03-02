@@ -21079,6 +21079,998 @@ router.get('/trusted-resources/services', async (req, res) => {
   }
 });
 
+// ============ CATALOG CRUD ENDPOINTS (ADMIN) ============
+
+// --- FILTERS CRUD ---
+
+// GET /trusted-resources/filters/exists - Check if filter name already exists
+router.get('/trusted-resources/filters/exists', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { nameEnglish, excludeId } = req.query;
+
+    if (!nameEnglish) {
+      return res.status(400).json('nameEnglish is required');
+    }
+
+    let query = 'SELECT COUNT(*) as count FROM resource_filters WHERE name_english = ?';
+    const params = [nameEnglish];
+
+    if (excludeId) {
+      query += ' AND id != ?';
+      params.push(parseInt(excludeId));
+    }
+
+    const [result] = await mysqlConnection.promise().query(query, params);
+    res.json({ exists: result[0].count > 0 });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error checking filter existence:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/filters/paginated - Get paginated filters
+router.get('/trusted-resources/filters/paginated', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const {
+      page = 1,
+      pageSize = 5,
+      search = '',
+      orderBy = 'id',
+      orderType = 'ASC'
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const pageSizeNum = parseInt(pageSize);
+    const offset = (pageNum - 1) * pageSizeNum;
+
+    // Sanitize orderBy to prevent SQL injection
+    const allowedOrderBy = ['id', 'name_english', 'name_spanish', 'created_at'];
+    const orderByColumn = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
+    const orderDirection = orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+
+    let whereConditions = [];
+    let queryParams = [];
+
+    if (search && search.trim() !== '') {
+      whereConditions.push('(rf.name_english LIKE ? OR rf.name_spanish LIKE ?)');
+      const searchTerm = `%${search.trim()}%`;
+      queryParams.push(searchTerm, searchTerm);
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    // Get total count
+    const [countResult] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as total FROM resource_filters rf ${whereClause}`,
+      queryParams
+    );
+    const totalItems = countResult[0].total;
+
+    // Get paginated results with resource count
+    const [filters] = await mysqlConnection.promise().query(
+      `SELECT rf.id, rf.name_english, rf.name_spanish,
+        DATE_FORMAT(CONVERT_TZ(rf.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        (SELECT COUNT(*) FROM resource_filter_relations rfr WHERE rfr.filter_id = rf.id) as resource_count
+       FROM resource_filters rf
+       ${whereClause}
+       ORDER BY ${orderByColumn} ${orderDirection}
+       LIMIT ? OFFSET ?`,
+      [...queryParams, pageSizeNum, offset]
+    );
+
+    const formattedFilters = filters.map(filter => ({
+      id: filter.id,
+      nameEnglish: filter.name_english,
+      nameSpanish: filter.name_spanish,
+      createdAt: filter.created_at,
+      resourceCount: filter.resource_count
+    }));
+
+    res.json({
+      results: formattedFilters,
+      numOfPages: Math.ceil(totalItems / pageSizeNum),
+      totalItems,
+      page: pageNum,
+      orderBy,
+      orderType: orderDirection
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting paginated filters:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/filters/:id - Get filter detail with associated resources
+router.get('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [filters] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_filters WHERE id = ? LIMIT 1`,
+      [id]
+    );
+
+    if (filters.length === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    const filter = filters[0];
+
+    // Get associated trusted resources
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT tr.id, tr.title_english, tr.title_spanish,
+        DATE_FORMAT(CONVERT_TZ(tr.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at
+       FROM trusted_resources tr
+       INNER JOIN resource_filter_relations rfr ON tr.id = rfr.resource_id
+       WHERE rfr.filter_id = ?
+       ORDER BY tr.title_english`,
+      [id]
+    );
+
+    res.json({
+      id: filter.id,
+      nameEnglish: filter.name_english,
+      nameSpanish: filter.name_spanish,
+      createdAt: filter.created_at,
+      updatedAt: filter.updated_at,
+      trustedResources: resources.map(r => ({
+        id: r.id,
+        titleEnglish: r.title_english,
+        titleSpanish: r.title_spanish,
+        createdAt: r.created_at
+      }))
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting filter detail:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /trusted-resources/filters - Create a new filter
+router.post('/trusted-resources/filters', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { nameEnglish, nameSpanish } = req.body;
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 255 || nameSpanish.length > 255) {
+      return res.status(400).json('Name fields must not exceed 255 characters');
+    }
+
+    // Check if name already exists
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_filters WHERE name_english = ?',
+      [nameEnglish]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json('A filter with this English name already exists');
+    }
+
+    const [result] = await mysqlConnection.promise().query(
+      'INSERT INTO resource_filters (name_english, name_spanish) VALUES (?, ?)',
+      [nameEnglish, nameSpanish]
+    );
+
+    const [created] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_filters WHERE id = ?`,
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      id: created[0].id,
+      nameEnglish: created[0].name_english,
+      nameSpanish: created[0].name_spanish,
+      createdAt: created[0].created_at,
+      updatedAt: created[0].updated_at
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error creating filter:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// PUT /trusted-resources/filters/:id - Update a filter
+router.put('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+    const { nameEnglish, nameSpanish } = req.body;
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 255 || nameSpanish.length > 255) {
+      return res.status(400).json('Name fields must not exceed 255 characters');
+    }
+
+    // Check if name already exists (excluding current record)
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_filters WHERE name_english = ? AND id != ?',
+      [nameEnglish, id]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json('A filter with this English name already exists');
+    }
+
+    const [updateResult] = await mysqlConnection.promise().query(
+      'UPDATE resource_filters SET name_english = ?, name_spanish = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [nameEnglish, nameSpanish, id]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    const [updated] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_filters WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      id: updated[0].id,
+      nameEnglish: updated[0].name_english,
+      nameSpanish: updated[0].name_spanish,
+      createdAt: updated[0].created_at,
+      updatedAt: updated[0].updated_at
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error updating filter:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// DELETE /trusted-resources/filters/:id - Delete a filter
+router.delete('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    // Check if filter has associated resources
+    const [relations] = await mysqlConnection.promise().query(
+      'SELECT COUNT(*) as count FROM resource_filter_relations WHERE filter_id = ?',
+      [id]
+    );
+
+    if (relations[0].count > 0) {
+      return res.status(409).json('Cannot delete filter: it has associated trusted resources. Remove the associations first.');
+    }
+
+    const [deleteResult] = await mysqlConnection.promise().query(
+      'DELETE FROM resource_filters WHERE id = ?',
+      [id]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    res.json({ message: 'Filter deleted successfully' });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting filter:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// --- PRICES CRUD ---
+
+// GET /trusted-resources/prices/exists - Check if price name already exists
+router.get('/trusted-resources/prices/exists', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { nameEnglish, excludeId } = req.query;
+
+    if (!nameEnglish) {
+      return res.status(400).json('nameEnglish is required');
+    }
+
+    let query = 'SELECT COUNT(*) as count FROM resource_prices WHERE name_english = ?';
+    const params = [nameEnglish];
+
+    if (excludeId) {
+      query += ' AND id != ?';
+      params.push(parseInt(excludeId));
+    }
+
+    const [result] = await mysqlConnection.promise().query(query, params);
+    res.json({ exists: result[0].count > 0 });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error checking price existence:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/prices/paginated - Get paginated prices
+router.get('/trusted-resources/prices/paginated', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const {
+      page = 1,
+      pageSize = 5,
+      search = '',
+      orderBy = 'id',
+      orderType = 'ASC'
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const pageSizeNum = parseInt(pageSize);
+    const offset = (pageNum - 1) * pageSizeNum;
+
+    const allowedOrderBy = ['id', 'name_english', 'name_spanish', 'created_at'];
+    const orderByColumn = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
+    const orderDirection = orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+
+    let whereConditions = [];
+    let queryParams = [];
+
+    if (search && search.trim() !== '') {
+      whereConditions.push('(rp.name_english LIKE ? OR rp.name_spanish LIKE ?)');
+      const searchTerm = `%${search.trim()}%`;
+      queryParams.push(searchTerm, searchTerm);
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    const [countResult] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as total FROM resource_prices rp ${whereClause}`,
+      queryParams
+    );
+    const totalItems = countResult[0].total;
+
+    const [prices] = await mysqlConnection.promise().query(
+      `SELECT rp.id, rp.name_english, rp.name_spanish, rp.description,
+        DATE_FORMAT(CONVERT_TZ(rp.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        (SELECT COUNT(*) FROM resource_price_relations rpr WHERE rpr.price_id = rp.id) as resource_count
+       FROM resource_prices rp
+       ${whereClause}
+       ORDER BY ${orderByColumn} ${orderDirection}
+       LIMIT ? OFFSET ?`,
+      [...queryParams, pageSizeNum, offset]
+    );
+
+    const formattedPrices = prices.map(price => ({
+      id: price.id,
+      nameEnglish: price.name_english,
+      nameSpanish: price.name_spanish,
+      description: price.description || null,
+      createdAt: price.created_at,
+      resourceCount: price.resource_count
+    }));
+
+    res.json({
+      results: formattedPrices,
+      numOfPages: Math.ceil(totalItems / pageSizeNum),
+      totalItems,
+      page: pageNum,
+      orderBy,
+      orderType: orderDirection
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting paginated prices:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/prices/:id - Get price detail with associated resources
+router.get('/trusted-resources/prices/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [prices] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish, description,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_prices WHERE id = ? LIMIT 1`,
+      [id]
+    );
+
+    if (prices.length === 0) {
+      return res.status(404).json({ message: 'Price type not found' });
+    }
+
+    const price = prices[0];
+
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT tr.id, tr.title_english, tr.title_spanish,
+        DATE_FORMAT(CONVERT_TZ(tr.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at
+       FROM trusted_resources tr
+       INNER JOIN resource_price_relations rpr ON tr.id = rpr.resource_id
+       WHERE rpr.price_id = ?
+       ORDER BY tr.title_english`,
+      [id]
+    );
+
+    res.json({
+      id: price.id,
+      nameEnglish: price.name_english,
+      nameSpanish: price.name_spanish,
+      description: price.description || null,
+      createdAt: price.created_at,
+      updatedAt: price.updated_at,
+      trustedResources: resources.map(r => ({
+        id: r.id,
+        titleEnglish: r.title_english,
+        titleSpanish: r.title_spanish,
+        createdAt: r.created_at
+      }))
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting price detail:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /trusted-resources/prices - Create a new price type
+router.post('/trusted-resources/prices', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { nameEnglish, nameSpanish, description } = req.body;
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 255 || nameSpanish.length > 255) {
+      return res.status(400).json('Name fields must not exceed 255 characters');
+    }
+
+    if (description && description.length > 500) {
+      return res.status(400).json('Description must not exceed 500 characters');
+    }
+
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_prices WHERE name_english = ?',
+      [nameEnglish]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json('A price type with this English name already exists');
+    }
+
+    const normalizedDescription = description && description.trim() !== '' ? description.trim() : null;
+
+    const [result] = await mysqlConnection.promise().query(
+      'INSERT INTO resource_prices (name_english, name_spanish, description) VALUES (?, ?, ?)',
+      [nameEnglish, nameSpanish, normalizedDescription]
+    );
+
+    const [created] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish, description,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_prices WHERE id = ?`,
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      id: created[0].id,
+      nameEnglish: created[0].name_english,
+      nameSpanish: created[0].name_spanish,
+      description: created[0].description || null,
+      createdAt: created[0].created_at,
+      updatedAt: created[0].updated_at
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error creating price type:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// PUT /trusted-resources/prices/:id - Update a price type
+router.put('/trusted-resources/prices/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+    const { nameEnglish, nameSpanish, description } = req.body;
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 255 || nameSpanish.length > 255) {
+      return res.status(400).json('Name fields must not exceed 255 characters');
+    }
+
+    if (description && description.length > 500) {
+      return res.status(400).json('Description must not exceed 500 characters');
+    }
+
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_prices WHERE name_english = ? AND id != ?',
+      [nameEnglish, id]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json('A price type with this English name already exists');
+    }
+
+    const normalizedDescription = description && description.trim() !== '' ? description.trim() : null;
+
+    const [updateResult] = await mysqlConnection.promise().query(
+      'UPDATE resource_prices SET name_english = ?, name_spanish = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [nameEnglish, nameSpanish, normalizedDescription, id]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Price type not found' });
+    }
+
+    const [updated] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish, description,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_prices WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      id: updated[0].id,
+      nameEnglish: updated[0].name_english,
+      nameSpanish: updated[0].name_spanish,
+      description: updated[0].description || null,
+      createdAt: updated[0].created_at,
+      updatedAt: updated[0].updated_at
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error updating price type:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// DELETE /trusted-resources/prices/:id - Delete a price type
+router.delete('/trusted-resources/prices/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [relations] = await mysqlConnection.promise().query(
+      'SELECT COUNT(*) as count FROM resource_price_relations WHERE price_id = ?',
+      [id]
+    );
+
+    if (relations[0].count > 0) {
+      return res.status(409).json('Cannot delete price type: it has associated trusted resources. Remove the associations first.');
+    }
+
+    const [deleteResult] = await mysqlConnection.promise().query(
+      'DELETE FROM resource_prices WHERE id = ?',
+      [id]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Price type not found' });
+    }
+
+    res.json({ message: 'Price type deleted successfully' });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting price type:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// --- SERVICES CRUD ---
+
+// GET /trusted-resources/services/exists - Check if service name already exists
+router.get('/trusted-resources/services/exists', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { nameEnglish, excludeId } = req.query;
+
+    if (!nameEnglish) {
+      return res.status(400).json('nameEnglish is required');
+    }
+
+    let query = 'SELECT COUNT(*) as count FROM resource_services WHERE name_english = ?';
+    const params = [nameEnglish];
+
+    if (excludeId) {
+      query += ' AND id != ?';
+      params.push(parseInt(excludeId));
+    }
+
+    const [result] = await mysqlConnection.promise().query(query, params);
+    res.json({ exists: result[0].count > 0 });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error checking service existence:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/services/paginated - Get paginated services
+router.get('/trusted-resources/services/paginated', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const {
+      page = 1,
+      pageSize = 5,
+      search = '',
+      orderBy = 'id',
+      orderType = 'ASC'
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const pageSizeNum = parseInt(pageSize);
+    const offset = (pageNum - 1) * pageSizeNum;
+
+    const allowedOrderBy = ['id', 'name_english', 'name_spanish', 'created_at'];
+    const orderByColumn = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
+    const orderDirection = orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+
+    let whereConditions = [];
+    let queryParams = [];
+
+    if (search && search.trim() !== '') {
+      whereConditions.push('(rs.name_english LIKE ? OR rs.name_spanish LIKE ?)');
+      const searchTerm = `%${search.trim()}%`;
+      queryParams.push(searchTerm, searchTerm);
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    const [countResult] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as total FROM resource_services rs ${whereClause}`,
+      queryParams
+    );
+    const totalItems = countResult[0].total;
+
+    const [services] = await mysqlConnection.promise().query(
+      `SELECT rs.id, rs.name_english, rs.name_spanish, rs.description,
+        DATE_FORMAT(CONVERT_TZ(rs.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        (SELECT COUNT(*) FROM resource_service_relations rsr WHERE rsr.service_id = rs.id) as resource_count
+       FROM resource_services rs
+       ${whereClause}
+       ORDER BY ${orderByColumn} ${orderDirection}
+       LIMIT ? OFFSET ?`,
+      [...queryParams, pageSizeNum, offset]
+    );
+
+    const formattedServices = services.map(service => ({
+      id: service.id,
+      nameEnglish: service.name_english,
+      nameSpanish: service.name_spanish,
+      description: service.description || null,
+      createdAt: service.created_at,
+      resourceCount: service.resource_count
+    }));
+
+    res.json({
+      results: formattedServices,
+      numOfPages: Math.ceil(totalItems / pageSizeNum),
+      totalItems,
+      page: pageNum,
+      orderBy,
+      orderType: orderDirection
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting paginated services:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/services/:id - Get service detail with associated resources
+router.get('/trusted-resources/services/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [services] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish, description,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_services WHERE id = ? LIMIT 1`,
+      [id]
+    );
+
+    if (services.length === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    const service = services[0];
+
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT tr.id, tr.title_english, tr.title_spanish,
+        DATE_FORMAT(CONVERT_TZ(tr.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at
+       FROM trusted_resources tr
+       INNER JOIN resource_service_relations rsr ON tr.id = rsr.resource_id
+       WHERE rsr.service_id = ?
+       ORDER BY tr.title_english`,
+      [id]
+    );
+
+    res.json({
+      id: service.id,
+      nameEnglish: service.name_english,
+      nameSpanish: service.name_spanish,
+      description: service.description || null,
+      createdAt: service.created_at,
+      updatedAt: service.updated_at,
+      trustedResources: resources.map(r => ({
+        id: r.id,
+        titleEnglish: r.title_english,
+        titleSpanish: r.title_spanish,
+        createdAt: r.created_at
+      }))
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting service detail:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /trusted-resources/services - Create a new service
+router.post('/trusted-resources/services', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { nameEnglish, nameSpanish, description } = req.body;
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 255 || nameSpanish.length > 255) {
+      return res.status(400).json('Name fields must not exceed 255 characters');
+    }
+
+    if (description && description.length > 500) {
+      return res.status(400).json('Description must not exceed 500 characters');
+    }
+
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_services WHERE name_english = ?',
+      [nameEnglish]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json('A service with this English name already exists');
+    }
+
+    const normalizedDescription = description && description.trim() !== '' ? description.trim() : null;
+
+    const [result] = await mysqlConnection.promise().query(
+      'INSERT INTO resource_services (name_english, name_spanish, description) VALUES (?, ?, ?)',
+      [nameEnglish, nameSpanish, normalizedDescription]
+    );
+
+    const [created] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish, description,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_services WHERE id = ?`,
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      id: created[0].id,
+      nameEnglish: created[0].name_english,
+      nameSpanish: created[0].name_spanish,
+      description: created[0].description || null,
+      createdAt: created[0].created_at,
+      updatedAt: created[0].updated_at
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error creating service:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// PUT /trusted-resources/services/:id - Update a service
+router.put('/trusted-resources/services/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+    const { nameEnglish, nameSpanish, description } = req.body;
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 255 || nameSpanish.length > 255) {
+      return res.status(400).json('Name fields must not exceed 255 characters');
+    }
+
+    if (description && description.length > 500) {
+      return res.status(400).json('Description must not exceed 500 characters');
+    }
+
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_services WHERE name_english = ? AND id != ?',
+      [nameEnglish, id]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json('A service with this English name already exists');
+    }
+
+    const normalizedDescription = description && description.trim() !== '' ? description.trim() : null;
+
+    const [updateResult] = await mysqlConnection.promise().query(
+      'UPDATE resource_services SET name_english = ?, name_spanish = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [nameEnglish, nameSpanish, normalizedDescription, id]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    const [updated] = await mysqlConnection.promise().query(
+      `SELECT id, name_english, name_spanish, description,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM resource_services WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      id: updated[0].id,
+      nameEnglish: updated[0].name_english,
+      nameSpanish: updated[0].name_spanish,
+      description: updated[0].description || null,
+      createdAt: updated[0].created_at,
+      updatedAt: updated[0].updated_at
+    });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error updating service:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// DELETE /trusted-resources/services/:id - Delete a service
+router.delete('/trusted-resources/services/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [relations] = await mysqlConnection.promise().query(
+      'SELECT COUNT(*) as count FROM resource_service_relations WHERE service_id = ?',
+      [id]
+    );
+
+    if (relations[0].count > 0) {
+      return res.status(409).json('Cannot delete service: it has associated trusted resources. Remove the associations first.');
+    }
+
+    const [deleteResult] = await mysqlConnection.promise().query(
+      'DELETE FROM resource_services WHERE id = ?',
+      [id]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    res.json({ message: 'Service deleted successfully' });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting service:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
 // ============ PUBLIC ENDPOINTS ============
 
 // GET /trusted-resources/public - Get all trusted resources (PUBLIC)
@@ -21219,9 +22211,9 @@ router.get('/trusted-resources/public', async (req, res) => {
         coordinates: resource.latitude && resource.longitude
           ? `${resource.latitude},${resource.longitude}`
           : null,
-        phoneNumber: resource.phone_number,
-        email: resource.email,
-        website: resource.website,
+        phoneNumber: resource.phone_number || null,
+        email: resource.email || null,
+        website: resource.website || null,
         imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
         isOpen: status.isOpen,
         filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
@@ -21307,9 +22299,9 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       coordinates: resource.latitude && resource.longitude
         ? `${resource.latitude},${resource.longitude}`
         : null,
-      phoneNumber: resource.phone_number,
-      email: resource.email,
-      website: resource.website,
+      phoneNumber: resource.phone_number || null,
+      email: resource.email || null,
+      website: resource.website || null,
       imageUrl: imageUrl,
       isOpen: status.isOpen,
       filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
@@ -21410,8 +22402,8 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         tr.image_url,
         tr.is_active,
         tr.is_open,
-        tr.created_at,
-        tr.updated_at
+        DATE_FORMAT(CONVERT_TZ(tr.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(tr.updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM trusted_resources tr
       ${filterJoin}
       ${whereClause}
@@ -21475,9 +22467,9 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         coordinates: resource.latitude && resource.longitude
           ? `${resource.latitude},${resource.longitude}`
           : null,
-        phoneNumber: resource.phone_number,
-        email: resource.email,
-        website: resource.website,
+        phoneNumber: resource.phone_number || null,
+        email: resource.email || null,
+        website: resource.website || null,
         imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
         isActive: resource.is_active === 1 || resource.is_active === true,
         isOpen: status.isOpen,
@@ -21534,8 +22526,8 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
         image_url,
         is_active,
         is_open,
-        created_at,
-        updated_at
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM trusted_resources
       WHERE id = ?
       LIMIT 1`,
@@ -21577,9 +22569,9 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       coordinates: resource.latitude && resource.longitude
         ? `${resource.latitude},${resource.longitude}`
         : null,
-      phoneNumber: resource.phone_number,
-      email: resource.email,
-      website: resource.website,
+      phoneNumber: resource.phone_number || null,
+      email: resource.email || null,
+      website: resource.website || null,
       imageUrl: imageUrl,
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: status.isOpen,
@@ -21633,10 +22625,14 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
 
     // Validate required fields
     if (!titleEnglish || !titleSpanish || !descriptionEnglish || !descriptionSpanish ||
-      !informationEnglish || !informationSpanish || !address || !coordinates ||
-      !phoneNumber || !email || !website) {
+      !informationEnglish || !informationSpanish || !address || !coordinates) {
       return res.status(400).json('Missing required fields');
     }
+
+    // Normalize optional fields: convert empty strings to null
+    const normalizedPhone = phoneNumber && phoneNumber.trim() !== '' ? phoneNumber.trim() : null;
+    const normalizedEmail = email && email.trim() !== '' ? email.trim() : null;
+    const normalizedWebsite = website && website.trim() !== '' ? website.trim() : null;
 
     // Parse coordinates from string format "lat,lng"
     const coordParts = coordinates.split(',').map(c => c.trim());
@@ -21658,7 +22654,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
         informationEnglish, informationSpanish, address,
         longitude, latitude,
-        phoneNumber, email, website, isActive ? 1 : 0]
+        normalizedPhone, normalizedEmail, normalizedWebsite, isActive ? 1 : 0]
     );
 
     const resourceId = result.insertId;
@@ -21715,7 +22711,9 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
         id, title_english, title_spanish, description_english, description_spanish,
         information_english, information_spanish, address, 
         ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude,
-        phone_number, email, website, image_url, is_active, is_open, created_at, updated_at
+        phone_number, email, website, image_url, is_active, is_open,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM trusted_resources WHERE id = ?`,
       [resourceId]
     );
@@ -21747,9 +22745,9 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       coordinates: resource.latitude && resource.longitude
         ? `${resource.latitude},${resource.longitude}`
         : null,
-      phoneNumber: resource.phone_number,
-      email: resource.email,
-      website: resource.website,
+      phoneNumber: resource.phone_number || null,
+      email: resource.email || null,
+      website: resource.website || null,
       imageUrl: imageUrl,
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: resource.is_open === 1 || resource.is_open === true,
@@ -21805,10 +22803,14 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
 
     // Validate required fields
     if (!titleEnglish || !titleSpanish || !descriptionEnglish || !descriptionSpanish ||
-      !informationEnglish || !informationSpanish || !address || !coordinates ||
-      !phoneNumber || !email || !website) {
+      !informationEnglish || !informationSpanish || !address || !coordinates) {
       return res.status(400).json('Missing required fields');
     }
+
+    // Normalize optional fields: convert empty strings to null
+    const normalizedPhone = phoneNumber && phoneNumber.trim() !== '' ? phoneNumber.trim() : null;
+    const normalizedEmail = email && email.trim() !== '' ? email.trim() : null;
+    const normalizedWebsite = website && website.trim() !== '' ? website.trim() : null;
 
     // Parse coordinates from string format "lat,lng"
     const coordParts = coordinates.split(',').map(c => c.trim());
@@ -21831,7 +22833,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
         informationEnglish, informationSpanish, address,
         longitude, latitude,
-        phoneNumber, email, website, isActive ? 1 : 0, id]
+        normalizedPhone, normalizedEmail, normalizedWebsite, isActive ? 1 : 0, id]
     );
 
     if (updateResult.affectedRows === 0) {
@@ -21897,7 +22899,9 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
         id, title_english, title_spanish, description_english, description_spanish,
         information_english, information_spanish, address, 
         ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude,
-        phone_number, email, website, image_url, is_active, is_open, created_at, updated_at
+        phone_number, email, website, image_url, is_active, is_open,
+        DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM trusted_resources WHERE id = ?`,
       [id]
     );
@@ -21932,9 +22936,9 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       coordinates: resource.latitude && resource.longitude
         ? `${resource.latitude},${resource.longitude}`
         : null,
-      phoneNumber: resource.phone_number,
-      email: resource.email,
-      website: resource.website,
+      phoneNumber: resource.phone_number || null,
+      email: resource.email || null,
+      website: resource.website || null,
       imageUrl: imageUrl,
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: status.isOpen,
