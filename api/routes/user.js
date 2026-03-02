@@ -6967,6 +6967,18 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
         }
       }
 
+      const childQuestionIdsByParentId = new Map();
+      for (const question of questionById.values()) {
+        const parentQuestionId = parseSurveyNullablePositiveInt(question.depends_on_question_id);
+        if (!parentQuestionId) {
+          continue;
+        }
+        if (!childQuestionIdsByParentId.has(parentQuestionId)) {
+          childQuestionIdsByParentId.set(parentQuestionId, []);
+        }
+        childQuestionIdsByParentId.get(parentQuestionId).push(question.id);
+      }
+
       const [latestUserQuestionRows] = await mysqlConnection.promise().query(
         `select
            uq.id,
@@ -7225,6 +7237,28 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
               const cur = questionById.get(curId);
               if (!cur || !cur.depends_on_question_id) break;
               curId = cur.depends_on_question_id;
+            }
+          }
+
+          // Include descendant chain (children/grandchildren) so dependent
+          // questions are also re-evaluated after parent edits.
+          const descendantVisited = new Set();
+          const descendantQueue = [modifiedQId];
+          while (descendantQueue.length > 0) {
+            const currentId = descendantQueue.shift();
+            if (!currentId || descendantVisited.has(currentId)) {
+              continue;
+            }
+            descendantVisited.add(currentId);
+
+            const childIds = childQuestionIdsByParentId.get(currentId) || [];
+            for (let j = 0; j < childIds.length; j++) {
+              const childId = childIds[j];
+              descendantQueue.push(childId);
+              selectedQuestionIds.add(childId);
+              if (respondedQuestionIds.has(childId)) {
+                genealogyInjectedQuestionIds.add(childId);
+              }
             }
           }
         }
