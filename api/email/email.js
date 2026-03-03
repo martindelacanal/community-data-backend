@@ -224,7 +224,7 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, language)
       subjectMessage = 'Terms and conditions signed';
       htmlMessage = `<b>Location chosen:</b> ${locationCity}<br>
                         <b>Date:</b> ${date}<br><br>
-                        <b>2025 Volunteer Liability Waiver, Terms and conditions:</b><br>
+                        <b>2026 Volunteer Liability Waiver, Terms and conditions:</b><br>
                         I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
                         I further understand that Bienestar is Well-being provides no compensation for my services and 
                         that I am not entitled to any benefits from the Organization, including but not limited to 
@@ -254,7 +254,7 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, language)
 
       textMessage = `Location chosen: ${locationCity}\n
                         Date: ${date}\n\n
-                        2025 Volunteer Liability Waiver, Terms and conditions:\n
+                        2026 Volunteer Liability Waiver, Terms and conditions:\n
                         I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
                         I further understand that Bienestar is Well-being provides no compensation for my services and 
                         that I am not entitled to any benefits from the Organization, including but not limited to 
@@ -285,7 +285,7 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, language)
       subjectMessage = 'Términos y condiciones firmados';
       htmlMessage = `<b>Locación elegida:</b> ${locationCity}<br>
                         <b>Fecha:</b> ${date}<br><br>
-                        <b>2025 Exención de responsabilidad voluntaria, términos y condiciones:</b><br>
+                        <b>2026 Exención de responsabilidad voluntaria, términos y condiciones:</b><br>
                         Acepto ofrecer mis servicios como voluntario (“Actividad”) para Bienestar is Well-being (“Organización”). 
                         Además, entiendo que Bienestar is Well-being no proporciona compensación por mis servicios y que no tengo derecho 
                         a ningún beneficio de la Organización, incluidos, entre otros, los beneficios de compensación laboral.<br>
@@ -315,7 +315,7 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, language)
 
       textMessage = `Locación elegida: ${locationCity}\n
                         Fecha: ${date}\n\n
-                        2025 Exención de responsabilidad voluntaria, términos y condiciones:\n
+                        2026 Exención de responsabilidad voluntaria, términos y condiciones:\n
                         Acepto ofrecer mis servicios como voluntario (“Actividad”) para Bienestar is Well-being (“Organización”). 
                         Además, entiendo que Bienestar is Well-being no proporciona compensación por mis servicios y que no tengo derecho 
                         a ningún beneficio de la Organización, incluidos, entre otros, los beneficios de compensación laboral.\n
