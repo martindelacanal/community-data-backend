@@ -6818,8 +6818,8 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
     try {
       // get all questions and answers from table question and answer, if language === 'es' then get name_es, else get name
       const query = `SELECT q.id as question_id, 
-                  q.name AS question_name, 
-                  q.name_es AS question_name_es, 
+                  q.name AS question_name_en,
+          q.name_es AS question_name_es,
                   q.\`order\` AS question_order,
                   q.answer_type_id,
                   ${language === 'en' ? 'at.name' : 'at.name_es'}  AS answer_type_name,
@@ -6827,8 +6827,8 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
                   q.depends_on_answer_id,
                   q.enabled as question_enabled,
                   a.id as answer_id, 
-                  a.name AS answer_name,
-                  a.name_es AS answer_name_es,
+                  a.name AS answer_name_en,
+          a.name_es AS answer_name_es,
                   a.\`order\` AS answer_order,
                   a.enabled as answer_enabled,
                   l.id as location_id, 
@@ -6851,7 +6851,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
         if (row.question_id !== question_id) {
           questions.push({
             id: row.question_id,
-            name: row.question_name,
+            name_en: row.question_name_en,
             name_es: row.question_name_es,
             order: row.question_order,
             depends_on_question_id: row.depends_on_question_id,
@@ -6872,7 +6872,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
           questions[questions.length - 1].answers.push({
             question_id: row.question_id,
             id: row.answer_id,
-            name: row.answer_name,
+            name_en: row.answer_name_en,
             name_es: row.answer_name_es,
             order: row.answer_order,
             enabled: row.answer_enabled,
@@ -6921,14 +6921,16 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           q.id as question_id,
-          ${language === 'en' ? 'q.name' : 'q.name_es'} AS question_name,
+          q.name AS question_name_en,
+          q.name_es AS question_name_es,
           q.\`order\` AS question_order,
           q.answer_type_id,
           q.depends_on_question_id,
           q.depends_on_answer_id,
           a.id as answer_id,
           a.\`order\` AS answer_order,
-          ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name,
+          a.name AS answer_name_en,
+          a.name_es AS answer_name_es,
           GREATEST(
             COALESCE(q.updated_at, q.created_at, '2000-01-01'),
             COALESCE(ql.updated_at, ql.created_at, '2000-01-01')
@@ -6947,7 +6949,8 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
         if (!questionById.has(row.question_id)) {
           questionById.set(row.question_id, {
             id: row.question_id,
-            name: row.question_name,
+            name_en: row.question_name_en,
+          name_es: row.question_name_es,
             order: row.question_order,
             depends_on_question_id: row.depends_on_question_id,
             depends_on_answer_id: row.depends_on_answer_id,
@@ -6962,7 +6965,8 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
             question_id: row.question_id,
             id: row.answer_id,
             order: row.answer_order,
-            name: row.answer_name
+            name_en: row.answer_name_en,
+          name_es: row.answer_name_es
           });
         }
       }
@@ -7337,14 +7341,16 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
   try {
     // get all questions and answers from table question and answer, if language === 'es' then get name_es, else get name
     const query = `SELECT q.id as question_id, 
-                  ${language === 'en' ? 'q.name' : 'q.name_es'} AS question_name, 
+                  q.name AS question_name_en,
+          q.name_es AS question_name_es,
                   q.\`order\` AS question_order,
                   q.answer_type_id,
                   q.depends_on_question_id,
                   q.depends_on_answer_id,
                   a.id as answer_id, 
                   a.\`order\` AS answer_order,
-                  ${language === 'en' ? 'a.name' : 'a.name_es'} AS answer_name
+                  a.name AS answer_name_en,
+                  a.name_es AS answer_name_es
                   FROM question as q
                   ${location_id ? 'INNER JOIN question_location as ql ON q.id = ql.question_id' : ''}
                   LEFT JOIN answer as a ON q.id = a.question_id
@@ -7361,7 +7367,8 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
       if (row.question_id !== question_id) {
         questions.push({
           id: row.question_id,
-          name: row.question_name,
+          name_en: row.question_name_en,
+          name_es: row.question_name_es,
           order: row.question_order,
           depends_on_question_id: row.depends_on_question_id,
           depends_on_answer_id: row.depends_on_answer_id,
@@ -7375,7 +7382,8 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
           question_id: row.question_id,
           id: row.answer_id,
           order: row.answer_order,
-          name: row.answer_name
+          name_en: row.answer_name_en,
+          name_es: row.answer_name_es
         });
       }
     }
