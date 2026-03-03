@@ -23748,5 +23748,33 @@ router.get('/web-images/public', async (req, res) => {
   }
 });
 
+// Delete account endpoint
+router.post('/settings/account/delete', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+    const userId = cabecera.id;
+    const { confirm } = req.body;
+
+    if (confirm !== true) {
+      return res.status(400).json({
+        error: "Confirmation is required to delete the account."
+      });
+    }
+
+    const [result] = await mysqlConnection.promise().query(
+      "UPDATE user SET enabled = 'N', deleted = 'Y', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+      [userId]
+    );
+
+    res.status(200).json({
+      message: "Account deactivated successfully."
+    });
+
+  } catch (error) {
+    console.error('Error deactivating account:', error);
+    logger.error('Error deactivating account:', error);
+    res.status(500).json('Internal server error');
+  }
+});
 
 module.exports = router;
