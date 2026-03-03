@@ -23815,4 +23815,246 @@ router.post('/settings/account/delete', verifyToken, async (req, res) => {
   }
 });
 
+// --------------------------------------------------------
+// System Manual routes
+// --------------------------------------------------------
+
+// Helper: process content images for system manual (base64 → S3)
+async function processManualContentImages(htmlContent, manualId, language = 'en') {
+  try {
+    const base64Images = extractBase64Images(htmlContent);
+    let processedContent = htmlContent;
+    let displayOrder = 1;
+
+    for (const imageData of base64Images) {
+      try {
+        const originalBuffer = Buffer.from(imageData.base64Data, 'base64');
+        const { buffer: resizedBuffer } = await resizeArticleImageBuffer(
+          originalBuffer,
+          imageData.mimeType,
+          'manual content image'
+        );
+        const fileHash = calculateFileHash(resizedBuffer);
+
+        // Check if image already exists for this manual
+        const [existingImage] = await mysqlConnection.promise().query(
+          'SELECT s3_key FROM system_manual_images WHERE manual_id = ? AND file_hash = ?',
+          [manualId, fileHash]
+        );
+
+        let s3Key;
+
+        if (existingImage.length > 0) {
+          s3Key = existingImage[0].s3_key;
+        } else {
+          s3Key = randomImageName();
+
+          const uploadParams = {
+            Bucket: bucketName,
+            Key: s3Key,
+            Body: resizedBuffer,
+            ContentType: imageData.mimeType,
+          };
+
+          const command = new PutObjectCommand(uploadParams);
+          await s3.send(command);
+
+          await mysqlConnection.promise().query(
+            `INSERT INTO system_manual_images (
+              manual_id, s3_key, s3_bucket, file_hash,
+              original_filename, mime_type, file_size, alt_text_${language},
+              display_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              manualId, s3Key, bucketName, fileHash,
+              `manual_image_${displayOrder}.${imageData.imageFormat}`,
+              imageData.mimeType, resizedBuffer.length, imageData.altText,
+              displayOrder++
+            ]
+          );
+        }
+
+        const newImgTag = imageData.fullMatch.replace(
+          /src="data:image\/[^;]+;base64,[^"]+"/,
+          `src="{{S3_KEY:${s3Key}}}"`
+        );
+
+        processedContent = processedContent.replace(imageData.fullMatch, newImgTag);
+
+      } catch (imageError) {
+        logger.error(`Error processing manual image: ${imageError.message}`);
+      }
+    }
+
+    return processedContent;
+
+  } catch (error) {
+    logger.error('Error processing manual content images:', error);
+    throw error;
+  }
+}
+
+// Helper: cleanup orphaned manual content images
+async function cleanupOrphanedManualImages(manualId, newContentEn, newContentEs) {
+  try {
+    const [currentImages] = await mysqlConnection.promise().query(
+      'SELECT id, s3_key FROM system_manual_images WHERE manual_id = ?',
+      [manualId]
+    );
+
+    const imagesToDelete = [];
+
+    for (const image of currentImages) {
+      const s3KeyPlaceholder = `{{S3_KEY:${image.s3_key}}}`;
+      const stillUsedInEn = newContentEn.includes(s3KeyPlaceholder);
+      const stillUsedInEs = newContentEs.includes(s3KeyPlaceholder);
+
+      if (!stillUsedInEn && !stillUsedInEs) {
+        imagesToDelete.push(image);
+      }
+    }
+
+    if (imagesToDelete.length > 0) {
+      const deleteParams = {
+        Bucket: bucketName,
+        Delete: {
+          Objects: imagesToDelete.map(img => ({ Key: img.s3_key })),
+          Quiet: false,
+        },
+      };
+
+      const deleteCommand = new DeleteObjectsCommand(deleteParams);
+      await s3.send(deleteCommand);
+
+      const imageIds = imagesToDelete.map(img => img.id);
+      await mysqlConnection.promise().query(
+        `DELETE FROM system_manual_images WHERE id IN (${imageIds.map(() => '?').join(',')})`,
+        imageIds
+      );
+    }
+
+  } catch (error) {
+    logger.error('Error cleaning up orphaned manual images:', error);
+  }
+}
+
+// GET /api/system-manual - Retrieve current system manual
+router.get('/system-manual', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      'SELECT id, content_en, content_es, created_at, updated_at FROM system_manual ORDER BY id ASC LIMIT 1'
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'System manual not found' });
+    }
+
+    const manual = rows[0];
+
+    // Replace S3 key placeholders with signed URLs
+    const contentEnWithUrls = await replaceS3KeysWithSignedUrls(manual.content_en);
+    const contentEsWithUrls = await replaceS3KeysWithSignedUrls(manual.content_es);
+
+    res.json({
+      id: manual.id,
+      content_en: contentEnWithUrls,
+      content_es: contentEsWithUrls,
+      created_at: manual.created_at,
+      updated_at: manual.updated_at
+    });
+
+  } catch (error) {
+    console.error('Error fetching system manual:', error);
+    logger.error('Error fetching system manual:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/system-manual - Update (or create) system manual
+router.put('/system-manual', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { content_en, content_es } = req.body;
+
+    if (content_en === undefined || content_es === undefined) {
+      return res.status(400).json({ error: 'content_en and content_es are required' });
+    }
+
+    // Check if manual already exists
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM system_manual ORDER BY id ASC LIMIT 1'
+    );
+
+    let manualId;
+
+    if (existing.length === 0) {
+      // Create new manual row
+      const [insertResult] = await mysqlConnection.promise().query(
+        'INSERT INTO system_manual (content_en, content_es) VALUES (?, ?)',
+        ['', '']
+      );
+      manualId = insertResult.insertId;
+    } else {
+      manualId = existing[0].id;
+    }
+
+    // Process content images (base64 → S3)
+    let processedContentEn = content_en;
+    let processedContentEs = content_es;
+
+    try {
+      processedContentEn = await processManualContentImages(content_en, manualId, 'en');
+      processedContentEs = await processManualContentImages(content_es, manualId, 'es');
+    } catch (imageError) {
+      logger.error('Error processing manual content images:', imageError);
+      return res.status(500).json({ error: 'Failed to process content images' });
+    }
+
+    // Cleanup orphaned images (images removed from content)
+    await cleanupOrphanedManualImages(manualId, processedContentEn, processedContentEs);
+
+    // Update the manual content
+    await mysqlConnection.promise().query(
+      'UPDATE system_manual SET content_en = ?, content_es = ? WHERE id = ?',
+      [processedContentEn, processedContentEs, manualId]
+    );
+
+    // Fetch updated row
+    const [updated] = await mysqlConnection.promise().query(
+      'SELECT id, content_en, content_es, created_at, updated_at FROM system_manual WHERE id = ?',
+      [manualId]
+    );
+
+    const manual = updated[0];
+
+    // Replace S3 key placeholders with signed URLs for response
+    const contentEnWithUrls = await replaceS3KeysWithSignedUrls(manual.content_en);
+    const contentEsWithUrls = await replaceS3KeysWithSignedUrls(manual.content_es);
+
+    res.json({
+      id: manual.id,
+      content_en: contentEnWithUrls,
+      content_es: contentEsWithUrls,
+      created_at: manual.created_at,
+      updated_at: manual.updated_at
+    });
+
+  } catch (error) {
+    console.error('Error updating system manual:', error);
+    logger.error('Error updating system manual:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;
