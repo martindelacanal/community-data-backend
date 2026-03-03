@@ -352,6 +352,29 @@ router.post('/signup', async (req, res) => {
     });
   }
 
+  const dateOfBirthRaw = firstForm.dateOfBirth;
+
+  if (dateOfBirthRaw) {
+    const birthDate = new Date(dateOfBirthRaw);
+    const currentDate = new Date();
+
+    let age = currentDate.getFullYear() - birthDate.getFullYear();
+    const m = currentDate.getMonth() - birthDate.getMonth();
+
+    // If the current month is before the birth month, or
+    // if it's the birth month but the current day is before the birth day
+    if (m < 0 || (m === 0 && currentDate.getDate() < birthDate.getDate())) {
+        age--;
+    }
+
+    if (age < 18) {
+      return res.status(400).json({
+        code: 'INVALID_AGE',
+        message: 'User must be at least 18 years old'
+      });
+    }
+  }
+
   const role_id = 5;
   const username = firstForm.username || null;
   let passwordHash = await bcryptjs.hash(firstForm.password, 8);
