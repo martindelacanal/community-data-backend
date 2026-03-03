@@ -337,6 +337,14 @@ router.post('/signup', async (req, res) => {
   firstForm = req.body.firstForm;
   secondForm = req.body.secondForm;
 
+  // Validate legal consent - must be strictly true
+  if (firstForm.legalConsentAccepted !== true) {
+    return res.status(400).json({
+      code: 'LEGAL_CONSENT_REQUIRED',
+      message: 'Legal consent must be accepted to create an account'
+    });
+  }
+
   const zipcodeRaw = firstForm.zipcode;
   const householdRaw = firstForm.householdSize;
 
@@ -387,6 +395,9 @@ router.post('/signup', async (req, res) => {
   const gender = firstForm.gender || null;
   const ethnicity = firstForm.ethnicity || null;
   const otherEthnicity = firstForm.otherEthnicity || null;
+  const legalConsentAccepted = firstForm.legalConsentAccepted === true ? 1 : 0;
+  const legalConsentAcceptedAt = legalConsentAccepted ? new Date() : null;
+  const legalConsentVersion = '2026-03-02';
 
   let connection;
 
@@ -418,9 +429,12 @@ router.post('/signup', async (req, res) => {
                                                           household_size, \
                                                           gender_id, \
                                                           ethnicity_id, \
-                                                          other_ethnicity) \
-                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, location_id, householdSize, gender, ethnicity, otherEthnicity]);
+                                                          other_ethnicity, \
+                                                          legal_consent_accepted, \
+                                                          legal_consent_accepted_at, \
+                                                          legal_consent_version) \
+                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, location_id, householdSize, gender, ethnicity, otherEthnicity, legalConsentAccepted, legalConsentAcceptedAt, legalConsentVersion]);
 
     if (rows.affectedRows === 0) {
       throw new Error('No se pudo crear el usuario');
@@ -1369,6 +1383,14 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
     if (req.files && req.files.length > 0) {
       formulario = JSON.parse(req.body.form);
 
+      // Validate legal consent - must be strictly true
+      if (formulario.legalConsentAccepted !== true) {
+        return res.status(400).json({
+          code: 'LEGAL_CONSENT_REQUIRED',
+          message: 'Legal consent must be accepted to register as a volunteer'
+        });
+      }
+
       const firstname = formulario.firstName || null;
       const lastname = formulario.lastName || null;
       const email = formulario.email || null;
@@ -1381,6 +1403,9 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
       const otherEthnicity = formulario.otherEthnicity || null;
       // const date = formulario.date || null;
       const language = formulario.language || 'en';
+      const legalConsentAccepted = 1;
+      const legalConsentAcceptedAt = new Date();
+      const legalConsentVersion = '2026-03-02';
 
       const [rows] = await connection.query('insert into volunteer(firstname, \
                                           lastname, \
@@ -1392,9 +1417,12 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
                                           date_of_birth, \
                                           gender_id, \
                                           ethnicity_id, \
-                                          other_ethnicity) \
-                                          values(?,?,?,?,?,?,?,?,?,?,?)',
-        [firstname, lastname, email, phone, zipcode, location_id, location_id, dateOfBirth, gender, ethnicity, otherEthnicity]);
+                                          other_ethnicity, \
+                                          legal_consent_accepted, \
+                                          legal_consent_accepted_at, \
+                                          legal_consent_version) \
+                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [firstname, lastname, email, phone, zipcode, location_id, location_id, dateOfBirth, gender, ethnicity, otherEthnicity, legalConsentAccepted, legalConsentAcceptedAt, legalConsentVersion]);
 
       if (rows.affectedRows > 0) {
         const volunteer_id = rows.insertId;
@@ -16772,7 +16800,10 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
             ${language === 'en' ? 'g.name' : 'g.name_es'} as gender_name,
             u.phone,
             u.zipcode,
-            u.household_size
+            u.household_size,
+            u.legal_consent_accepted,
+            DATE_FORMAT(CONVERT_TZ(u.legal_consent_accepted_at, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS legal_consent_accepted_at,
+            u.legal_consent_version
           FROM user as u
           INNER JOIN role as r ON u.role_id = r.id
           ${cabecera.role === 'client' ? 'LEFT JOIN client_user as cu ON u.id = cu.user_id' : ''}
@@ -16815,6 +16846,9 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
         user["phone"] = rows[0].phone;
         user["zipcode"] = rows[0].zipcode;
         user["household_size"] = rows[0].household_size;
+        user["legal_consent_accepted"] = rows[0].legal_consent_accepted === 1;
+        user["legal_consent_accepted_at"] = rows[0].legal_consent_accepted_at;
+        user["legal_consent_version"] = rows[0].legal_consent_version;
         user["emails_for_reporting"] = rows_emails;
 
 
@@ -17817,7 +17851,10 @@ router.get('/view/volunteer/:idVolunteer', verifyToken, async (req, res) => {
           ${language === 'en' ? 'g.name' : 'g.name_es'} AS gender,
           ${language === 'en' ? 'e.name' : 'e.name_es'} AS ethnicity,
           v.other_ethnicity,
-          DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
+          DATE_FORMAT(CONVERT_TZ(v.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
+          v.legal_consent_accepted,
+          DATE_FORMAT(CONVERT_TZ(v.legal_consent_accepted_at, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS legal_consent_accepted_at,
+          v.legal_consent_version
         FROM volunteer as v
         INNER JOIN location as l ON v.location_id = l.id
         INNER JOIN gender as g ON v.gender_id = g.id
@@ -17827,6 +17864,7 @@ router.get('/view/volunteer/:idVolunteer', verifyToken, async (req, res) => {
       );
 
       if (rows.length > 0) {
+        rows[0].legal_consent_accepted = rows[0].legal_consent_accepted === 1;
         res.json(rows[0]);
       } else {
         res.status(404).json('Gender no encontrado');
