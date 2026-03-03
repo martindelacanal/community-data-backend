@@ -6902,7 +6902,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
         if (row.question_id !== question_id) {
           questions.push({
             id: row.question_id,
-            name_en: row.question_name_en,
+            name: row.question_name_en,
             name_es: row.question_name_es,
             order: row.question_order,
             depends_on_question_id: row.depends_on_question_id,
@@ -6923,7 +6923,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
           questions[questions.length - 1].answers.push({
             question_id: row.question_id,
             id: row.answer_id,
-            name_en: row.answer_name_en,
+            name: row.answer_name_en,
             name_es: row.answer_name_es,
             order: row.answer_order,
             enabled: row.answer_enabled,
