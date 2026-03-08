@@ -35,6 +35,7 @@ async function getRawDataExcel(from_date, to_date, client_id) {
     // Ensure from_date and to_date include time for accurate BETWEEN comparison with CONVERT_TZ
     const params = [
         client_id,
+        client_id,
         from_date, // Expected format: 'YYYY-MM-DD HH:mm:ss'
         to_date,   // Expected format: 'YYYY-MM-DD HH:mm:ss'
         from_date, // Expected format: 'YYYY-MM-DD HH:mm:ss'
@@ -62,9 +63,9 @@ async function getRawDataExcel(from_date, to_date, client_id) {
                         WHERE db_visited.receiving_user_id = u.id) AS locations_visited,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
                 DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
-                q.id AS question_id,
-                at.id AS answer_type_id,
-                q.name AS question,
+                q.question_id AS question_id,
+                q.answer_type_id AS answer_type_id,
+                q.question AS question,
                 a.name AS answer,
                 uq.answer_text AS answer_text,
                 uq.answer_number AS answer_number,
@@ -79,13 +80,32 @@ async function getRawDataExcel(from_date, to_date, client_id) {
         INNER JOIN gender AS g ON u.gender_id = g.id
         INNER JOIN ethnicity AS eth ON u.ethnicity_id = eth.id
         LEFT JOIN location AS loc ON u.location_id = loc.id
-        CROSS JOIN question AS q
-        LEFT JOIN answer_type as at ON q.answer_type_id = at.id
-        LEFT JOIN user_question AS uq ON u.id = uq.user_id AND uq.question_id = q.id
+        CROSS JOIN (
+            SELECT DISTINCT
+                q.id AS question_id,
+                q.answer_type_id,
+                q.name AS question,
+                q.\`order\` AS question_order
+            FROM question AS q
+            INNER JOIN question_location AS ql
+                ON ql.question_id = q.id
+               AND ql.enabled = 'Y'
+            INNER JOIN client_location AS cl
+                ON cl.location_id = ql.location_id
+               AND cl.client_id = ?
+            WHERE q.enabled = 'Y'
+        ) AS q
+        LEFT JOIN user_question AS uq ON uq.id = (
+            SELECT uq_latest.id
+            FROM user_question AS uq_latest
+            WHERE uq_latest.user_id = u.id
+              AND uq_latest.question_id = q.question_id
+            ORDER BY uq_latest.id DESC
+            LIMIT 1
+        )
         LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-        LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.id
+        LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.question_id
         WHERE u.role_id = 5
-          AND q.enabled = 'Y'
           AND cu.client_id = ?
           AND (
               CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
@@ -99,14 +119,7 @@ async function getRawDataExcel(from_date, to_date, client_id) {
                     AND cl3.client_id = cu.client_id
               )
           )
-          AND EXISTS (
-              SELECT 1
-              FROM question_location ql
-              INNER JOIN client_location cl ON ql.location_id = cl.location_id
-              WHERE ql.question_id = q.id AND cl.client_id = cu.client_id AND ql.enabled = 'Y'
-          )
-        GROUP BY u.id, q.id, a.id
-        ORDER BY u.id, q.id, a.id`,
+        ORDER BY u.id, q.question_order, q.question_id, a.\`order\`, a.id`,
         params
     );
     // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
@@ -947,6 +960,8 @@ schedule.scheduleJob(monthlyClientRule, async () => {
 
             let monthName = prevMonth.format("MMMM");
             let year = prevMonth.format("YYYY");
+            const summaryFromDate = firstMonday.format("YYYY-MM-DD");
+            const summaryToDate = lastSunday.format("YYYY-MM-DD");
 
             const messageBody = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
 
@@ -969,14 +984,14 @@ schedule.scheduleJob(monthlyClientRule, async () => {
 
                 if (excelRawData && excelRawData.length > 0) {
                     const summaryObject = await getSummaryExcel(
-                        lastMonday.format("YYYY-MM-DD"),
-                        lastSunday.format("YYYY-MM-DD"),
+                        summaryFromDate,
+                        summaryToDate,
                         clientId,
                         excelRawData);
 
                     if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                        const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                        const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                        const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate);
+                        const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate);
 
                         await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails);
                     } else {
@@ -1037,6 +1052,8 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
 
         let monthName = today.format("MMMM"); // Current month name
         let year = today.format("YYYY");
+        const summaryFromDate = reportFirstMonday.format("YYYY-MM-DD");
+        const summaryToDate = reportLastSunday.format("YYYY-MM-DD");
 
         for (const client of adminClients) {
             const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
@@ -1046,14 +1063,14 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
 
             if (excelRawData && excelRawData.length > 0) {
                 const summaryObject = await getSummaryExcel(
-                    lastMonday.format("YYYY-MM-DD"),
-                    lastSunday.format("YYYY-MM-DD"),
+                    summaryFromDate,
+                    summaryToDate,
                     client.client_id,
                     excelRawData);
 
                 if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate);
 
                     await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail]);
                 } else {
