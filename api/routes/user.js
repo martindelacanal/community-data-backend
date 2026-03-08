@@ -4401,12 +4401,26 @@ router.post('/survey/question', verifyToken, async (req, res) => {
   const depends_on_question_id = parseSurveyNullablePositiveInt(body.depends_on_question_id);
   const depends_on_answer_id = parseSurveyNullablePositiveInt(body.depends_on_answer_id);
   const requestedQuestionOrder = parseSurveyNullablePositiveInt(body.order);
+  const hasTrafficLightEnabledField = Object.prototype.hasOwnProperty.call(body, 'traffic_light_enabled');
+  const hasTrafficLightDirectionField = Object.prototype.hasOwnProperty.call(body, 'traffic_light_direction');
+  const parsedTrafficLightEnabled = hasTrafficLightEnabledField
+    ? normalizeSurveyTrafficLightEnabled(body.traffic_light_enabled)
+    : null;
+  const parsedTrafficLightDirection = hasTrafficLightDirectionField
+    ? normalizeSurveyTrafficLightDirection(body.traffic_light_direction)
+    : null;
 
   if (!name || !name_es) {
     return res.status(400).json('name and name_es are required');
   }
   if (!answer_type_id) {
     return res.status(400).json('answer_type_id is required and must be a positive integer');
+  }
+  if (hasTrafficLightEnabledField && parsedTrafficLightEnabled === null) {
+    return res.status(400).json('traffic_light_enabled must be a boolean');
+  }
+  if (hasTrafficLightDirectionField && !parsedTrafficLightDirection) {
+    return res.status(400).json('traffic_light_direction must be "ascending" or "descending"');
   }
   if (!depends_on_question_id && depends_on_answer_id) {
     return res.status(400).json(buildSurveyErrorPayload(
@@ -4425,6 +4439,11 @@ router.post('/survey/question', verifyToken, async (req, res) => {
 
   const answersInput = Array.isArray(body.answers) ? body.answers : [];
   const normalizedAnswers = [];
+  const trafficLightConfig = getSurveyTrafficLightConfig(
+    answer_type_id,
+    parsedTrafficLightEnabled,
+    parsedTrafficLightDirection
+  );
   if (isSurveySelectableAnswerType(answer_type_id)) {
     if (!Array.isArray(body.answers) || body.answers.length === 0) {
       return res.status(400).json('answers is required for single or multiple choice questions');
@@ -4584,8 +4603,26 @@ router.post('/survey/question', verifyToken, async (req, res) => {
     }
 
     const [rows] = await connection.query(
-      'insert into question(name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, `order`) values(?,?,?,?,?,?)',
-      [name, name_es, depends_on_question_id, depends_on_answer_id, answer_type_id, questionOrder]
+      `insert into question(
+        name,
+        name_es,
+        depends_on_question_id,
+        depends_on_answer_id,
+        answer_type_id,
+        traffic_light_enabled,
+        traffic_light_direction,
+        \`order\`
+      ) values(?,?,?,?,?,?,?,?)`,
+      [
+        name,
+        name_es,
+        depends_on_question_id,
+        depends_on_answer_id,
+        answer_type_id,
+        trafficLightConfig.traffic_light_enabled,
+        trafficLightConfig.traffic_light_direction,
+        questionOrder
+      ]
     );
     if (rows.affectedRows === 0) {
       throw new Error('Could not insert question');
@@ -5395,6 +5432,8 @@ const SURVEY_STATUS_SOURCE_BATCH = 'admin-survey-status-batch';
 const SURVEY_REORDER_SOURCE_DEFAULT = 'admin-survey-ui';
 const BENEFICIARY_ANSWER_SOURCE_DEFAULT = 'beneficiary-onboard-ui';
 const BENEFICIARY_ANSWER_SOURCE_AUTO_CLEAR = 'beneficiary-onboard-auto-clear';
+const SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING = 'ascending';
+const SURVEY_TRAFFIC_LIGHT_DIRECTION_DESCENDING = 'descending';
 
 function hasSurveyValue(value) {
   return value !== undefined && value !== null && value !== '';
@@ -5450,8 +5489,10 @@ async function insertSurveyHistoryRecord(connection, payload) {
        before_order, after_order,
        before_depends_on_question_id, after_depends_on_question_id,
        before_depends_on_answer_id, after_depends_on_answer_id,
+       before_traffic_light_enabled, after_traffic_light_enabled,
+       before_traffic_light_direction, after_traffic_light_direction,
        edited_by_user_id, source, edited_at_client)
-    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       payload.question_id,
       payload.answer_id,
@@ -5466,6 +5507,10 @@ async function insertSurveyHistoryRecord(connection, payload) {
       payload.after_depends_on_question_id ?? null,
       payload.before_depends_on_answer_id ?? null,
       payload.after_depends_on_answer_id ?? null,
+      payload.before_traffic_light_enabled ?? null,
+      payload.after_traffic_light_enabled ?? null,
+      payload.before_traffic_light_direction ?? null,
+      payload.after_traffic_light_direction ?? null,
       payload.edited_by_user_id,
       payload.source,
       payload.edited_at_client
@@ -5510,6 +5555,10 @@ async function insertSurveyReorderHistory(connection, payload) {
     after_depends_on_question_id: payload.after_depends_on_question_id ?? null,
     before_depends_on_answer_id: payload.before_depends_on_answer_id ?? null,
     after_depends_on_answer_id: payload.after_depends_on_answer_id ?? null,
+    before_traffic_light_enabled: payload.before_traffic_light_enabled ?? null,
+    after_traffic_light_enabled: payload.after_traffic_light_enabled ?? null,
+    before_traffic_light_direction: payload.before_traffic_light_direction ?? null,
+    after_traffic_light_direction: payload.after_traffic_light_direction ?? null,
     edited_by_user_id: payload.edited_by_user_id,
     source: payload.source,
     edited_at_client: payload.edited_at_client
@@ -5553,6 +5602,59 @@ function parseSurveyBoolean(value) {
   }
 
   return null;
+}
+
+function normalizeSurveyTrafficLightEnabled(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '1') {
+      return true;
+    }
+    if (normalized === '0') {
+      return false;
+    }
+  }
+
+  return parseSurveyBoolean(value);
+}
+
+function normalizeSurveyTrafficLightDirection(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized !== SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING &&
+    normalized !== SURVEY_TRAFFIC_LIGHT_DIRECTION_DESCENDING
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizeSurveyNullableTrafficLightEnabled(value) {
+  const normalized = normalizeSurveyTrafficLightEnabled(value);
+  return normalized === null ? null : normalized;
+}
+
+function normalizeSurveyNullableTrafficLightDirection(value) {
+  const normalized = normalizeSurveyTrafficLightDirection(value);
+  return normalized || null;
 }
 
 function parseSurveyNonNegativeInt(value) {
@@ -5649,6 +5751,32 @@ function buildSurveyErrorPayload(error_code, message, details = null) {
 
 function isSurveySelectableAnswerType(answerTypeId) {
   return answerTypeId === 3 || answerTypeId === 4;
+}
+
+function getSurveyTrafficLightConfig(answerTypeId, rawEnabled, rawDirection) {
+  if (!isSurveySelectableAnswerType(answerTypeId)) {
+    return {
+      traffic_light_enabled: false,
+      traffic_light_direction: SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING
+    };
+  }
+
+  const normalizedEnabled = normalizeSurveyTrafficLightEnabled(rawEnabled);
+  const normalizedDirection = normalizeSurveyTrafficLightDirection(rawDirection);
+  return {
+    traffic_light_enabled: normalizedEnabled === null ? false : normalizedEnabled,
+    traffic_light_direction: normalizedDirection || SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING
+  };
+}
+
+function normalizeSurveyHistoryTrafficLightFields(item) {
+  return {
+    ...item,
+    before_traffic_light_enabled: normalizeSurveyNullableTrafficLightEnabled(item.before_traffic_light_enabled),
+    after_traffic_light_enabled: normalizeSurveyNullableTrafficLightEnabled(item.after_traffic_light_enabled),
+    before_traffic_light_direction: normalizeSurveyNullableTrafficLightDirection(item.before_traffic_light_direction),
+    after_traffic_light_direction: normalizeSurveyNullableTrafficLightDirection(item.after_traffic_light_direction)
+  };
 }
 
 async function getEnabledSurveyLocationsByQuestionIds(connection, questionIds) {
@@ -6333,9 +6461,23 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
     const questionOrder = parseSurveyPositiveInt(questionItem.order);
     const dependsOnQuestionId = parseSurveyNullablePositiveInt(questionItem.depends_on_question_id);
     const dependsOnAnswerId = parseSurveyNullablePositiveInt(questionItem.depends_on_answer_id);
+    const hasTrafficLightEnabledField = Object.prototype.hasOwnProperty.call(questionItem, 'traffic_light_enabled');
+    const hasTrafficLightDirectionField = Object.prototype.hasOwnProperty.call(questionItem, 'traffic_light_direction');
+    const trafficLightEnabled = hasTrafficLightEnabledField
+      ? normalizeSurveyTrafficLightEnabled(questionItem.traffic_light_enabled)
+      : null;
+    const trafficLightDirection = hasTrafficLightDirectionField
+      ? normalizeSurveyTrafficLightDirection(questionItem.traffic_light_direction)
+      : null;
 
     if (!questionId || !questionOrder) {
       return res.status(400).json(`questions[${i}] is invalid`);
+    }
+    if (hasTrafficLightEnabledField && trafficLightEnabled === null) {
+      return res.status(400).json(`questions[${i}].traffic_light_enabled must be a boolean`);
+    }
+    if (hasTrafficLightDirectionField && !trafficLightDirection) {
+      return res.status(400).json(`questions[${i}].traffic_light_direction must be "ascending" or "descending"`);
     }
     if (dependsOnQuestionId && !dependsOnAnswerId) {
       return res.status(400).json(buildSurveyErrorPayload(
@@ -6359,7 +6501,11 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       question_id: questionId,
       order: questionOrder,
       depends_on_question_id: dependsOnQuestionId,
-      depends_on_answer_id: dependsOnAnswerId
+      depends_on_answer_id: dependsOnAnswerId,
+      has_traffic_light_enabled: hasTrafficLightEnabledField,
+      traffic_light_enabled: trafficLightEnabled,
+      has_traffic_light_direction: hasTrafficLightDirectionField,
+      traffic_light_direction: trafficLightDirection
     });
   }
 
@@ -6400,24 +6546,51 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       ? `Depende de pregunta ${dependsQuestionId}, respuesta ${dependsAnswerId}`
       : `Depends on question ${dependsQuestionId}, answer ${dependsAnswerId}`;
   };
+  const formatTrafficLightLabel = (enabled, direction, isSpanish = false) => {
+    const enabledLabel = isSpanish
+      ? (enabled ? 'Activado' : 'Desactivado')
+      : (enabled ? 'Enabled' : 'Disabled');
+    const directionLabel = direction === SURVEY_TRAFFIC_LIGHT_DIRECTION_DESCENDING
+      ? (isSpanish ? 'Descendente' : 'Descending')
+      : (isSpanish ? 'Ascendente' : 'Ascending');
+    return isSpanish
+      ? `Semaforo: ${enabledLabel}, ${directionLabel}`
+      : `Traffic light: ${enabledLabel}, ${directionLabel}`;
+  };
 
   const connection = await mysqlConnection.promise().getConnection();
   try {
     await connection.beginTransaction();
 
     const [questionRows] = await connection.query(
-      'select id, `order`, enabled, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
+      `select
+         id,
+         \`order\`,
+         enabled,
+         answer_type_id,
+         depends_on_question_id,
+         depends_on_answer_id,
+         traffic_light_enabled,
+         traffic_light_direction
+       from question`
     );
     const questionById = new Map();
     for (let i = 0; i < questionRows.length; i++) {
       const row = questionRows[i];
+      const trafficLightConfig = getSurveyTrafficLightConfig(
+        row.answer_type_id,
+        row.traffic_light_enabled,
+        row.traffic_light_direction
+      );
       questionById.set(row.id, {
         question_id: row.id,
         order: row.order,
         enabled: row.enabled,
         answer_type_id: row.answer_type_id,
         depends_on_question_id: row.depends_on_question_id,
-        depends_on_answer_id: row.depends_on_answer_id
+        depends_on_answer_id: row.depends_on_answer_id,
+        traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
+        traffic_light_direction: trafficLightConfig.traffic_light_direction
       });
     }
 
@@ -6437,7 +6610,9 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
         enabled: questionData.enabled,
         answer_type_id: questionData.answer_type_id,
         depends_on_question_id: questionData.depends_on_question_id,
-        depends_on_answer_id: questionData.depends_on_answer_id
+        depends_on_answer_id: questionData.depends_on_answer_id,
+        traffic_light_enabled: questionData.traffic_light_enabled,
+        traffic_light_direction: questionData.traffic_light_direction
       });
     }
 
@@ -6447,6 +6622,17 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       finalQuestion.order = questionItem.order;
       finalQuestion.depends_on_question_id = questionItem.depends_on_question_id;
       finalQuestion.depends_on_answer_id = questionItem.depends_on_answer_id;
+      const trafficLightConfig = getSurveyTrafficLightConfig(
+        finalQuestion.answer_type_id,
+        questionItem.has_traffic_light_enabled
+          ? questionItem.traffic_light_enabled
+          : finalQuestion.traffic_light_enabled,
+        questionItem.has_traffic_light_direction
+          ? questionItem.traffic_light_direction
+          : finalQuestion.traffic_light_direction
+      );
+      finalQuestion.traffic_light_enabled = trafficLightConfig.traffic_light_enabled;
+      finalQuestion.traffic_light_direction = trafficLightConfig.traffic_light_direction;
     }
 
     const orphanedQuestionSet = new Set();
@@ -6530,14 +6716,30 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       const dependencyChanged =
         (beforeQuestion.depends_on_question_id || null) !== (afterQuestion.depends_on_question_id || null) ||
         (beforeQuestion.depends_on_answer_id || null) !== (afterQuestion.depends_on_answer_id || null);
+      const trafficLightChanged =
+        beforeQuestion.traffic_light_enabled !== afterQuestion.traffic_light_enabled ||
+        beforeQuestion.traffic_light_direction !== afterQuestion.traffic_light_direction;
 
-      if (!orderChanged && !dependencyChanged) {
+      if (!orderChanged && !dependencyChanged && !trafficLightChanged) {
         continue;
       }
 
       const [questionUpdateRows] = await connection.query(
-        'update question set `order` = ?, depends_on_question_id = ?, depends_on_answer_id = ? where id = ?',
-        [afterQuestion.order, afterQuestion.depends_on_question_id, afterQuestion.depends_on_answer_id, questionItem.question_id]
+        `update question
+         set \`order\` = ?,
+             depends_on_question_id = ?,
+             depends_on_answer_id = ?,
+             traffic_light_enabled = ?,
+             traffic_light_direction = ?
+         where id = ?`,
+        [
+          afterQuestion.order,
+          afterQuestion.depends_on_question_id,
+          afterQuestion.depends_on_answer_id,
+          afterQuestion.traffic_light_enabled,
+          afterQuestion.traffic_light_direction,
+          questionItem.question_id
+        ]
       );
       if (questionUpdateRows.affectedRows === 0) {
         throw new Error(`Could not update question ${questionItem.question_id}`);
@@ -6574,6 +6776,39 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
           after_depends_on_question_id: afterQuestion.depends_on_question_id,
           before_depends_on_answer_id: beforeQuestion.depends_on_answer_id,
           after_depends_on_answer_id: afterQuestion.depends_on_answer_id,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: reorderedAtClient
+        });
+      }
+
+      if (trafficLightChanged) {
+        await insertSurveyReorderHistory(connection, {
+          question_id: questionItem.question_id,
+          answer_id: null,
+          entity_type: 'question_traffic_light',
+          before_name: formatTrafficLightLabel(
+            beforeQuestion.traffic_light_enabled,
+            beforeQuestion.traffic_light_direction
+          ),
+          before_name_es: formatTrafficLightLabel(
+            beforeQuestion.traffic_light_enabled,
+            beforeQuestion.traffic_light_direction,
+            true
+          ),
+          after_name: formatTrafficLightLabel(
+            afterQuestion.traffic_light_enabled,
+            afterQuestion.traffic_light_direction
+          ),
+          after_name_es: formatTrafficLightLabel(
+            afterQuestion.traffic_light_enabled,
+            afterQuestion.traffic_light_direction,
+            true
+          ),
+          before_traffic_light_enabled: beforeQuestion.traffic_light_enabled,
+          after_traffic_light_enabled: afterQuestion.traffic_light_enabled,
+          before_traffic_light_direction: beforeQuestion.traffic_light_direction,
+          after_traffic_light_direction: afterQuestion.traffic_light_direction,
           edited_by_user_id: cabecera.id || null,
           source,
           edited_at_client: reorderedAtClient
@@ -6739,6 +6974,10 @@ router.get('/survey/history', verifyToken, async (req, res) => {
         h.after_depends_on_question_id,
         h.before_depends_on_answer_id,
         h.after_depends_on_answer_id,
+        h.before_traffic_light_enabled,
+        h.after_traffic_light_enabled,
+        h.before_traffic_light_direction,
+        h.after_traffic_light_direction,
         h.edited_by_user_id,
         trim(concat(coalesce(u.firstname, ''), ' ', coalesce(u.lastname, ''))) as edited_by_name,
         u.email as edited_by_email,
@@ -6764,7 +7003,7 @@ router.get('/survey/history', verifyToken, async (req, res) => {
     );
 
     res.json({
-      items,
+      items: items.map(normalizeSurveyHistoryTrafficLightFields),
       total: countRows[0]?.total || 0,
       limit,
       offset
@@ -6831,6 +7070,10 @@ router.get('/survey/history/:id', verifyToken, async (req, res) => {
         h.after_depends_on_question_id,
         h.before_depends_on_answer_id,
         h.after_depends_on_answer_id,
+        h.before_traffic_light_enabled,
+        h.after_traffic_light_enabled,
+        h.before_traffic_light_direction,
+        h.after_traffic_light_direction,
         h.edited_by_user_id,
         trim(concat(coalesce(u.firstname, ''), ' ', coalesce(u.lastname, ''))) as edited_by_name,
         u.email as edited_by_email,
@@ -6854,7 +7097,7 @@ router.get('/survey/history/:id', verifyToken, async (req, res) => {
       return res.status(404).json('Survey edit history not found');
     }
 
-    res.json(rows[0]);
+    res.json(normalizeSurveyHistoryTrafficLightFields(rows[0]));
   } catch (err) {
     console.log(err);
     res.status(500).json('Internal server error');
@@ -6873,6 +7116,8 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
           q.name_es AS question_name_es,
                   q.\`order\` AS question_order,
                   q.answer_type_id,
+                  q.traffic_light_enabled,
+                  q.traffic_light_direction,
                   ${language === 'en' ? 'at.name' : 'at.name_es'}  AS answer_type_name,
                   q.depends_on_question_id,
                   q.depends_on_answer_id,
@@ -6900,6 +7145,11 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         if (row.question_id !== question_id) {
+          const trafficLightConfig = getSurveyTrafficLightConfig(
+            row.answer_type_id,
+            row.traffic_light_enabled,
+            row.traffic_light_direction
+          );
           questions.push({
             id: row.question_id,
             name: row.question_name_en,
@@ -6910,6 +7160,8 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
             answer_type_id: row.answer_type_id,
             answer_type: row.answer_type_name,
             enabled: row.question_enabled,
+            traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
+            traffic_light_direction: trafficLightConfig.traffic_light_direction,
             loading: 'N',
             answers: [],
             locations: []
@@ -9156,6 +9408,9 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
       q.id AS question_id,
       ${localizedQuestionName} AS question,
       q.\`order\` AS question_order,
+      q.answer_type_id,
+      q.traffic_light_enabled,
+      q.traffic_light_direction,
       a.id AS answer_id,
       ${localizedAnswerName} AS answer,
       a.\`order\` AS answer_order
@@ -9192,9 +9447,16 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
     const row = rows[i];
 
     if (!questionById.has(row.question_id)) {
+      const trafficLightConfig = getSurveyTrafficLightConfig(
+        row.answer_type_id,
+        row.traffic_light_enabled,
+        row.traffic_light_direction
+      );
       const question = {
         id: row.question_id,
         question: row.question,
+        traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
+        traffic_light_direction: trafficLightConfig.traffic_light_direction,
         answers: []
       };
       questionById.set(row.question_id, question);
@@ -9204,7 +9466,8 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
     if (row.answer_id !== null && row.answer_id !== undefined) {
       questionById.get(row.question_id).answers.push({
         answer_id: row.answer_id,
-        answer: row.answer
+        answer: row.answer,
+        order: row.answer_order
       });
     }
   }
@@ -11702,9 +11965,12 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
       const healthQuestionsResponse = healthQuestionCatalog.questions.map(question => ({
         question_id: question.id,
         question: question.question,
+        traffic_light_enabled: question.traffic_light_enabled,
+        traffic_light_direction: question.traffic_light_direction,
         answers: question.answers.map(answer => ({
           answer_id: answer.answer_id,
           answer: answer.answer,
+          order: answer.order,
           total: healthAnswerCountByKey.get(`${question.id}:${answer.answer_id}`) || 0
         }))
       }));
