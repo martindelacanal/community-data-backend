@@ -13167,8 +13167,8 @@ router.post('/metrics/product/reach', verifyToken, async (req, res) => {
       );
 
       rows_reach_total = rows_reach[0] ? rows_reach[0].reach : 0;
-      rows_poundsDelivered_total = rows_poundsDelivered[0] ? rows_poundsDelivered[0].poundsDelivered : 0;
-
+      rows_poundsDelivered_total = rows_poundsDelivered[0] ? Number(Number(rows_poundsDelivered[0].poundsDelivered).toFixed(2)) : 0;
+      
       res.json({ reach: rows_reach_total, poundsDelivered: rows_poundsDelivered_total });
 
     } catch (err) {
@@ -14454,7 +14454,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
       rows.forEach(row => {
         const index = categories.indexOf(row.period);
         if (index !== -1) {
-          providersMap.get(row.name)[index] = row.data;
+          providersMap.get(row.name)[index] = Number(Number(row.data).toFixed(2));
         }
       });
 
@@ -14464,7 +14464,7 @@ router.post('/metrics/product/total_pounds', verifyToken, async (req, res) => {
         series,
         categories: formattedCategories // usar las categorías formateadas
       };
-
+      
       res.json(result);
 
     } catch (error) {
@@ -14712,7 +14712,7 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
       rows.forEach(row => {
         const index = categories.indexOf(row.period);
         if (index !== -1) {
-          providersMap.get(row.name)[index] = row.data;
+          providersMap.get(row.name)[index] = Number(Number(row.data).toFixed(2));
         }
       });
 
@@ -14722,7 +14722,7 @@ router.post('/metrics/product/number_of_trips', verifyToken, async (req, res) =>
         series,
         categories: formattedCategories // usar las categorías formateadas
       };
-
+      
       res.json(result);
 
     } catch (error) {
@@ -14809,7 +14809,10 @@ router.post('/metrics/product/kind_of_product', verifyToken, async (req, res) =>
           GROUP BY name`,
         [cabecera.client_id]
       );
-
+      rows.forEach(row => {
+        row.total = Number(Number(row.total).toFixed(2));
+      });
+      
       res.json(rows);
     } catch (err) {
       console.log(err);
@@ -14922,6 +14925,11 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
         return;
       }
 
+      // Redondear totales a 2 decimales
+      for (const row of rows) {
+        row.total = Number(Number(row.total).toFixed(2));
+      }
+
       // Calcular el promedio
       let sum = 0;
       let count = 0;
@@ -14935,16 +14943,16 @@ router.post('/metrics/product/pounds_per_location', verifyToken, async (req, res
       let median;
       let sortedRows = [...rows].sort((a, b) => a.total - b.total);
       if (sortedRows.length % 2 === 0) {
-        median = (sortedRows[sortedRows.length / 2 - 1].total + sortedRows[sortedRows.length / 2].total) / 2;
+        median = Number(((sortedRows[sortedRows.length / 2 - 1].total + sortedRows[sortedRows.length / 2].total) / 2).toFixed(2));
       } else {
-        median = sortedRows[Math.floor(sortedRows.length / 2)].total;
+        median = Number(Number(sortedRows[Math.floor(sortedRows.length / 2)].total).toFixed(2));
       }
 
       // Convertir los números a cadenas
       for (const row of rows) {
         row.name = String(row.name);
       }
-
+      
       res.json({ average: average, median: median, data: rows });
     } catch (err) {
       console.log(err);
@@ -15042,6 +15050,11 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
         return;
       }
 
+      // Redondear totales a 2 decimales
+      for (const row of rows) {
+        row.total = Number(Number(row.total).toFixed(2));
+      }
+
       // Calcular el promedio
       let sum = 0;
       let count = 0;
@@ -15055,9 +15068,9 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
       let median;
       let sortedRows = [...rows].sort((a, b) => a.total - b.total);
       if (sortedRows.length % 2 === 0) {
-        median = (sortedRows[sortedRows.length / 2 - 1].total + sortedRows[sortedRows.length / 2].total) / 2;
+        median = Number(((sortedRows[sortedRows.length / 2 - 1].total + sortedRows[sortedRows.length / 2].total) / 2).toFixed(2));
       } else {
-        median = sortedRows[Math.floor(sortedRows.length / 2)].total;
+        median = Number(Number(sortedRows[Math.floor(sortedRows.length / 2)].total).toFixed(2));
       }
 
       // Convertir los números a cadenas
@@ -15067,7 +15080,7 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
 
       const totalItems = rows.length;
       const data = rows.slice(start, start + resultsPerPage);
-
+      
       res.json({ average: average, median: median, totalItems: totalItems, page: page - 1, data: data });
     } catch (err) {
       console.log(err);
