@@ -6570,6 +6570,7 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
          answer_type_id,
          depends_on_question_id,
          depends_on_answer_id,
+         updated_at,
          traffic_light_enabled,
          traffic_light_direction
        from question`
@@ -6589,6 +6590,7 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
         answer_type_id: row.answer_type_id,
         depends_on_question_id: row.depends_on_question_id,
         depends_on_answer_id: row.depends_on_answer_id,
+        updated_at: row.updated_at || null,
         traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
         traffic_light_direction: trafficLightConfig.traffic_light_direction
       });
@@ -6611,6 +6613,7 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
         answer_type_id: questionData.answer_type_id,
         depends_on_question_id: questionData.depends_on_question_id,
         depends_on_answer_id: questionData.depends_on_answer_id,
+        updated_at: questionData.updated_at,
         traffic_light_enabled: questionData.traffic_light_enabled,
         traffic_light_direction: questionData.traffic_light_direction
       });
@@ -6743,6 +6746,14 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       );
       if (questionUpdateRows.affectedRows === 0) {
         throw new Error(`Could not update question ${questionItem.question_id}`);
+      }
+
+      if (trafficLightChanged && !orderChanged && !dependencyChanged) {
+        // Keep onboarding availability stable when the only change is traffic-light metadata.
+        await connection.query(
+          'update question set updated_at = ? where id = ?',
+          [beforeQuestion.updated_at, questionItem.question_id]
+        );
       }
       updatedQuestions += 1;
 
