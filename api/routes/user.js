@@ -12763,6 +12763,522 @@ router.post('/metrics/volunteer/age', verifyToken, async (req, res) => {
 }
 );
 
+const PARTICIPANT_METRICS_CACHE_TTL_MS = 5000;
+const PARTICIPANT_DATE_RANGE_CACHE_TTL_MS = 60000;
+const PARTICIPANT_CACHE_MAX_ENTRIES = 200;
+const PARTICIPANT_LA_TIME_ZONE_SQL = "'America/Los_Angeles'";
+const PARTICIPANT_UTC_TIME_ZONE_SQL = "'+00:00'";
+const participantMetricsCache = new Map();
+
+function cleanupParticipantMetricsCache() {
+  if (participantMetricsCache.size <= PARTICIPANT_CACHE_MAX_ENTRIES) {
+    return;
+  }
+
+  const now = Date.now();
+  for (const [cacheKey, cacheEntry] of participantMetricsCache.entries()) {
+    if (cacheEntry.expiresAt <= now && !cacheEntry.promise) {
+      participantMetricsCache.delete(cacheKey);
+    }
+  }
+}
+
+async function getCachedParticipantMetrics(cacheKey, ttlMs, computeFn) {
+  cleanupParticipantMetricsCache();
+
+  const now = Date.now();
+  const cachedEntry = participantMetricsCache.get(cacheKey);
+
+  if (cachedEntry) {
+    if (cachedEntry.value !== undefined && cachedEntry.expiresAt > now) {
+      return cachedEntry.value;
+    }
+
+    if (cachedEntry.promise) {
+      return cachedEntry.promise;
+    }
+
+    participantMetricsCache.delete(cacheKey);
+  }
+
+  const pendingPromise = (async () => {
+    try {
+      const value = await computeFn();
+      participantMetricsCache.set(cacheKey, {
+        value,
+        expiresAt: Date.now() + ttlMs
+      });
+      return value;
+    } catch (error) {
+      participantMetricsCache.delete(cacheKey);
+      throw error;
+    }
+  })();
+
+  participantMetricsCache.set(cacheKey, {
+    promise: pendingPromise,
+    expiresAt: now + ttlMs
+  });
+
+  return pendingPromise;
+}
+
+function buildParticipantMetricsCacheKey(scope, cabecera, filters, extra = {}) {
+  return JSON.stringify({
+    scope,
+    role: cabecera.role,
+    client_id: cabecera.role === 'client' ? Number(cabecera.client_id) || null : null,
+    filters,
+    extra
+  });
+}
+
+function parseDateOnly(value) {
+  if (!value) {
+    return null;
+  }
+
+  const match = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : null;
+}
+
+function normalizeNumberArray(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return [...new Set(
+    values
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value))
+  )].sort((a, b) => a - b);
+}
+
+function normalizePositiveInteger(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+async function getParticipantMetricDateBounds() {
+  return getCachedParticipantMetrics(
+    'participant-metric-date-bounds',
+    PARTICIPANT_DATE_RANGE_CACHE_TTL_MS,
+    async () => {
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+           DATE_FORMAT(
+             CONVERT_TZ(MIN(boundary_date), ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}),
+             '%Y-%m-%d'
+           ) AS from_date,
+           DATE_FORMAT(
+             CONVERT_TZ(MAX(boundary_date), ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}),
+             '%Y-%m-%d'
+           ) AS to_date
+         FROM (
+           SELECT MIN(creation_date) AS boundary_date
+           FROM user
+           WHERE enabled = 'Y' AND role_id = 5
+           UNION ALL
+           SELECT MAX(creation_date) AS boundary_date
+           FROM user
+           WHERE enabled = 'Y' AND role_id = 5
+           UNION ALL
+           SELECT MIN(creation_date) AS boundary_date
+           FROM delivery_beneficiary
+           UNION ALL
+           SELECT MAX(creation_date) AS boundary_date
+           FROM delivery_beneficiary
+         ) AS date_bounds
+         WHERE boundary_date IS NOT NULL`
+      );
+
+      const row = rows[0] || {};
+      return {
+        from_date: row.from_date || '1970-01-01',
+        to_date: row.to_date || new Date().toISOString().slice(0, 10)
+      };
+    }
+  );
+}
+
+async function normalizeParticipantMetricFilters(filters = {}, options = {}) {
+  const normalized = {
+    from_date: parseDateOnly(filters.from_date),
+    to_date: parseDateOnly(filters.to_date),
+    locations: normalizeNumberArray(filters.locations),
+    genders: normalizeNumberArray(filters.genders),
+    ethnicities: normalizeNumberArray(filters.ethnicities),
+    min_age: normalizePositiveInteger(filters.min_age),
+    max_age: normalizePositiveInteger(filters.max_age),
+    zipcode: filters.zipcode == null ? null : String(filters.zipcode).trim() || null,
+    interval: ['day', 'week', 'month', 'quarter', 'year'].includes(filters.interval)
+      ? filters.interval
+      : 'month'
+  };
+
+  if (options.resolveDateRange && (!normalized.from_date || !normalized.to_date)) {
+    const dateBounds = await getParticipantMetricDateBounds();
+    if (!normalized.from_date) {
+      normalized.from_date = dateBounds.from_date;
+    }
+    if (!normalized.to_date) {
+      normalized.to_date = dateBounds.to_date;
+    }
+  }
+
+  if (options.withDefaultOpenRange) {
+    if (!normalized.from_date) {
+      normalized.from_date = '1970-01-01';
+    }
+    if (!normalized.to_date) {
+      normalized.to_date = '2100-01-01';
+    }
+  }
+
+  return normalized;
+}
+
+function appendParticipantClientScope(cabecera, userAlias, clientAlias, joins, conditions, params) {
+  if (cabecera.role === 'client') {
+    joins.push(`INNER JOIN client_user ${clientAlias} ON ${clientAlias}.user_id = ${userAlias}.id`);
+    conditions.push(`${clientAlias}.client_id = ?`);
+    params.push(Number(cabecera.client_id));
+  }
+}
+
+function appendParticipantDemographicFilters(filters, userAlias, conditions, params) {
+  if (filters.genders.length > 0) {
+    conditions.push(`${userAlias}.gender_id IN (${filters.genders.map(() => '?').join(',')})`);
+    params.push(...filters.genders);
+  }
+
+  if (filters.ethnicities.length > 0) {
+    conditions.push(`${userAlias}.ethnicity_id IN (${filters.ethnicities.map(() => '?').join(',')})`);
+    params.push(...filters.ethnicities);
+  }
+
+  if (filters.min_age !== null) {
+    conditions.push(
+      `${userAlias}.date_of_birth <= DATE_SUB(` +
+      `DATE(CONVERT_TZ(UTC_TIMESTAMP(), ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})), ` +
+      `INTERVAL ? YEAR)`
+    );
+    params.push(filters.min_age);
+  }
+
+  if (filters.max_age !== null) {
+    conditions.push(
+      `${userAlias}.date_of_birth >= DATE_ADD(` +
+      `DATE_SUB(DATE(CONVERT_TZ(UTC_TIMESTAMP(), ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})), ` +
+      `INTERVAL ? YEAR), INTERVAL 1 DAY)`
+    );
+    params.push(filters.max_age + 1);
+  }
+
+  if (filters.zipcode) {
+    conditions.push(`${userAlias}.zipcode = ?`);
+    params.push(filters.zipcode);
+  }
+}
+
+function appendParticipantDateRangeFilter(columnSql, fromDate, toDate, conditions, params) {
+  if (fromDate) {
+    conditions.push(
+      `${columnSql} >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})`
+    );
+    params.push(fromDate);
+  }
+
+  if (toDate) {
+    conditions.push(
+      `${columnSql} < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})`
+    );
+    params.push(toDate);
+  }
+}
+
+function formatParticipantYesNoRows(yesCount, noCount, language) {
+  const yesLabel = language === 'en' ? 'Yes' : 'Si';
+  return [
+    { name: yesLabel, total: Number(yesCount || 0) },
+    { name: 'No', total: Number(noCount || 0) }
+  ];
+}
+
+function formatParticipantLanguageRows(row, language) {
+  return [
+    {
+      name: language === 'en' ? 'English' : 'Ingles',
+      total: Number(row.language_en || 0)
+    },
+    {
+      name: language === 'en' ? 'Spanish' : 'Espanol',
+      total: Number(row.language_es || 0)
+    },
+    {
+      name: language === 'en' ? 'Unknown' : 'Desconocido',
+      total: Number(row.language_unknown || 0)
+    }
+  ];
+}
+
+function getParticipantPeriodExpressions(interval) {
+  switch (interval) {
+    case 'day':
+      return {
+        user: `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%Y-%m-%d')`,
+        delivery: `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%Y-%m-%d')`
+      };
+    case 'week':
+      return {
+        user: `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%x-W%v')`,
+        delivery: `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%x-W%v')`
+      };
+    case 'quarter':
+      return {
+        user: `CONCAT(YEAR(CONVERT_TZ(u.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})), '-Q', QUARTER(CONVERT_TZ(u.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})))`,
+        delivery: `CONCAT(YEAR(CONVERT_TZ(db_current.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})), '-Q', QUARTER(CONVERT_TZ(db_current.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})))`
+      };
+    case 'year':
+      return {
+        user: `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%Y')`,
+        delivery: `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%Y')`
+      };
+    case 'month':
+    default:
+      return {
+        user: `DATE_FORMAT(CONVERT_TZ(u.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%Y-%m')`,
+        delivery: `DATE_FORMAT(CONVERT_TZ(db_current.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL}), '%Y-%m')`
+      };
+  }
+}
+
+async function getParticipantCommunicationBreakdown(cabecera, rawFilters, language = 'en') {
+  const filters = await normalizeParticipantMetricFilters(rawFilters);
+  const cacheKey = buildParticipantMetricsCacheKey(
+    'participant-communication',
+    cabecera,
+    filters,
+    { language }
+  );
+
+  return getCachedParticipantMetrics(cacheKey, PARTICIPANT_METRICS_CACHE_TTL_MS, async () => {
+    const joins = [];
+    const conditions = [
+      'u.role_id = 5',
+      "u.enabled = 'Y'"
+    ];
+    const params = [];
+
+    appendParticipantClientScope(cabecera, 'u', 'cu', joins, conditions, params);
+    appendParticipantDemographicFilters(filters, 'u', conditions, params);
+    appendParticipantDateRangeFilter('u.creation_date', filters.from_date, filters.to_date, conditions, params);
+
+    if (filters.locations.length > 0) {
+      const locationPlaceholders = filters.locations.map(() => '?').join(',');
+      let locationExistsSql = `EXISTS (
+        SELECT 1
+        FROM delivery_beneficiary db_loc
+        WHERE db_loc.receiving_user_id = u.id
+          AND db_loc.location_id IN (${locationPlaceholders})`;
+      const locationParams = [...filters.locations];
+
+      if (filters.from_date) {
+        locationExistsSql += `
+          AND db_loc.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})`;
+        locationParams.push(filters.from_date);
+      }
+
+      if (filters.to_date) {
+        locationExistsSql += `
+          AND db_loc.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})`;
+        locationParams.push(filters.to_date);
+      }
+
+      locationExistsSql += `
+      )`;
+
+      conditions.push(
+        `(u.first_location_id IN (${locationPlaceholders}) OR ${locationExistsSql})`
+      );
+      params.push(...filters.locations, ...locationParams);
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+         SUM(CASE WHEN u.email IS NOT NULL AND TRIM(u.email) <> '' THEN 1 ELSE 0 END) AS email_yes,
+         SUM(CASE WHEN u.email IS NULL OR TRIM(u.email) = '' THEN 1 ELSE 0 END) AS email_no,
+         SUM(CASE WHEN u.phone IS NOT NULL AND TRIM(u.phone) <> '' THEN 1 ELSE 0 END) AS phone_yes,
+         SUM(CASE WHEN u.phone IS NULL OR TRIM(u.phone) = '' THEN 1 ELSE 0 END) AS phone_no,
+         SUM(CASE WHEN u.language = 'en' THEN 1 ELSE 0 END) AS language_en,
+         SUM(CASE WHEN u.language = 'es' THEN 1 ELSE 0 END) AS language_es,
+         SUM(
+           CASE
+             WHEN u.language IS NULL OR TRIM(u.language) = '' OR u.language NOT IN ('en', 'es') THEN 1
+             ELSE 0
+           END
+         ) AS language_unknown
+       FROM user u
+       ${joins.join('\n')}
+       WHERE ${conditions.join('\n         AND ')}`,
+      params
+    );
+
+    const row = rows[0] || {};
+    return {
+      email: formatParticipantYesNoRows(row.email_yes, row.email_no, language),
+      phone: formatParticipantYesNoRows(row.phone_yes, row.phone_no, language),
+      language: formatParticipantLanguageRows(row, language)
+    };
+  });
+}
+
+async function getParticipantRegisterSummary(cabecera, rawFilters) {
+  const filters = await normalizeParticipantMetricFilters(rawFilters, { withDefaultOpenRange: true });
+  const cacheKey = buildParticipantMetricsCacheKey('participant-register-summary', cabecera, filters);
+
+  return getCachedParticipantMetrics(cacheKey, PARTICIPANT_METRICS_CACHE_TTL_MS, async () => {
+    const locationPlaceholders = filters.locations.map(() => '?').join(',');
+    const params = [];
+
+    if (cabecera.role === 'client') {
+      params.push(Number(cabecera.client_id));
+    }
+
+    params.push(filters.from_date, filters.to_date);
+    if (filters.locations.length > 0) {
+      params.push(...filters.locations);
+    }
+
+    params.push(filters.from_date, filters.to_date);
+    if (filters.locations.length > 0) {
+      params.push(...filters.locations);
+      params.push(...filters.locations);
+    }
+    params.push(filters.from_date);
+    if (filters.locations.length > 0) {
+      params.push(...filters.locations);
+    }
+    params.push(filters.from_date);
+
+    params.push(filters.from_date, filters.to_date);
+    if (filters.locations.length > 0) {
+      params.push(...filters.locations);
+    }
+
+    params.push(filters.from_date, filters.to_date);
+    if (filters.locations.length > 0) {
+      params.push(...filters.locations);
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      `WITH scoped_users AS (
+         SELECT u.id, u.creation_date, u.first_location_id
+         FROM user u
+         ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON cu.user_id = u.id' : ''}
+         WHERE u.role_id = 5
+           AND u.enabled = 'Y'
+           ${cabecera.role === 'client' ? 'AND cu.client_id = ?' : ''}
+       ),
+       new_users AS (
+         SELECT su.id
+         FROM scoped_users su
+         WHERE su.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           AND su.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           ${filters.locations.length > 0 ? `AND su.first_location_id IN (${locationPlaceholders})` : ''}
+       ),
+       recurring_users AS (
+         SELECT DISTINCT db_range.receiving_user_id AS user_id
+         FROM delivery_beneficiary db_range
+         INNER JOIN scoped_users su ON su.id = db_range.receiving_user_id
+         WHERE db_range.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           AND db_range.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           ${filters.locations.length > 0 ? `AND db_range.location_id IN (${locationPlaceholders})` : ''}
+           AND (
+             EXISTS (
+               SELECT 1
+               FROM delivery_beneficiary db_prev
+               WHERE db_prev.receiving_user_id = su.id
+                 AND db_prev.creation_date < db_range.creation_date
+                 ${filters.locations.length > 0 ? `AND db_prev.location_id IN (${locationPlaceholders})` : ''}
+             )
+             OR (
+               su.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+               ${filters.locations.length > 0 ? `AND su.first_location_id IN (${locationPlaceholders})` : ''}
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM delivery_beneficiary db_no_past
+                 WHERE db_no_past.receiving_user_id = su.id
+                   AND db_no_past.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+               )
+             )
+           )
+       ),
+       recurring_without_new_users AS (
+         SELECT ru.user_id
+         FROM recurring_users ru
+         LEFT JOIN new_users nu ON nu.id = ru.user_id
+         WHERE nu.id IS NULL
+       ),
+       delivery_participations AS (
+         SELECT COUNT(db_part.id) AS total
+         FROM delivery_beneficiary db_part
+         INNER JOIN scoped_users su ON su.id = db_part.receiving_user_id
+         WHERE db_part.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           AND db_part.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           AND db_part.delivering_user_id IS NOT NULL
+           ${filters.locations.length > 0 ? `AND db_part.location_id IN (${locationPlaceholders})` : ''}
+       ),
+       registration_participations AS (
+         SELECT COUNT(DISTINCT u_reg.id) AS total
+         FROM scoped_users u_reg
+         WHERE u_reg.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           AND u_reg.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           ${filters.locations.length > 0 ? `AND u_reg.first_location_id IN (${locationPlaceholders})` : ''}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM delivery_beneficiary db_same_day
+             WHERE db_same_day.receiving_user_id = u_reg.id
+               AND db_same_day.delivering_user_id IS NOT NULL
+               AND db_same_day.creation_date >= CONVERT_TZ(
+                 DATE(CONVERT_TZ(u_reg.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})),
+                 ${PARTICIPANT_LA_TIME_ZONE_SQL},
+                 ${PARTICIPANT_UTC_TIME_ZONE_SQL}
+               )
+               AND db_same_day.creation_date < DATE_ADD(
+                 CONVERT_TZ(
+                   DATE(CONVERT_TZ(u_reg.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})),
+                   ${PARTICIPANT_LA_TIME_ZONE_SQL},
+                   ${PARTICIPANT_UTC_TIME_ZONE_SQL}
+                 ),
+                 INTERVAL 1 DAY
+               )
+           )
+       )
+       SELECT
+         (SELECT COUNT(*) FROM scoped_users) AS total,
+         (SELECT COUNT(*) FROM new_users) AS new,
+         (SELECT COUNT(*) FROM recurring_users) AS recurring,
+         (SELECT COUNT(*) FROM recurring_without_new_users) AS recurring_without_new,
+         COALESCE((SELECT total FROM delivery_participations), 0) +
+         COALESCE((SELECT total FROM registration_participations), 0) AS participations`,
+      params
+    );
+
+    const row = rows[0] || {};
+    return {
+      total: Number(row.total || 0),
+      new: Number(row.new || 0),
+      recurring: Number(row.recurring || 0),
+      recurring_without_new: Number(row.recurring_without_new || 0),
+      participations: Number(row.participations || 0)
+    };
+  });
+}
+
 router.post('/metrics/participant/register', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
@@ -14372,6 +14888,635 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
     res.status(403).send('Forbidden');
   }
 });
+
+async function getParticipantRegisterHistory(cabecera, rawFilters, language = 'en') {
+  const filters = await normalizeParticipantMetricFilters(rawFilters, { resolveDateRange: true });
+  const cacheKey = buildParticipantMetricsCacheKey(
+    'participant-register-history',
+    cabecera,
+    filters,
+    { language }
+  );
+
+  return getCachedParticipantMetrics(cacheKey, PARTICIPANT_METRICS_CACHE_TTL_MS, async () => {
+    const periodExpressions = getParticipantPeriodExpressions(filters.interval);
+    const userPeriodExpression = periodExpressions.user;
+    const deliveryPeriodExpression = periodExpressions.delivery;
+    const userPeriodExpressionReg = userPeriodExpression.replace(/\bu\./g, 'u_reg.');
+    const deliveryPeriodExpressionParticipations = deliveryPeriodExpression.replace(/\bdb_current\./g, 'db_participations.');
+    const locationPlaceholders = filters.locations.map(() => '?').join(',');
+
+    const newUsersJoins = [];
+    const newUsersConditions = [
+      'u.role_id = 5',
+      "u.enabled = 'Y'"
+    ];
+    const newUsersParams = [];
+    appendParticipantClientScope(cabecera, 'u', 'cu', newUsersJoins, newUsersConditions, newUsersParams);
+    appendParticipantDemographicFilters(filters, 'u', newUsersConditions, newUsersParams);
+    appendParticipantDateRangeFilter('u.creation_date', filters.from_date, filters.to_date, newUsersConditions, newUsersParams);
+    if (filters.locations.length > 0) {
+      newUsersConditions.push(`u.first_location_id IN (${locationPlaceholders})`);
+      newUsersParams.push(...filters.locations);
+    }
+
+    const recurringJoins = [
+      'INNER JOIN user u ON db_current.receiving_user_id = u.id'
+    ];
+    const recurringConditions = [
+      'u.role_id = 5',
+      "u.enabled = 'Y'"
+    ];
+    const recurringParams = [];
+    appendParticipantClientScope(cabecera, 'u', 'cu', recurringJoins, recurringConditions, recurringParams);
+    appendParticipantDemographicFilters(filters, 'u', recurringConditions, recurringParams);
+    appendParticipantDateRangeFilter('db_current.creation_date', filters.from_date, filters.to_date, recurringConditions, recurringParams);
+    if (filters.locations.length > 0) {
+      recurringConditions.push(`db_current.location_id IN (${locationPlaceholders})`);
+      recurringParams.push(...filters.locations);
+    }
+    if (filters.locations.length > 0) {
+      recurringParams.push(...filters.locations);
+    }
+    recurringParams.push(filters.from_date);
+    if (filters.locations.length > 0) {
+      recurringParams.push(...filters.locations);
+    }
+    recurringParams.push(filters.from_date);
+
+    const deliveryParticipationJoins = [
+      'INNER JOIN user u ON db_participations.receiving_user_id = u.id'
+    ];
+    const deliveryParticipationConditions = [
+      'u.role_id = 5',
+      "u.enabled = 'Y'",
+      'db_participations.delivering_user_id IS NOT NULL'
+    ];
+    const deliveryParticipationParams = [];
+    appendParticipantClientScope(
+      cabecera,
+      'u',
+      'cu',
+      deliveryParticipationJoins,
+      deliveryParticipationConditions,
+      deliveryParticipationParams
+    );
+    appendParticipantDemographicFilters(filters, 'u', deliveryParticipationConditions, deliveryParticipationParams);
+    appendParticipantDateRangeFilter(
+      'db_participations.creation_date',
+      filters.from_date,
+      filters.to_date,
+      deliveryParticipationConditions,
+      deliveryParticipationParams
+    );
+    if (filters.locations.length > 0) {
+      deliveryParticipationConditions.push(`db_participations.location_id IN (${locationPlaceholders})`);
+      deliveryParticipationParams.push(...filters.locations);
+    }
+
+    const registrationParticipationJoins = [];
+    const registrationParticipationConditions = [
+      'u_reg.role_id = 5',
+      "u_reg.enabled = 'Y'"
+    ];
+    const registrationParticipationParams = [];
+    appendParticipantClientScope(
+      cabecera,
+      'u_reg',
+      'cu_reg',
+      registrationParticipationJoins,
+      registrationParticipationConditions,
+      registrationParticipationParams
+    );
+    appendParticipantDemographicFilters(
+      filters,
+      'u_reg',
+      registrationParticipationConditions,
+      registrationParticipationParams
+    );
+    appendParticipantDateRangeFilter(
+      'u_reg.creation_date',
+      filters.from_date,
+      filters.to_date,
+      registrationParticipationConditions,
+      registrationParticipationParams
+    );
+    if (filters.locations.length > 0) {
+      registrationParticipationConditions.push(`u_reg.first_location_id IN (${locationPlaceholders})`);
+      registrationParticipationParams.push(...filters.locations);
+    }
+
+    const [newUsersResult, recurringUsersResult, participationsResult] = await Promise.all([
+      mysqlConnection.promise().query(
+        `SELECT
+           ${userPeriodExpression} AS period,
+           COUNT(DISTINCT u.id) AS new_users
+         FROM user u
+         ${newUsersJoins.join('\n')}
+         WHERE ${newUsersConditions.join('\n           AND ')}
+         GROUP BY period
+         ORDER BY period`,
+        newUsersParams
+      ),
+      mysqlConnection.promise().query(
+        `SELECT
+           ${deliveryPeriodExpression} AS period,
+           COUNT(DISTINCT db_current.receiving_user_id) AS recurring_users
+         FROM delivery_beneficiary db_current
+         ${recurringJoins.join('\n')}
+         WHERE ${recurringConditions.join('\n           AND ')}
+           AND (
+             EXISTS (
+               SELECT 1
+               FROM delivery_beneficiary db_prev_original
+               WHERE db_prev_original.receiving_user_id = u.id
+                 AND db_prev_original.creation_date < db_current.creation_date
+                 ${filters.locations.length > 0 ? `AND db_prev_original.location_id IN (${locationPlaceholders})` : ''}
+             )
+             OR (
+               u.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+               ${filters.locations.length > 0 ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM delivery_beneficiary db_no_past
+                 WHERE db_no_past.receiving_user_id = u.id
+                   AND db_no_past.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+               )
+             )
+           )
+         GROUP BY period
+         ORDER BY period`,
+        recurringParams
+      ),
+      mysqlConnection.promise().query(
+        `SELECT period, SUM(participations_count) AS participations
+         FROM (
+           SELECT
+             ${deliveryPeriodExpressionParticipations} AS period,
+             COUNT(db_participations.id) AS participations_count
+           FROM delivery_beneficiary db_participations
+           ${deliveryParticipationJoins.join('\n')}
+           WHERE ${deliveryParticipationConditions.join('\n             AND ')}
+           GROUP BY period
+           UNION ALL
+           SELECT
+             ${userPeriodExpressionReg} AS period,
+             COUNT(DISTINCT u_reg.id) AS participations_count
+           FROM user u_reg
+           ${registrationParticipationJoins.join('\n')}
+           WHERE ${registrationParticipationConditions.join('\n             AND ')}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM delivery_beneficiary db_same_day
+               WHERE db_same_day.receiving_user_id = u_reg.id
+                 AND db_same_day.delivering_user_id IS NOT NULL
+                 AND db_same_day.creation_date >= CONVERT_TZ(
+                   DATE(CONVERT_TZ(u_reg.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})),
+                   ${PARTICIPANT_LA_TIME_ZONE_SQL},
+                   ${PARTICIPANT_UTC_TIME_ZONE_SQL}
+                 )
+                 AND db_same_day.creation_date < DATE_ADD(
+                   CONVERT_TZ(
+                     DATE(CONVERT_TZ(u_reg.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})),
+                     ${PARTICIPANT_LA_TIME_ZONE_SQL},
+                     ${PARTICIPANT_UTC_TIME_ZONE_SQL}
+                   ),
+                   INTERVAL 1 DAY
+                 )
+             )
+           GROUP BY period
+         ) participations_union
+         GROUP BY period
+         ORDER BY period`,
+        [...deliveryParticipationParams, ...registrationParticipationParams]
+      )
+    ]);
+
+    const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
+    const periodsMap = new Map();
+
+    periods.forEach(period => {
+      periodsMap.set(period, {
+        new_users: 0,
+        recurring_users: 0,
+        participations: 0
+      });
+    });
+
+    newUsersResult[0].forEach(row => {
+      if (periodsMap.has(row.period)) {
+        periodsMap.get(row.period).new_users = Number(row.new_users || 0);
+      }
+    });
+
+    recurringUsersResult[0].forEach(row => {
+      if (periodsMap.has(row.period)) {
+        periodsMap.get(row.period).recurring_users = Number(row.recurring_users || 0);
+      }
+    });
+
+    participationsResult[0].forEach(row => {
+      if (periodsMap.has(row.period)) {
+        periodsMap.get(row.period).participations = Number(row.participations || 0);
+      }
+    });
+
+    const categories = Array.from(periodsMap.keys());
+    return {
+      series: [
+        {
+          name: language === 'en' ? 'New' : 'Nuevos',
+          data: categories.map(period => periodsMap.get(period).new_users)
+        },
+        {
+          name: language === 'en' ? 'Recurring' : 'Recurrentes',
+          data: categories.map(period => periodsMap.get(period).recurring_users)
+        },
+        {
+          name: language === 'en' ? 'Participations' : 'Participaciones',
+          data: categories.map(period => periodsMap.get(period).participations)
+        }
+      ],
+      categories: categories.map(category => formatPeriod(category, filters.interval, language))
+    };
+  });
+}
+
+async function getParticipantLocationNewRecurring(cabecera, rawFilters, language = 'en') {
+  const filters = await normalizeParticipantMetricFilters(rawFilters, { resolveDateRange: true });
+  const cacheKey = buildParticipantMetricsCacheKey(
+    'participant-location-new-recurring',
+    cabecera,
+    filters,
+    { language }
+  );
+
+  return getCachedParticipantMetrics(cacheKey, PARTICIPANT_METRICS_CACHE_TTL_MS, async () => {
+    const locationPlaceholders = filters.locations.map(() => '?').join(',');
+    const [locationRows] = await mysqlConnection.promise().query(
+      `SELECT id, community_city AS name
+       FROM location
+       ${filters.locations.length > 0 ? `WHERE id IN (${locationPlaceholders})` : ''}
+       ORDER BY community_city`,
+      filters.locations
+    );
+
+    if (locationRows.length === 0 && filters.locations.length > 0) {
+      return { series: [], categories: [] };
+    }
+
+    const newUsersJoins = [];
+    const newUsersConditions = [
+      'u.role_id = 5',
+      "u.enabled = 'Y'"
+    ];
+    const newUsersParams = [filters.from_date, filters.to_date, filters.from_date, filters.to_date];
+    appendParticipantClientScope(cabecera, 'u', 'cu', newUsersJoins, newUsersConditions, newUsersParams);
+    appendParticipantDemographicFilters(filters, 'u', newUsersConditions, newUsersParams);
+    if (filters.locations.length > 0) {
+      newUsersConditions.push(
+        `(u.first_location_id IN (${locationPlaceholders}) OR db.location_id IN (${locationPlaceholders}))`
+      );
+      newUsersParams.push(...filters.locations, ...filters.locations);
+    }
+
+    const recurringUsersJoins = [
+      'INNER JOIN user u ON db.receiving_user_id = u.id'
+    ];
+    const recurringUsersConditions = [
+      'u.role_id = 5',
+      "u.enabled = 'Y'"
+    ];
+    const recurringUsersParams = [];
+    appendParticipantClientScope(cabecera, 'u', 'cu', recurringUsersJoins, recurringUsersConditions, recurringUsersParams);
+    appendParticipantDemographicFilters(filters, 'u', recurringUsersConditions, recurringUsersParams);
+    appendParticipantDateRangeFilter('db.creation_date', filters.from_date, filters.to_date, recurringUsersConditions, recurringUsersParams);
+    if (filters.locations.length > 0) {
+      recurringUsersConditions.push(`db.location_id IN (${locationPlaceholders})`);
+      recurringUsersParams.push(...filters.locations);
+    }
+    if (filters.locations.length > 0) {
+      recurringUsersParams.push(...filters.locations);
+    }
+    recurringUsersParams.push(filters.from_date);
+    if (filters.locations.length > 0) {
+      recurringUsersParams.push(...filters.locations);
+    }
+    recurringUsersParams.push(filters.from_date);
+
+    const deliveryParticipationJoins = [
+      'INNER JOIN user u ON db.receiving_user_id = u.id'
+    ];
+    const deliveryParticipationConditions = [
+      'u.role_id = 5',
+      "u.enabled = 'Y'",
+      'db.delivering_user_id IS NOT NULL'
+    ];
+    const deliveryParticipationParams = [];
+    appendParticipantClientScope(
+      cabecera,
+      'u',
+      'cu',
+      deliveryParticipationJoins,
+      deliveryParticipationConditions,
+      deliveryParticipationParams
+    );
+    appendParticipantDemographicFilters(filters, 'u', deliveryParticipationConditions, deliveryParticipationParams);
+    appendParticipantDateRangeFilter('db.creation_date', filters.from_date, filters.to_date, deliveryParticipationConditions, deliveryParticipationParams);
+    if (filters.locations.length > 0) {
+      deliveryParticipationConditions.push(`db.location_id IN (${locationPlaceholders})`);
+      deliveryParticipationParams.push(...filters.locations);
+    }
+
+    const registrationParticipationJoins = [];
+    const registrationParticipationConditions = [
+      'u_reg.role_id = 5',
+      "u_reg.enabled = 'Y'"
+    ];
+    const registrationParticipationParams = [];
+    appendParticipantClientScope(
+      cabecera,
+      'u_reg',
+      'cu_reg',
+      registrationParticipationJoins,
+      registrationParticipationConditions,
+      registrationParticipationParams
+    );
+    appendParticipantDemographicFilters(
+      filters,
+      'u_reg',
+      registrationParticipationConditions,
+      registrationParticipationParams
+    );
+    appendParticipantDateRangeFilter(
+      'u_reg.creation_date',
+      filters.from_date,
+      filters.to_date,
+      registrationParticipationConditions,
+      registrationParticipationParams
+    );
+    if (filters.locations.length > 0) {
+      registrationParticipationConditions.push(`u_reg.first_location_id IN (${locationPlaceholders})`);
+      registrationParticipationParams.push(...filters.locations);
+    }
+
+    const [newUsersResult, recurringUsersResult, participationsResult] = await Promise.all([
+      mysqlConnection.promise().query(
+        `SELECT
+           COALESCE(u.first_location_id, db.location_id) AS location_id,
+           COUNT(DISTINCT u.id) AS new_count
+         FROM user u
+         LEFT JOIN delivery_beneficiary db
+           ON db.receiving_user_id = u.id
+          AND db.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+          AND db.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+         ${newUsersJoins.join('\n')}
+         WHERE u.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           AND u.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           AND ${newUsersConditions.join('\n           AND ')}
+         GROUP BY location_id`,
+        newUsersParams
+      ),
+      mysqlConnection.promise().query(
+        `SELECT
+           db.location_id AS location_id,
+           COUNT(DISTINCT db.receiving_user_id) AS recurring_count
+         FROM delivery_beneficiary db
+         ${recurringUsersJoins.join('\n')}
+         WHERE ${recurringUsersConditions.join('\n           AND ')}
+           AND (
+             EXISTS (
+               SELECT 1
+               FROM delivery_beneficiary db_prev
+               WHERE db_prev.receiving_user_id = u.id
+                 AND db_prev.creation_date < db.creation_date
+                 ${filters.locations.length > 0 ? `AND db_prev.location_id IN (${locationPlaceholders})` : ''}
+             )
+             OR (
+               u.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+               ${filters.locations.length > 0 ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM delivery_beneficiary db_past
+                 WHERE db_past.receiving_user_id = u.id
+                   AND db_past.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+               )
+             )
+           )
+         GROUP BY db.location_id`,
+        recurringUsersParams
+      ),
+      mysqlConnection.promise().query(
+        `SELECT location_id, SUM(participations_count) AS participations_count
+         FROM (
+           SELECT
+             db.location_id AS location_id,
+             COUNT(db.id) AS participations_count
+           FROM delivery_beneficiary db
+           ${deliveryParticipationJoins.join('\n')}
+           WHERE ${deliveryParticipationConditions.join('\n             AND ')}
+           GROUP BY db.location_id
+           UNION ALL
+           SELECT
+             u_reg.first_location_id AS location_id,
+             COUNT(DISTINCT u_reg.id) AS participations_count
+           FROM user u_reg
+           ${registrationParticipationJoins.join('\n')}
+           WHERE ${registrationParticipationConditions.join('\n             AND ')}
+             AND NOT EXISTS (
+               SELECT 1
+               FROM delivery_beneficiary db_same_day
+               WHERE db_same_day.receiving_user_id = u_reg.id
+                 AND db_same_day.delivering_user_id IS NOT NULL
+                 AND db_same_day.creation_date >= CONVERT_TZ(
+                   DATE(CONVERT_TZ(u_reg.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})),
+                   ${PARTICIPANT_LA_TIME_ZONE_SQL},
+                   ${PARTICIPANT_UTC_TIME_ZONE_SQL}
+                 )
+                 AND db_same_day.creation_date < DATE_ADD(
+                   CONVERT_TZ(
+                     DATE(CONVERT_TZ(u_reg.creation_date, ${PARTICIPANT_UTC_TIME_ZONE_SQL}, ${PARTICIPANT_LA_TIME_ZONE_SQL})),
+                     ${PARTICIPANT_LA_TIME_ZONE_SQL},
+                     ${PARTICIPANT_UTC_TIME_ZONE_SQL}
+                   ),
+                   INTERVAL 1 DAY
+                 )
+             )
+           GROUP BY u_reg.first_location_id
+         ) AS participations_union
+         GROUP BY location_id`,
+        [...deliveryParticipationParams, ...registrationParticipationParams]
+      )
+    ]);
+
+    const locationsMap = new Map();
+    locationRows.forEach(location => {
+      locationsMap.set(location.id, {
+        id: location.id,
+        name: location.name,
+        new_users: 0,
+        recurring_users: 0,
+        participations: 0
+      });
+    });
+
+    newUsersResult[0].forEach(row => {
+      if (row.location_id && locationsMap.has(row.location_id)) {
+        locationsMap.get(row.location_id).new_users = Number(row.new_count || 0);
+      }
+    });
+
+    recurringUsersResult[0].forEach(row => {
+      if (row.location_id && locationsMap.has(row.location_id)) {
+        locationsMap.get(row.location_id).recurring_users = Number(row.recurring_count || 0);
+      }
+    });
+
+    participationsResult[0].forEach(row => {
+      if (row.location_id && locationsMap.has(row.location_id)) {
+        locationsMap.get(row.location_id).participations = Number(row.participations_count || 0);
+      }
+    });
+
+    const orderedLocations = Array.from(locationsMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+    return {
+      series: [
+        {
+          name: language === 'en' ? 'New' : 'Nuevos',
+          data: orderedLocations.map(location => location.new_users)
+        },
+        {
+          name: language === 'en' ? 'Recurring' : 'Recurrentes',
+          data: orderedLocations.map(location => location.recurring_users)
+        },
+        {
+          name: language === 'en' ? 'Participations' : 'Participaciones',
+          data: orderedLocations.map(location => location.participations)
+        }
+      ],
+      categories: orderedLocations.map(location => location.name)
+    };
+  });
+}
+
+function overrideRouteHandler(path, method, handler) {
+  const routeLayer = router.stack.find(layer => layer.route && layer.route.path === path && layer.route.methods[method]);
+  if (!routeLayer || !routeLayer.route || !Array.isArray(routeLayer.route.stack) || routeLayer.route.stack.length === 0) {
+    logger.warn(`Unable to override route handler for ${method.toUpperCase()} ${path}`);
+    return;
+  }
+
+  routeLayer.route.stack[routeLayer.route.stack.length - 1].handle = handler;
+}
+
+async function optimizedParticipantRegisterHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+    try {
+      res.json(await getParticipantRegisterSummary(cabecera, req.body));
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+
+async function optimizedParticipantEmailHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+    try {
+      const language = req.query.language || 'en';
+      const communication = await getParticipantCommunicationBreakdown(cabecera, req.body, language);
+      res.json(communication.email);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+
+async function optimizedParticipantPhoneHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+    try {
+      const language = req.query.language || 'en';
+      const communication = await getParticipantCommunicationBreakdown(cabecera, req.body, language);
+      res.json(communication.phone);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+
+async function optimizedParticipantLanguageHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
+    try {
+      const language = req.query.language || 'en';
+      const communication = await getParticipantCommunicationBreakdown(cabecera, req.body, language);
+      res.json(communication.language);
+    } catch (err) {
+      console.log(err);
+      res.status(500).json('Internal server error');
+    }
+  } else {
+    res.status(403).json('Unauthorized');
+  }
+}
+
+async function optimizedParticipantRegisterHistoryHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (
+    cabecera.role === 'admin' ||
+    cabecera.role === 'client' ||
+    cabecera.role === 'director' ||
+    cabecera.role === 'auditor'
+  ) {
+    try {
+      const language = req.query.language || 'en';
+      res.json(await getParticipantRegisterHistory(cabecera, req.body, language));
+    } catch (error) {
+      console.error('Error in optimized /metrics/participant/register_history:', error);
+      res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+  } else {
+    res.status(403).json('Forbidden');
+  }
+}
+
+async function optimizedParticipantLocationNewRecurringHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (
+    cabecera.role === 'admin' ||
+    cabecera.role === 'client' ||
+    cabecera.role === 'director' ||
+    cabecera.role === 'auditor'
+  ) {
+    try {
+      const language = req.query.language || 'en';
+      res.json(await getParticipantLocationNewRecurring(cabecera, req.body, language));
+    } catch (error) {
+      console.log(error);
+      res.status(500).send(error.message);
+    }
+  } else {
+    res.status(403).send('Forbidden');
+  }
+}
+
+overrideRouteHandler('/metrics/participant/register', 'post', optimizedParticipantRegisterHandler);
+overrideRouteHandler('/metrics/participant/email', 'post', optimizedParticipantEmailHandler);
+overrideRouteHandler('/metrics/participant/phone', 'post', optimizedParticipantPhoneHandler);
+overrideRouteHandler('/metrics/participant/language', 'post', optimizedParticipantLanguageHandler);
+overrideRouteHandler('/metrics/participant/register_history', 'post', optimizedParticipantRegisterHistoryHandler);
+overrideRouteHandler('/metrics/participant/location_new_recurring', 'post', optimizedParticipantLocationNewRecurringHandler);
 
 // Funciones auxiliares
 function generatePeriods(startDate, endDate, interval) {
