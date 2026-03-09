@@ -119,7 +119,7 @@ router.post('/signin', (req, res) => {
               delete row.creation_date;
               let data = JSON.stringify(row);
               try {
-                const token = await jwtSignAsync({ data }, process.env.JWT_SECRET, { expiresIn: '1h' });
+                const token = await jwtSignAsync({ data }, process.env.JWT_SECRET, { expiresIn: '6h' });
                 validUsers.push({
                   id: row.id,
                   firstname: row.firstname,
@@ -157,7 +157,7 @@ router.get('/refresh-token', verifyToken, (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
-    jwt.sign({ data: req.data.data }, process.env.JWT_SECRET, { expiresIn: '1h' }, (err, token) => {
+    jwt.sign({ data: req.data.data }, process.env.JWT_SECRET, { expiresIn: '6h' }, (err, token) => {
       res.status(200).json({ token: token });
     });
   } else {
