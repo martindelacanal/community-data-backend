@@ -22310,7 +22310,10 @@ router.post('/article/upload-image', verifyToken, articleUpload, async (req, res
 router.get('/categories', async (req, res) => {
 
   try {
-    const { lang = 'en' } = req.query; // Idioma por defecto: inglés
+    const { lang = 'en', withArticlesOnly } = req.query; // Idioma por defecto: inglés
+    const withArticlesOnlyBool = typeof withArticlesOnly === 'string'
+      ? withArticlesOnly.toLowerCase() === 'true'
+      : withArticlesOnly === true;
 
     // Consulta SQL que incluye filtrado por idioma si tienes campos multiidioma
     const query = `
@@ -22318,6 +22321,7 @@ router.get('/categories', async (req, res) => {
       id,
       ${lang === 'en' ? 'name_en' : 'name_es'} AS name
       FROM category
+      ${withArticlesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM article_category ac INNER JOIN article a ON a.id = ac.article_id WHERE ac.category_id = category.id AND a.article_status_id = 2)' : ''}
       ORDER BY name ASC
     `;
 
@@ -22338,7 +22342,10 @@ router.get('/categories', async (req, res) => {
 router.get('/filters', async (req, res) => {
 
   try {
-    const { lang = 'en' } = req.query; // Idioma por defecto: inglés
+    const { lang = 'en', withArticlesOnly } = req.query; // Idioma por defecto: inglés
+    const withArticlesOnlyBool = typeof withArticlesOnly === 'string'
+      ? withArticlesOnly.toLowerCase() === 'true'
+      : withArticlesOnly === true;
 
     // Consulta SQL que incluye filtrado por idioma si tienes campos multiidioma
     const query = `
@@ -22346,6 +22353,7 @@ router.get('/filters', async (req, res) => {
       id,
       ${lang === 'en' ? 'name_en' : 'name_es'} AS name
       FROM filter
+      ${withArticlesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM article_filter af INNER JOIN article a ON a.id = af.article_id WHERE af.filter_id = filter.id AND a.article_status_id = 2)' : ''}
       ORDER BY name ASC
     `;
 
@@ -23609,8 +23617,16 @@ function calculateCurrentStatus(schedules, language = 'en') {
 // GET /trusted-resources/filters - Get all filters
 router.get('/trusted-resources/filters', async (req, res) => {
   try {
+    const { withResourcesOnly } = req.query;
+    const withResourcesOnlyBool = typeof withResourcesOnly === 'string'
+      ? withResourcesOnly.toLowerCase() === 'true'
+      : withResourcesOnly === true;
+
     const [filters] = await mysqlConnection.promise().query(
-      'SELECT id, name_english, name_spanish FROM resource_filters ORDER BY name_english'
+      `SELECT id, name_english, name_spanish
+       FROM resource_filters
+       ${withResourcesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM resource_filter_relations rfr WHERE rfr.filter_id = resource_filters.id)' : ''}
+       ORDER BY name_english`
     );
 
     const formattedFilters = filters.map(filter => ({
