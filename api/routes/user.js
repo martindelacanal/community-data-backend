@@ -3991,6 +3991,87 @@ router.get('/user/status', verifyToken, async (req, res) => {
   }
 });
 
+function normalizeUserMapCenterZipcode(value) {
+  if (value == null) {
+    return null;
+  }
+
+  const normalizedValue = String(value).trim();
+  return normalizedValue === '' ? null : normalizedValue;
+}
+
+function isValidUserMapCoordinate(value, min, max) {
+  return Number.isFinite(value) && value >= min && value <= max;
+}
+
+function buildUserMapCenterCandidate(row) {
+  if (!row || !row.location_id) {
+    return null;
+  }
+
+  const locationId = Number.parseInt(String(row.location_id), 10);
+  const lat = Number(row.lat);
+  const lng = Number(row.lng);
+
+  if (!Number.isInteger(locationId) || locationId <= 0) {
+    return null;
+  }
+
+  if (!isValidUserMapCoordinate(lat, -90, 90) || !isValidUserMapCoordinate(lng, -180, 180)) {
+    return null;
+  }
+
+  return {
+    center: { lat, lng },
+    locationId
+  };
+}
+
+async function getUserMapCenterHistoryRow(userId, role) {
+  if (!userId) {
+    return null;
+  }
+
+  if (role === 'beneficiary') {
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+        db.location_id,
+        ST_Y(l.coordinates) AS lat,
+        ST_X(l.coordinates) AS lng
+      FROM delivery_beneficiary AS db
+      INNER JOIN location AS l ON l.id = db.location_id
+      WHERE db.receiving_user_id = ?
+        AND db.location_id IS NOT NULL
+      ORDER BY COALESCE(db.last_onboarding_date, db.creation_date) DESC, db.id DESC
+      LIMIT 1`,
+      [userId]
+    );
+
+    return rows[0] || null;
+  }
+
+  if (role === 'delivery') {
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+        dl.location_id,
+        ST_Y(l.coordinates) AS lat,
+        ST_X(l.coordinates) AS lng
+      FROM delivery_log AS dl
+      INNER JOIN location AS l ON l.id = dl.location_id
+      WHERE dl.user_id = ?
+        AND dl.operation_id = 3
+        AND dl.location_id IS NOT NULL
+      ORDER BY dl.creation_date DESC, dl.id DESC
+      LIMIT 1`,
+      [userId]
+    );
+
+    return rows[0] || null;
+  }
+
+  return null;
+}
+
 router.get('/user/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
@@ -4013,6 +4094,72 @@ router.get('/user/location', verifyToken, async (req, res) => {
     }
   } else {
     res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/user/map-center', verifyTokenStrict401, async (req, res) => {
+  let cabecera;
+
+  try {
+    cabecera = JSON.parse(req.data.data);
+  } catch (error) {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const [userQueryResult, historyRow] = await Promise.all([
+      mysqlConnection.promise().query(
+        `SELECT
+          TRIM(u.zipcode) AS zipcode,
+          u.location_id,
+          ST_Y(l.coordinates) AS lat,
+          ST_X(l.coordinates) AS lng
+        FROM user AS u
+        LEFT JOIN location AS l ON l.id = u.location_id
+        WHERE u.id = ?
+          AND u.enabled = 'Y'
+        LIMIT 1`,
+        [cabecera.id]
+      ),
+      getUserMapCenterHistoryRow(cabecera.id, cabecera.role)
+    ]);
+
+    const [userRows] = userQueryResult;
+    const userRow = userRows[0] || null;
+
+    if (!userRow) {
+      return res.status(200).json({
+        center: null,
+        source: 'none',
+        locationId: null,
+        zipcode: null
+      });
+    }
+
+    const zipcode = normalizeUserMapCenterZipcode(userRow ? userRow.zipcode : null);
+    const primaryRow = historyRow || userRow;
+    const primaryCandidate = buildUserMapCenterCandidate(primaryRow);
+
+    if (primaryCandidate) {
+      return res.status(200).json({
+        center: primaryCandidate.center,
+        source: 'last_location',
+        locationId: primaryCandidate.locationId,
+        zipcode
+      });
+    }
+
+    // Zipcode geocoding is intentionally disabled until the backend has a reliable free/internal resolver.
+    return res.status(200).json({
+      center: null,
+      source: 'none',
+      locationId: null,
+      zipcode
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error resolving user map center:', err);
+    return res.status(500).json('Internal server error');
   }
 });
 
@@ -22657,6 +22804,29 @@ function verifyToken(req, res, next) {
     res.status(401).json('Token vacio');
   }
 
+}
+
+function verifyTokenStrict401(req, res, next) {
+  const authorization = req.headers.authorization || '';
+
+  if (!authorization.startsWith('Bearer ')) {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const token = authorization.substring(7).trim();
+
+  if (!token) {
+    return res.status(401).json('Unauthorized');
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (error, authData) => {
+    if (error) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    req.data = authData;
+    next();
+  });
 }
 
 function verifyTokenOptional(req, res, next) {
