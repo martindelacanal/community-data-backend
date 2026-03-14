@@ -23818,8 +23818,8 @@ router.get('/trusted-resources/cities/paginated', verifyToken, async (req, res) 
     // Get paginated data
     const query = `
       SELECT id, name,
-             DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as createdAt,
-             DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as updatedAt
+             DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as createdAt,
+             DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updatedAt
       FROM resource_cities
       ${whereClause}
       ORDER BY ${safeOrderBy} ${safeOrderType}
