@@ -21319,6 +21319,8 @@ router.get('/article/public', async (req, res) => {
       queryParams.push(parseInt(categoryId));
     }
 
+
+
     const whereClause = whereConditions.join(' AND ');
 
     // Get total count of published articles with filters
@@ -23822,6 +23824,298 @@ function calculateCurrentStatus(schedules, language = 'en') {
 
 // ============ CATALOG ENDPOINTS ============
 
+// GET /trusted-resources/cities/exists - Check if city name already exists
+router.get('/trusted-resources/cities/exists', verifyToken, async (req, res) => {
+  try {
+    const { name, excludeId } = req.query;
+
+    if (!name) {
+      return res.status(400).json('Name is required');
+    }
+
+    let query = 'SELECT id FROM resource_cities WHERE name = ?';
+    let params = [name];
+
+    if (excludeId) {
+      query += ' AND id != ?';
+      params.push(excludeId);
+    }
+
+    const [rows] = await mysqlConnection.promise().query(query, params);
+
+    res.json(rows.length > 0);
+  } catch (error) {
+    console.error('Error checking city existence:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/cities/paginated - Get paginated cities
+router.get('/trusted-resources/cities/paginated', verifyToken, async (req, res) => {
+  try {
+    const {
+      page = 1,
+      pageSize = 10,
+      search = '',
+      orderBy = 'id',
+      orderType = 'desc'
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const pageSizeNum = parseInt(pageSize);
+    const offset = (pageNum - 1) * pageSizeNum;
+
+    // Validate orderBy to prevent SQL injection
+    const allowedOrderBy = ['id', 'name', 'created_at'];
+    const safeOrderBy = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
+
+    const safeOrderType = orderType.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    let whereClause = '';
+    let queryParams = [];
+
+    if (search && search.trim() !== '') {
+      whereClause = 'WHERE name LIKE ?';
+      queryParams.push(`%${search}%`);
+    }
+
+    // Get total count
+    const [countResult] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as total FROM resource_cities ${whereClause}`,
+      queryParams
+    );
+    const totalItems = countResult[0].total;
+    const numOfPages = Math.ceil(totalItems / pageSizeNum);
+
+    // Get paginated data
+    const query = `
+      SELECT id, name,
+             DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as createdAt,
+             DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as updatedAt
+      FROM resource_cities
+      ${whereClause}
+      ORDER BY ${safeOrderBy} ${safeOrderType}
+      LIMIT ? OFFSET ?
+    `;
+
+    const [cities] = await mysqlConnection.promise().query(query, [...queryParams, pageSizeNum, offset]);
+
+    res.json({
+      results: cities,
+      numOfPages,
+      totalItems,
+      page: pageNum,
+      orderBy: safeOrderBy,
+      orderType: orderType
+    });
+  } catch (error) {
+    console.error('Error fetching paginated cities:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/cities/:id - Get city detail with associated resources
+router.get('/trusted-resources/cities/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get city detail
+    const [cities] = await mysqlConnection.promise().query(
+      `SELECT id, name,
+              DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as createdAt,
+              DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as updatedAt
+       FROM resource_cities WHERE id = ?`,
+      [id]
+    );
+
+    if (cities.length === 0) {
+      return res.status(404).json('City not found');
+    }
+
+    const city = cities[0];
+
+    // Get associated resources
+    const [resources] = await mysqlConnection.promise().query(
+      `SELECT tr.id, tr.title_english as titleEnglish, tr.title_spanish as titleSpanish,
+              DATE_FORMAT(CONVERT_TZ(tr.created_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as createdAt
+       FROM trusted_resources tr
+       WHERE tr.city_id = ?`,
+      [id]
+    );
+
+    city.trustedResources = resources;
+
+    res.json(city);
+  } catch (error) {
+    console.error('Error fetching city details:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/cities - Get all cities
+router.get('/trusted-resources/cities', async (req, res) => {
+  try {
+    const { withResourcesOnly } = req.query;
+    const withResourcesOnlyBool = typeof withResourcesOnly === 'string'
+      ? withResourcesOnly.toLowerCase() === 'true'
+      : withResourcesOnly === true;
+
+    const [cities] = await mysqlConnection.promise().query(
+      `SELECT id, name
+       FROM resource_cities
+       ${withResourcesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM trusted_resources tr WHERE tr.city_id = resource_cities.id AND tr.is_active = 1)' : ''}
+       ORDER BY name ASC`
+    );
+
+    res.json(cities);
+  } catch (error) {
+    console.error('Error fetching cities:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+
+
+// POST /trusted-resources/cities - Create a new city
+router.post('/trusted-resources/cities', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { name } = req.body;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json('Name is required');
+    }
+
+    if (name.length > 255) {
+      return res.status(400).json('Name field must not exceed 255 characters');
+    }
+
+    // Check if name already exists
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_cities WHERE name = ?',
+      [name]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json('A city with this name already exists');
+    }
+
+    const [result] = await mysqlConnection.promise().query(
+      'INSERT INTO resource_cities (name) VALUES (?)',
+      [name]
+    );
+
+    // Fetch newly created city
+    const [newCity] = await mysqlConnection.promise().query(
+      `SELECT id, name,
+              DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as createdAt,
+              DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as updatedAt
+       FROM resource_cities WHERE id = ?`,
+      [result.insertId]
+    );
+
+    newCity[0].trustedResources = []; // Initially empty
+
+    res.status(201).json(newCity[0]);
+  } catch (error) {
+    console.error('Error creating city:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// PUT /trusted-resources/cities/:id - Update a city
+router.put('/trusted-resources/cities/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json('Name is required');
+    }
+
+    if (name.length > 255) {
+      return res.status(400).json('Name field must not exceed 255 characters');
+    }
+
+    // Check if name exists for a DIFFERENT city
+    const [existing] = await mysqlConnection.promise().query(
+      'SELECT id FROM resource_cities WHERE name = ? AND id != ?',
+      [name, id]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json('A city with this name already exists');
+    }
+
+    const [result] = await mysqlConnection.promise().query(
+      'UPDATE resource_cities SET name = ? WHERE id = ?',
+      [name, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json('City not found');
+    }
+
+    // Fetch updated city
+    const [updatedCity] = await mysqlConnection.promise().query(
+      `SELECT id, name,
+              DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as createdAt,
+              DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%dT%H:%i:%sZ") as updatedAt
+       FROM resource_cities WHERE id = ?`,
+      [id]
+    );
+
+    res.json(updatedCity[0]);
+  } catch (error) {
+    console.error('Error updating city:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// DELETE /trusted-resources/cities/:id - Delete a city
+router.delete('/trusted-resources/cities/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    // Optional: Could prevent deletion if resources use this city, but keeping it simple for now since foreign key constraint might handle it or we cascade/set null.
+    // The requirement mentions response is a simple success message.
+
+    const [result] = await mysqlConnection.promise().query(
+      'DELETE FROM resource_cities WHERE id = ?',
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json('City not found');
+    }
+
+    res.json({ success: true, message: 'City deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting city:', error);
+
+    // Check for foreign key constraint violation
+    if (error.code === 'ER_ROW_IS_REFERENCED_2') {
+      return res.status(400).json('Cannot delete city because it is referenced by existing resources');
+    }
+
+    res.status(500).json('Internal server error');
+  }
+});
+
 // GET /trusted-resources/filters - Get all filters
 router.get('/trusted-resources/filters', async (req, res) => {
   try {
@@ -24898,7 +25192,8 @@ router.get('/trusted-resources/public', async (req, res) => {
       page = 1,
       pageSize = 20,
       filterIds = '',
-      openNow
+      openNow,
+      cityId
     } = req.query;
 
     const lang = ['en', 'es'].includes(language) ? language : 'en';
@@ -24939,6 +25234,16 @@ router.get('/trusted-resources/public', async (req, res) => {
       }
     }
 
+
+    // Filter by cityId
+    if (cityId) {
+      const parsedCityId = parseInt(cityId);
+      if (!isNaN(parsedCityId)) {
+        whereConditions.push('tr.city_id = ?');
+        queryParams.push(parsedCityId);
+      }
+    }
+
     const whereClause = whereConditions.join(' AND ');
 
     // Get total count
@@ -24960,8 +25265,9 @@ router.get('/trusted-resources/public', async (req, res) => {
         ${lang === 'en' ? 'tr.description_english' : 'tr.description_spanish'} as description,
         ${lang === 'en' ? 'tr.information_english' : 'tr.information_spanish'} as information,
         tr.address,
-        ST_Y(tr.coordinates) as latitude,
-        ST_X(tr.coordinates) as longitude,
+        tr.city_id,
+          ST_Y(tr.coordinates) as latitude,
+          ST_X(tr.coordinates) as longitude,
         tr.phone_number,
         tr.email,
         tr.website,
@@ -25069,6 +25375,7 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
         ${lang === 'en' ? 'description_english' : 'description_spanish'} as description,
         ${lang === 'en' ? 'information_english' : 'information_spanish'} as information,
         address,
+        city_id,
         ST_Y(coordinates) as latitude,
         ST_X(coordinates) as longitude,
         phone_number,
@@ -25149,7 +25456,8 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
       pageSize = 20,
       search = '',
       filterIds = '',
-      isActive
+      isActive,
+      cityId
     } = req.query;
 
     const pageNum = parseInt(page);
@@ -25184,6 +25492,16 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
       }
     }
 
+
+    // Filter by cityId
+    if (cityId) {
+      const parsedCityId = parseInt(cityId);
+      if (!isNaN(parsedCityId)) {
+        whereConditions.push('tr.city_id = ?');
+        queryParams.push(parsedCityId);
+      }
+    }
+
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 
     // Get total count
@@ -25207,8 +25525,9 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         tr.information_english,
         tr.information_spanish,
         tr.address,
-        ST_Y(tr.coordinates) as latitude,
-        ST_X(tr.coordinates) as longitude,
+             tr.city_id,
+             ST_Y(tr.coordinates) as latitude,
+             ST_X(tr.coordinates) as longitude,
         tr.phone_number,
         tr.email,
         tr.website,
@@ -25329,6 +25648,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
         information_english,
         information_spanish,
         address,
+        city_id,
         ST_Y(coordinates) as latitude,
         ST_X(coordinates) as longitude,
         phone_number,
@@ -25425,6 +25745,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       phoneNumber,
       email,
       website,
+      cityId = null,
       isActive = true,
       filterIds = [],
       priceIds = [],
@@ -25455,11 +25776,11 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
     const [result] = await connection.query(
       `INSERT INTO trusted_resources 
        (title_english, title_spanish, description_english, description_spanish, 
-        information_english, information_spanish, address, coordinates, 
+       information_english, information_spanish, address, city_id, coordinates,
         phone_number, email, website, is_active) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, POINT(?, ?), ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, POINT(?, ?), ?, ?, ?, ?)`,
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
-        informationEnglish, informationSpanish, address,
+        informationEnglish, informationSpanish, address, cityId,
         longitude, latitude,
         normalizedPhone, normalizedEmail, normalizedWebsite, isActive ? 1 : 0]
     );
@@ -25516,8 +25837,10 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
     const [resources] = await mysqlConnection.promise().query(
       `SELECT 
         id, title_english, title_spanish, description_english, description_spanish,
-        information_english, information_spanish, address, 
-        ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude,
+        information_english, information_spanish, address,
+        city_id,
+        ST_Y(coordinates) as latitude,
+        ST_X(coordinates) as longitude,
         phone_number, email, website, image_url, is_active, is_open,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
@@ -25599,6 +25922,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       phoneNumber,
       email,
       website,
+      cityId = null,
       isActive = true,
       filterIds = [],
       priceIds = [],
@@ -25630,11 +25954,11 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       `UPDATE trusted_resources 
        SET title_english = ?, title_spanish = ?, description_english = ?, 
            description_spanish = ?, information_english = ?, information_spanish = ?,
-           address = ?, coordinates = POINT(?, ?), phone_number = ?, email = ?, 
+           address = ?, city_id = ?, coordinates = POINT(?, ?), phone_number = ?, email = ?,
            website = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [titleEnglish, titleSpanish, descriptionEnglish, descriptionSpanish,
-        informationEnglish, informationSpanish, address,
+        informationEnglish, informationSpanish, address, cityId,
         longitude, latitude,
         normalizedPhone, normalizedEmail, normalizedWebsite, isActive ? 1 : 0, id]
     );
@@ -25700,8 +26024,10 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
     const [resources] = await mysqlConnection.promise().query(
       `SELECT 
         id, title_english, title_spanish, description_english, description_spanish,
-        information_english, information_spanish, address, 
-        ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude,
+        information_english, information_spanish, address,
+        city_id,
+        ST_Y(coordinates) as latitude,
+        ST_X(coordinates) as longitude,
         phone_number, email, website, image_url, is_active, is_open,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
