@@ -11,6 +11,13 @@ const { sendTicketEmail } = require('../email/email');
 const { sendVolunteerConfirmation } = require('../email/email');
 const multer = require('multer');
 const sharp = require('sharp');
+const {
+  buildHealthMetricsCsv,
+  getHealthMetricAnswerCountMap: getHealthMetricAnswerCountMapService,
+  getHealthMetricQuestionCatalog: getHealthMetricQuestionCatalogService,
+  getHealthMetricUserIds: getHealthMetricUserIdsService,
+  normalizeHealthMetricFilters: normalizeHealthMetricFiltersService
+} = require('../services/healthMetrics');
 const storage = multer.memoryStorage();
 
 // Client logo upload (single image)
@@ -9856,94 +9863,15 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
 
   try {
     const language = req.query.language || 'en';
-    const filters = normalizeHealthMetricFilters(req.body || {});
-
-    // Filtros de respuestas (opcional): { [question_id]: number[] }
-    const [questionCatalog, metricUsers] = await Promise.all([
-      getHealthMetricQuestionCatalog(cabecera, language),
-      getHealthMetricUsers(cabecera, filters)
-    ]);
-    const { questions, questionIds } = questionCatalog;
-    if (metricUsers.length === 0) {
-      const emptyCsvStringifier = createObjectCsvStringifier({
-        header: baseHeaders().concat(questions.map(question => ({
-          id: String(question.id),
-          title: question.question
-        }))),
-        fieldDelimiter: ';'
-      });
-      res.setHeader('Content-Disposition', 'attachment; filename=health-metrics.csv');
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      return res.send(emptyCsvStringifier.getHeaderString());
-    }
-
-    const metricUserIds = metricUsers.map(user => user.user_id);
-    const [deliverySummaryByUserId, answerValueByUserQuestion] = await Promise.all([
-      getHealthMetricDeliverySummaryByUserIds(metricUserIds, filters),
-      getHealthMetricAnswerValueMap(metricUserIds, questionIds, language)
-    ]);
-
-    const csvHeaders = baseHeaders().concat(
-      questions.map(question => ({ id: String(question.id), title: question.question }))
-    );
-
-    const healthRowsForCsv = metricUsers.map(user => {
-      const deliverySummary = deliverySummaryByUserId.get(user.user_id) || {
-        locations_visited: '',
-        delivery_count: 0,
-        delivery_count_scanned: 0,
-        delivery_count_not_scanned: 0,
-        delivery_count_between_dates: 0,
-        delivery_count_between_dates_scanned: 0,
-        delivery_count_between_dates_not_scanned: 0
-      };
-
-      const row = {
-        user_id: user.user_id,
-        username: user.username,
-        email: user.email,
-        firstname: user.firstname,
-        lastname: user.lastname,
-        language: user.language,
-        date_of_birth: user.date_of_birth,
-        age: user.age,
-        phone: user.phone,
-        zipcode: user.zipcode,
-        household_size: user.household_size,
-        gender: user.gender,
-        ethnicity: user.ethnicity,
-        other_ethnicity: user.other_ethnicity,
-        first_location_visited: user.first_location_visited,
-        last_location_visited: user.last_location_visited,
-        locations_visited: deliverySummary.locations_visited,
-        delivery_count: deliverySummary.delivery_count,
-        delivery_count_scanned: deliverySummary.delivery_count_scanned,
-        delivery_count_not_scanned: deliverySummary.delivery_count_not_scanned,
-        delivery_count_between_dates: deliverySummary.delivery_count_between_dates,
-        delivery_count_between_dates_scanned: deliverySummary.delivery_count_between_dates_scanned,
-        delivery_count_between_dates_not_scanned: deliverySummary.delivery_count_between_dates_not_scanned,
-        registration_date: user.registration_date,
-        registration_time: user.registration_time
-      };
-
-      for (let i = 0; i < questions.length; i++) {
-        const question = questions[i];
-        row[String(question.id)] = answerValueByUserQuestion.get(`${user.user_id}:${question.id}`) || '';
-      }
-
-      return row;
+    const { csvData: healthMetricsCsvData } = await buildHealthMetricsCsv({
+      cabecera,
+      filters: req.body || {},
+      language
     });
-
-    const healthCsvStringifier = createObjectCsvStringifier({
-      header: csvHeaders,
-      fieldDelimiter: ';'
-    });
-    let healthCsvData = healthCsvStringifier.getHeaderString();
-    healthCsvData += healthCsvStringifier.stringifyRecords(healthRowsForCsv);
 
     res.setHeader('Content-Disposition', 'attachment; filename=health-metrics.csv');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    return res.send(healthCsvData);
+    return res.send(healthMetricsCsvData);
 
     // Ventana de fechas (interpretar como días en America/Los_Angeles)
     // El front manda YYYY-MM-DD; NO lo convertimos en JS.
@@ -12109,13 +12037,13 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
     }
 
     try {
-      const healthMetricFilters = normalizeHealthMetricFilters(req.body || {});
+      const healthMetricFilters = normalizeHealthMetricFiltersService(req.body || {});
       const healthMetricLanguage = req.query.language || 'en';
       const [healthQuestionCatalog, healthMetricUserIds] = await Promise.all([
-        getHealthMetricQuestionCatalog(cabecera, healthMetricLanguage),
-        getHealthMetricUserIds(cabecera, healthMetricFilters)
+        getHealthMetricQuestionCatalogService(cabecera, healthMetricLanguage),
+        getHealthMetricUserIdsService(cabecera, healthMetricFilters)
       ]);
-      const healthAnswerCountByKey = await getHealthMetricAnswerCountMap(
+      const healthAnswerCountByKey = await getHealthMetricAnswerCountMapService(
         healthMetricUserIds,
         healthQuestionCatalog.questionIds
       );

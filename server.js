@@ -11,11 +11,17 @@ const { RecurrenceRule } = require('node-schedule');
 const logger = require('./api/utils/logger.js');
 const email = require('./api/email/email.js');
 const moment = require('moment-timezone');
+const {
+    isHealthMetricsDriveSyncEnabled,
+    syncScheduledDriveCsvsToDrive
+} = require('./api/services/healthMetricsDriveSync');
 
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const { parse } = require('csv-parse/sync');
 
 const XLSX = require('xlsx-js-style');
+
+let isHealthMetricsDriveSyncRunning = false;
 
 schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
     // Modificar todos los delivery_log con operation_id = 3 y offboarding_date = null que hayan sido creados hace más de 5 horas y agregarle la fecha actual
@@ -1080,6 +1086,35 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
                 logger.warn(`No raw data found for admin client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly Admin). Skipping email.`);
             }
         }
+    }
+});
+
+const healthMetricsDriveSyncRule = new RecurrenceRule();
+healthMetricsDriveSyncRule.hour = [12, 18];
+healthMetricsDriveSyncRule.minute = 0;
+healthMetricsDriveSyncRule.tz = 'America/Los_Angeles';
+
+schedule.scheduleJob(healthMetricsDriveSyncRule, async () => {
+    if (!isHealthMetricsDriveSyncEnabled()) {
+        logger.info('Scheduled Drive CSV sync is disabled. Skipping scheduled execution.');
+        return;
+    }
+
+    if (isHealthMetricsDriveSyncRunning) {
+        logger.warn('Scheduled Drive CSV sync is already running. Skipping overlapping execution.');
+        return;
+    }
+
+    isHealthMetricsDriveSyncRunning = true;
+    try {
+        const result = await syncScheduledDriveCsvsToDrive();
+        if (!result.skipped) {
+            logger.info(`Scheduled Drive CSV sync finished. synced=${result.results.length}, errors=${result.errors.length}`);
+        }
+    } catch (error) {
+        logger.error(`Scheduled Drive CSV sync failed: ${error.message}`);
+    } finally {
+        isHealthMetricsDriveSyncRunning = false;
     }
 });
 
