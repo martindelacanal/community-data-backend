@@ -23734,6 +23734,44 @@ async function getSchedulesForResources(resourceIds) {
   return schedulesMap;
 }
 
+const TRUSTED_RESOURCE_COORDINATES_REGEX = /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/;
+const UNICODE_MINUS_REGEX = /[\u2212\u2013\u2014\uFE63\uFF0D]/g;
+
+function parseTrustedResourceCoordinates(coordinates) {
+  if (typeof coordinates !== 'string') {
+    return null;
+  }
+
+  const normalizedCoordinates = coordinates
+    .trim()
+    .replace(UNICODE_MINUS_REGEX, '-');
+
+  if (!TRUSTED_RESOURCE_COORDINATES_REGEX.test(normalizedCoordinates)) {
+    return null;
+  }
+
+  const [latitudeString, longitudeString] = normalizedCoordinates.split(',').map(value => value.trim());
+  const latitude = Number(latitudeString);
+  const longitude = Number(longitudeString);
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude
+  };
+}
+
+function formatTrustedResourceCoordinates(latitude, longitude) {
+  if (latitude === null || latitude === undefined || longitude === null || longitude === undefined) {
+    return null;
+  }
+
+  return `${latitude},${longitude}`;
+}
+
 // Helper function to calculate current status and today's hours
 function calculateCurrentStatus(schedules, language = 'en') {
   // Get current time in Los Angeles timezone
@@ -24987,9 +25025,7 @@ router.get('/trusted-resources/public', async (req, res) => {
         description: resource.description,
         information: resource.information,
         address: resource.address,
-        coordinates: resource.latitude && resource.longitude
-          ? `${resource.latitude},${resource.longitude}`
-          : null,
+        coordinates: formatTrustedResourceCoordinates(resource.latitude, resource.longitude),
         phoneNumber: resource.phone_number || null,
         email: resource.email || null,
         website: resource.website || null,
@@ -25075,9 +25111,7 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       description: resource.description,
       information: resource.information,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude
-        ? `${resource.latitude},${resource.longitude}`
-        : null,
+      coordinates: formatTrustedResourceCoordinates(resource.latitude, resource.longitude),
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
@@ -25243,9 +25277,7 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         informationEnglish: resource.information_english,
         informationSpanish: resource.information_spanish,
         address: resource.address,
-        coordinates: resource.latitude && resource.longitude
-          ? `${resource.latitude},${resource.longitude}`
-          : null,
+        coordinates: formatTrustedResourceCoordinates(resource.latitude, resource.longitude),
         phoneNumber: resource.phone_number || null,
         email: resource.email || null,
         website: resource.website || null,
@@ -25345,9 +25377,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude
-        ? `${resource.latitude},${resource.longitude}`
-        : null,
+      coordinates: formatTrustedResourceCoordinates(resource.latitude, resource.longitude),
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
@@ -25413,13 +25443,11 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
     const normalizedEmail = email && email.trim() !== '' ? email.trim() : null;
     const normalizedWebsite = website && website.trim() !== '' ? website.trim() : null;
 
-    // Parse coordinates from string format "lat,lng"
-    const coordParts = coordinates.split(',').map(c => c.trim());
-    if (coordParts.length !== 2 || isNaN(coordParts[0]) || isNaN(coordParts[1])) {
+    const parsedCoordinates = parseTrustedResourceCoordinates(coordinates);
+    if (!parsedCoordinates) {
       return res.status(400).json('Invalid coordinates format. Expected "latitude,longitude"');
     }
-    const latitude = parseFloat(coordParts[0]);
-    const longitude = parseFloat(coordParts[1]);
+    const { latitude, longitude } = parsedCoordinates;
 
     await connection.beginTransaction();
 
@@ -25521,9 +25549,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude
-        ? `${resource.latitude},${resource.longitude}`
-        : null,
+      coordinates: formatTrustedResourceCoordinates(resource.latitude, resource.longitude),
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
@@ -25591,13 +25617,11 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
     const normalizedEmail = email && email.trim() !== '' ? email.trim() : null;
     const normalizedWebsite = website && website.trim() !== '' ? website.trim() : null;
 
-    // Parse coordinates from string format "lat,lng"
-    const coordParts = coordinates.split(',').map(c => c.trim());
-    if (coordParts.length !== 2 || isNaN(coordParts[0]) || isNaN(coordParts[1])) {
+    const parsedCoordinates = parseTrustedResourceCoordinates(coordinates);
+    if (!parsedCoordinates) {
       return res.status(400).json('Invalid coordinates format. Expected "latitude,longitude"');
     }
-    const latitude = parseFloat(coordParts[0]);
-    const longitude = parseFloat(coordParts[1]);
+    const { latitude, longitude } = parsedCoordinates;
 
     await connection.beginTransaction();
 
@@ -25712,9 +25736,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       informationEnglish: resource.information_english,
       informationSpanish: resource.information_spanish,
       address: resource.address,
-      coordinates: resource.latitude && resource.longitude
-        ? `${resource.latitude},${resource.longitude}`
-        : null,
+      coordinates: formatTrustedResourceCoordinates(resource.latitude, resource.longitude),
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
