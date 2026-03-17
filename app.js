@@ -22,4 +22,7 @@ app.use('/api',userRoute);
 const alertsRoute = require('./api/routes/alerts');
 app.use('/api',alertsRoute);
 
+const pushNotificationsRoute = require('./api/routes/pushNotifications');
+app.use('/api', pushNotificationsRoute);
+
 module.exports = app;
