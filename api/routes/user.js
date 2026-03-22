@@ -85,6 +85,117 @@ const jwtSignAsync = (data, secret, options) => {
   });
 };
 
+const MOBILE_APP_VERSION_REGEX = /^\d+(\.\d+){1,2}$/;
+const MOBILE_APP_PLATFORMS = new Set(['android', 'ios']);
+
+function normalizeMobileAppVersion(version) {
+  const rawVersion = String(version || '').trim();
+
+  if (!MOBILE_APP_VERSION_REGEX.test(rawVersion)) {
+    return null;
+  }
+
+  const parts = rawVersion.split('.').map((part) => Number.parseInt(part, 10));
+
+  while (parts.length < 3) {
+    parts.push(0);
+  }
+
+  return parts.slice(0, 3).join('.');
+}
+
+async function getCurrentMobileAppVersions() {
+  const [rows] = await mysqlConnection.promise().query(`
+    SELECT
+      platform,
+      version,
+      store_url,
+      DATE_FORMAT(CONVERT_TZ(released_at, "+00:00", "America/Los_Angeles"), "%Y-%m-%d %T") AS released_at
+    FROM mobile_app_versions
+    WHERE enabled = 'Y'
+    ORDER BY platform ASC, released_at DESC, id DESC
+  `);
+
+  const catalog = {
+    android: null,
+    ios: null
+  };
+
+  rows.forEach((row) => {
+    if (MOBILE_APP_PLATFORMS.has(row.platform) && !catalog[row.platform]) {
+      catalog[row.platform] = row;
+    }
+  });
+
+  return catalog;
+}
+
+router.get('/mobile-app/versions', async (req, res) => {
+  try {
+    const catalog = await getCurrentMobileAppVersions();
+    res.status(200).json(catalog);
+  } catch (error) {
+    console.error('Error fetching mobile app versions:', error);
+    logger.error('Error fetching mobile app versions:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/mobile-app/version', verifyTokenStrict401, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+    const platform = String(req.body.platform || '').trim().toLowerCase();
+    const normalizedVersion = normalizeMobileAppVersion(req.body.version);
+
+    if (!MOBILE_APP_PLATFORMS.has(platform)) {
+      return res.status(400).json({ error: 'Invalid platform' });
+    }
+
+    if (!normalizedVersion) {
+      return res.status(400).json({ error: 'Invalid version format' });
+    }
+
+    const versionColumn = platform === 'android' ? 'android_version' : 'ios_version';
+    const updatedAtColumn = platform === 'android'
+      ? 'android_version_updated_at'
+      : 'ios_version_updated_at';
+
+    const [users] = await mysqlConnection.promise().query(
+      `SELECT id, ${versionColumn} AS current_version FROM user WHERE id = ? LIMIT 1`,
+      [cabecera.id]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (users[0].current_version === normalizedVersion) {
+      return res.status(200).json({
+        updated: false,
+        platform,
+        version: normalizedVersion
+      });
+    }
+
+    await mysqlConnection.promise().query(
+      `UPDATE user
+       SET ${versionColumn} = ?, ${updatedAtColumn} = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [normalizedVersion, cabecera.id]
+    );
+
+    return res.status(200).json({
+      updated: true,
+      platform,
+      version: normalizedVersion
+    });
+  } catch (error) {
+    console.error('Error syncing user mobile app version:', error);
+    logger.error('Error syncing user mobile app version:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 router.post('/signin', (req, res) => {
 
