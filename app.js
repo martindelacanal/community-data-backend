@@ -5,7 +5,8 @@ const cors = require('cors');
 
 const trustProxySetting = process.env.EXPRESS_TRUST_PROXY || 'loopback, linklocal, uniquelocal';
 
-app.set('trust proxy', trustProxySetting);
+// app.set('trust proxy', trustProxySetting);
+app.set('trust proxy', 1);
 app.use(bodyParser.urlencoded({extended: false}));
 app.use(bodyParser.json());
 
