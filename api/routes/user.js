@@ -21396,7 +21396,11 @@ router.get('/article/public', async (req, res) => {
       LEFT JOIN filter f ON af.filter_id = f.id
       ${joinClauses}
       WHERE ${whereClause}
-      ORDER BY a.priority ASC, a.publication_date DESC, a.creation_date DESC
+      ORDER BY
+        CASE WHEN a.priority IS NULL THEN 1 ELSE 0 END ASC,
+        a.priority ASC,
+        a.publication_date DESC,
+        a.creation_date DESC
       LIMIT ? OFFSET ?
     `;
 
