@@ -3,6 +3,9 @@ const app = express();
 const bodyParser = require('body-parser');
 const cors = require('cors');
 
+const trustProxySetting = process.env.EXPRESS_TRUST_PROXY || 'loopback, linklocal, uniquelocal';
+
+app.set('trust proxy', trustProxySetting);
 app.use(bodyParser.urlencoded({extended: false}));
 app.use(bodyParser.json());
 

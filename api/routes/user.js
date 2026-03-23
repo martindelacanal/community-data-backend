@@ -9266,7 +9266,7 @@ router.post('/contact', async (req, res) => {
     }
 
     // Get IP address
-    const ip_address = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip;
+    const ip_address = getInteractionClientIp(req);
 
     // Save to database
     const [result] = await mysqlConnection.promise().query(
@@ -23100,16 +23100,164 @@ function normalizeInteractionRouteGroup(pageType, routeGroup, routePath) {
     || routePath;
 }
 
-function getInteractionClientIp(req) {
-  const forwardedFor = req.headers['x-forwarded-for'];
+function normalizeInteractionIpCandidate(value) {
+  let normalizedValue = String(value || '').trim();
 
-  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
-    return forwardedFor.split(',')[0].trim().substring(0, 45);
+  if (!normalizedValue) {
+    return null;
   }
 
-  return String(req.ip || req.socket?.remoteAddress || '')
-    .replace('::ffff:', '')
-    .substring(0, 45) || null;
+  if (normalizedValue.startsWith('"') && normalizedValue.endsWith('"')) {
+    normalizedValue = normalizedValue.slice(1, -1).trim();
+  }
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  if (normalizedValue.startsWith('for=')) {
+    normalizedValue = normalizedValue.slice(4).trim();
+  }
+
+  if (normalizedValue.toLowerCase() === 'unknown') {
+    return null;
+  }
+
+  if (normalizedValue === 'localhost' || normalizedValue === '::1') {
+    return '127.0.0.1';
+  }
+
+  const bracketedIpv6Match = normalizedValue.match(/^\[([0-9a-fA-F:.]+)\](?::\d+)?$/);
+  if (bracketedIpv6Match) {
+    normalizedValue = bracketedIpv6Match[1];
+  }
+
+  if (normalizedValue.startsWith('::ffff:')) {
+    normalizedValue = normalizedValue.substring(7);
+  }
+
+  const ipv4WithPortMatch = normalizedValue.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
+  if (ipv4WithPortMatch) {
+    normalizedValue = ipv4WithPortMatch[1];
+  }
+
+  return normalizedValue.substring(0, 45) || null;
+}
+
+function extractInteractionHeaderIpCandidates(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => extractInteractionHeaderIpCandidates(entry));
+  }
+
+  if (typeof value !== 'string') {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((entry) => normalizeInteractionIpCandidate(entry))
+    .filter(Boolean);
+}
+
+function extractInteractionForwardedCandidates(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => extractInteractionForwardedCandidates(entry));
+  }
+
+  if (typeof value !== 'string' || !value.trim()) {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .map((entry) => {
+      const forSegment = entry
+        .split(';')
+        .map((segment) => segment.trim())
+        .find((segment) => segment.toLowerCase().startsWith('for='));
+
+      return normalizeInteractionIpCandidate(forSegment || '');
+    })
+    .filter(Boolean);
+}
+
+function isInteractionPrivateIpv4(ipAddress) {
+  const octets = String(ipAddress || '')
+    .split('.')
+    .map((part) => Number.parseInt(part, 10));
+
+  if (octets.length !== 4 || octets.some((octet) => Number.isNaN(octet) || octet < 0 || octet > 255)) {
+    return false;
+  }
+
+  if (octets[0] === 10 || octets[0] === 127) {
+    return true;
+  }
+
+  if (octets[0] === 169 && octets[1] === 254) {
+    return true;
+  }
+
+  if (octets[0] === 192 && octets[1] === 168) {
+    return true;
+  }
+
+  return octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31;
+}
+
+function isInteractionPrivateIpv6(ipAddress) {
+  const normalizedValue = String(ipAddress || '').toLowerCase();
+
+  return normalizedValue === '::1'
+    || normalizedValue.startsWith('fe80:')
+    || normalizedValue.startsWith('fc')
+    || normalizedValue.startsWith('fd');
+}
+
+function isInteractionPrivateOrLocalIp(ipAddress) {
+  if (!ipAddress) {
+    return true;
+  }
+
+  if (ipAddress === 'localhost') {
+    return true;
+  }
+
+  return ipAddress.includes(':')
+    ? isInteractionPrivateIpv6(ipAddress)
+    : isInteractionPrivateIpv4(ipAddress);
+}
+
+function getInteractionClientIp(req) {
+  const socketRemoteAddress = normalizeInteractionIpCandidate(
+    req.socket?.remoteAddress || req.connection?.remoteAddress
+  );
+  const shouldTrustForwardedHeaders = isInteractionPrivateOrLocalIp(socketRemoteAddress);
+  const orderedCandidates = [
+    ...(Array.isArray(req.ips) ? req.ips.map((candidate) => normalizeInteractionIpCandidate(candidate)) : []),
+    normalizeInteractionIpCandidate(req.ip),
+    ...(shouldTrustForwardedHeaders
+      ? [
+          ...extractInteractionHeaderIpCandidates(req.headers['x-forwarded-for']),
+          ...extractInteractionHeaderIpCandidates(req.headers['x-real-ip']),
+          ...extractInteractionHeaderIpCandidates(req.headers['cf-connecting-ip']),
+          ...extractInteractionHeaderIpCandidates(req.headers['true-client-ip']),
+          ...extractInteractionForwardedCandidates(req.headers.forwarded)
+        ]
+      : []),
+    socketRemoteAddress,
+    normalizeInteractionIpCandidate(req.connection?.remoteAddress)
+  ].filter(Boolean);
+
+  if (!orderedCandidates.length) {
+    return null;
+  }
+
+  const uniqueCandidates = Array.from(new Set(orderedCandidates));
+  const firstPublicCandidate = uniqueCandidates.find((candidate) => !isInteractionPrivateOrLocalIp(candidate));
+
+  return firstPublicCandidate || uniqueCandidates[0];
 }
 
 function ensureAdminMetricsAccess(cabecera) {
