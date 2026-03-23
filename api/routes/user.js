@@ -18,6 +18,15 @@ const {
   getHealthMetricUserIds: getHealthMetricUserIdsService,
   normalizeHealthMetricFilters: normalizeHealthMetricFiltersService
 } = require('../services/healthMetrics');
+const {
+  fetchInteractionSummary,
+  fetchInteractionRoutes,
+  fetchInteractionContent,
+  fetchInteractionUsers,
+  fetchInteractionActions,
+  fetchInteractionAudience
+} = require('../services/interactionMetrics');
+const { resolveInteractionGeoFromIp } = require('../services/interactionGeo');
 const storage = multer.memoryStorage();
 
 // Client logo upload (single image)
@@ -21414,6 +21423,7 @@ router.get('/article/public', async (req, res) => {
 
     // Format response
     const formattedArticles = articles.map(article => ({
+      id: article.id,
       imageUrl: article.image_s3_key ? urlMap.get(article.image_s3_key) || '' : '',
       filterName: article.filterName || '',
       title: article.title || '',
@@ -22826,6 +22836,667 @@ router.put('/user-configuration', verifyToken, async (req, res) => {
   }
 });
 
+const INTERACTION_PAGE_TYPE_ROUTE_GROUPS = {
+  articles_list: '/articles',
+  article_detail: '/article/:slug',
+  trusted_resources_list: '/trusted-resources',
+  trusted_resource_detail: '/trusted-resource/:id',
+  calendar_month: '/calendar',
+  calendar_event_detail: '/event/:id'
+};
+
+const VALID_INTERACTION_PAGE_TYPES = new Set(Object.keys(INTERACTION_PAGE_TYPE_ROUTE_GROUPS));
+const VALID_INTERACTION_ENTITY_TYPES = new Set(['article', 'trusted_resource', 'calendar_event']);
+const VALID_INTERACTION_ACCESS_CHANNELS = new Set([
+  'web_desktop',
+  'web_mobile',
+  'capacitor_android',
+  'capacitor_ios'
+]);
+const VALID_INTERACTION_DEVICE_CATEGORIES = new Set(['desktop', 'mobile', 'tablet']);
+const INTERACTION_OPERATING_SYSTEM_ALIASES = {
+  android: 'android',
+  ios: 'ios',
+  iphone: 'ios',
+  ipad: 'ios',
+  windows: 'windows',
+  macos: 'macos',
+  'mac os': 'macos',
+  osx: 'macos',
+  linux: 'linux',
+  chromeos: 'chromeos',
+  'chrome os': 'chromeos',
+  unknown: 'unknown'
+};
+
+function verifyTokenLenientOptional(req, res, next) {
+  const authorization = req.headers.authorization || '';
+
+  if (!authorization.startsWith('Bearer ')) {
+    return next();
+  }
+
+  const token = authorization.substring(7).trim();
+
+  if (!token || token === 'null' || token === 'undefined') {
+    return next();
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (error, authData) => {
+    if (!error) {
+      req.data = authData;
+    }
+
+    next();
+  });
+}
+
+function getOptionalRequestUser(req) {
+  if (!req?.data?.data) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(req.data.data);
+  } catch (error) {
+    return null;
+  }
+}
+
+function normalizeInteractionLanguage(value) {
+  return String(value || '').trim().toLowerCase() === 'es' ? 'es' : 'en';
+}
+
+function normalizeInteractionRoutePath(value) {
+  const routePath = String(value || '').trim();
+
+  if (!routePath || !routePath.startsWith('/')) {
+    return null;
+  }
+
+  return routePath.substring(0, 255);
+}
+
+function normalizeInteractionPageType(value) {
+  const pageType = String(value || '').trim();
+  return VALID_INTERACTION_PAGE_TYPES.has(pageType) ? pageType : null;
+}
+
+function normalizeInteractionEntityType(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const entityType = String(value).trim();
+  return VALID_INTERACTION_ENTITY_TYPES.has(entityType) ? entityType : null;
+}
+
+function normalizeInteractionEntityId(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const parsedValue = Number.parseInt(value, 10);
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
+}
+
+function normalizeInteractionInteger(value, { min = 0, max = 100000000 } = {}) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const parsedValue = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsedValue) || parsedValue < min || parsedValue > max) {
+    return null;
+  }
+
+  return parsedValue;
+}
+
+function normalizeInteractionText(value, maxLength = 255) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const normalizedValue = String(value).trim();
+  if (!normalizedValue) {
+    return null;
+  }
+
+  return normalizedValue.substring(0, maxLength);
+}
+
+function normalizeInteractionOperatingSystem(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const normalizedValue = String(value).trim().toLowerCase();
+  return INTERACTION_OPERATING_SYSTEM_ALIASES[normalizedValue] || null;
+}
+
+function normalizeInteractionAccessChannel(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const normalizedValue = String(value).trim().toLowerCase();
+  return VALID_INTERACTION_ACCESS_CHANNELS.has(normalizedValue) ? normalizedValue : null;
+}
+
+function normalizeInteractionDeviceCategory(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const normalizedValue = String(value).trim().toLowerCase();
+  return VALID_INTERACTION_DEVICE_CATEGORIES.has(normalizedValue) ? normalizedValue : null;
+}
+
+function detectInteractionOperatingSystem(userAgent) {
+  const normalizedUserAgent = String(userAgent || '').toLowerCase();
+
+  if (!normalizedUserAgent) {
+    return 'unknown';
+  }
+
+  if (normalizedUserAgent.includes('android')) {
+    return 'android';
+  }
+
+  if (normalizedUserAgent.includes('iphone')
+    || normalizedUserAgent.includes('ipad')
+    || normalizedUserAgent.includes('ipod')) {
+    return 'ios';
+  }
+
+  if (normalizedUserAgent.includes('windows')) {
+    return 'windows';
+  }
+
+  if (normalizedUserAgent.includes('cros')) {
+    return 'chromeos';
+  }
+
+  if (normalizedUserAgent.includes('mac os') || normalizedUserAgent.includes('macintosh')) {
+    return 'macos';
+  }
+
+  if (normalizedUserAgent.includes('linux')) {
+    return 'linux';
+  }
+
+  return 'unknown';
+}
+
+function detectInteractionDeviceCategory(userAgent, screenWidth) {
+  const normalizedUserAgent = String(userAgent || '').toLowerCase();
+  const width = normalizeInteractionInteger(screenWidth, { min: 0, max: 20000 });
+
+  if (normalizedUserAgent.includes('ipad') || normalizedUserAgent.includes('tablet')) {
+    return 'tablet';
+  }
+
+  if (normalizedUserAgent.includes('mobile')
+    || normalizedUserAgent.includes('iphone')
+    || normalizedUserAgent.includes('ipod')
+    || normalizedUserAgent.includes('android')) {
+    return 'mobile';
+  }
+
+  if (width !== null && width <= 768) {
+    return 'mobile';
+  }
+
+  if (width !== null && width <= 1024) {
+    return 'tablet';
+  }
+
+  return 'desktop';
+}
+
+function inferInteractionAccessChannel(accessChannel, operatingSystem, deviceCategory) {
+  const normalizedAccessChannel = normalizeInteractionAccessChannel(accessChannel);
+
+  if (normalizedAccessChannel) {
+    return normalizedAccessChannel;
+  }
+
+  if (operatingSystem === 'android') {
+    return deviceCategory === 'desktop' ? 'web_desktop' : 'web_mobile';
+  }
+
+  if (operatingSystem === 'ios') {
+    return deviceCategory === 'desktop' ? 'web_desktop' : 'web_mobile';
+  }
+
+  return deviceCategory === 'desktop' ? 'web_desktop' : 'web_mobile';
+}
+
+function normalizeInteractionMetadata(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  if (typeof value === 'object') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsedValue = JSON.parse(value);
+      return typeof parsedValue === 'object' && parsedValue !== null ? parsedValue : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function normalizeInteractionRouteGroup(pageType, routeGroup, routePath) {
+  return normalizeInteractionText(routeGroup, 255)
+    || INTERACTION_PAGE_TYPE_ROUTE_GROUPS[pageType]
+    || routePath;
+}
+
+function getInteractionClientIp(req) {
+  const forwardedFor = req.headers['x-forwarded-for'];
+
+  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
+    return forwardedFor.split(',')[0].trim().substring(0, 45);
+  }
+
+  return String(req.ip || req.socket?.remoteAddress || '')
+    .replace('::ffff:', '')
+    .substring(0, 45) || null;
+}
+
+function ensureAdminMetricsAccess(cabecera) {
+  return cabecera && cabecera.role === 'admin';
+}
+
+router.post('/interaction/session/start', verifyTokenLenientOptional, async (req, res) => {
+  try {
+    const currentUser = getOptionalRequestUser(req);
+    const visitorId = normalizeInteractionText(req.body.visitorId, 64);
+    const pageType = normalizeInteractionPageType(req.body.pageType);
+    const routePath = normalizeInteractionRoutePath(req.body.routePath);
+
+    if (!visitorId || !pageType || !routePath) {
+      return res.status(400).json({ error: 'Invalid interaction payload' });
+    }
+
+    const routeGroup = normalizeInteractionRouteGroup(pageType, req.body.routeGroup, routePath);
+    const sessionPublicId = normalizeInteractionText(req.body.sessionPublicId, 64) || crypto.randomUUID();
+    const entityType = normalizeInteractionEntityType(req.body.entityType);
+    const entityId = normalizeInteractionEntityId(req.body.entityId);
+    const metadata = normalizeInteractionMetadata(req.body.metadata);
+    const language = normalizeInteractionLanguage(req.body.language || req.query.language);
+    const timezoneOffsetMinutes = normalizeInteractionInteger(req.body.timezoneOffsetMinutes, { min: -900, max: 900 });
+    const screenWidth = normalizeInteractionInteger(req.body.screenWidth, { min: 0, max: 20000 });
+    const screenHeight = normalizeInteractionInteger(req.body.screenHeight, { min: 0, max: 20000 });
+    const userAgent = normalizeInteractionText(req.headers['user-agent'], 1000);
+    const clientIp = getInteractionClientIp(req);
+    const geoData = await resolveInteractionGeoFromIp(mysqlConnection.promise(), clientIp);
+    const operatingSystem = normalizeInteractionOperatingSystem(req.body.operatingSystem)
+      || detectInteractionOperatingSystem(userAgent);
+    const deviceCategory = normalizeInteractionDeviceCategory(req.body.deviceCategory)
+      || detectInteractionDeviceCategory(userAgent, screenWidth);
+    const accessChannel = inferInteractionAccessChannel(
+      req.body.accessChannel,
+      operatingSystem,
+      deviceCategory
+    );
+
+    await mysqlConnection.promise().query(
+      `
+        INSERT INTO interaction_sessions (
+          public_id,
+          visitor_id,
+          user_id,
+          is_authenticated,
+          ip_address,
+          user_agent,
+          referer,
+          language,
+          route_path,
+          route_url,
+          route_group,
+          page_type,
+          page_title,
+          entity_type,
+          entity_id,
+          operating_system,
+          access_channel,
+          device_category,
+          screen_width,
+          screen_height,
+          timezone_offset_minutes,
+          ip_country_code,
+          ip_country_name,
+          ip_region_name,
+          ip_city_name,
+          ip_latitude,
+          ip_longitude,
+          ip_geo_status,
+          ip_geo_source,
+          metadata_json
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+      `,
+      [
+        sessionPublicId,
+        visitorId,
+        currentUser?.id || null,
+        currentUser?.id ? 1 : 0,
+        clientIp,
+        userAgent,
+        normalizeInteractionText(req.headers.referer || req.body.referer, 1000),
+        language,
+        routePath,
+        normalizeInteractionText(req.body.routeUrl, 512),
+        routeGroup,
+        pageType,
+        normalizeInteractionText(req.body.pageTitle, 255),
+        entityType,
+        entityId,
+        operatingSystem,
+        accessChannel,
+        deviceCategory,
+        screenWidth,
+        screenHeight,
+        timezoneOffsetMinutes,
+        geoData.countryCode,
+        geoData.countryName,
+        geoData.regionName,
+        geoData.cityName,
+        geoData.latitude,
+        geoData.longitude,
+        normalizeInteractionText(geoData.status, 32),
+        normalizeInteractionText(geoData.source, 64),
+        metadata ? JSON.stringify(metadata) : null
+      ]
+    );
+
+    return res.status(201).json({ sessionPublicId });
+  } catch (error) {
+    console.error('Error starting interaction session:', error);
+    logger.error('Error starting interaction session:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/interaction/session/ping', async (req, res) => {
+  try {
+    const sessionPublicId = normalizeInteractionText(req.body.sessionPublicId, 64);
+
+    if (!sessionPublicId) {
+      return res.status(400).json({ error: 'Invalid interaction session id' });
+    }
+
+    const durationSeconds = normalizeInteractionInteger(req.body.durationSeconds, { min: 0, max: 604800 });
+    const activeDurationSeconds = normalizeInteractionInteger(req.body.activeDurationSeconds, { min: 0, max: 604800 });
+
+    const [result] = await mysqlConnection.promise().query(
+      `
+        UPDATE interaction_sessions
+        SET
+          duration_seconds = CASE
+            WHEN ? IS NULL THEN duration_seconds
+            ELSE GREATEST(COALESCE(duration_seconds, 0), ?)
+          END,
+          active_duration_seconds = CASE
+            WHEN ? IS NULL THEN active_duration_seconds
+            ELSE GREATEST(COALESCE(active_duration_seconds, 0), ?)
+          END
+        WHERE public_id = ?
+          AND ended_at IS NULL
+      `,
+      [
+        durationSeconds,
+        durationSeconds,
+        activeDurationSeconds,
+        activeDurationSeconds,
+        sessionPublicId
+      ]
+    );
+
+    return res.status(200).json({ updated: result.affectedRows > 0 });
+  } catch (error) {
+    console.error('Error updating interaction session heartbeat:', error);
+    logger.error('Error updating interaction session heartbeat:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/interaction/session/end', async (req, res) => {
+  try {
+    const sessionPublicId = normalizeInteractionText(req.body.sessionPublicId, 64);
+
+    if (!sessionPublicId) {
+      return res.status(400).json({ error: 'Invalid interaction session id' });
+    }
+
+    const durationSeconds = normalizeInteractionInteger(req.body.durationSeconds, { min: 0, max: 604800 });
+    const activeDurationSeconds = normalizeInteractionInteger(req.body.activeDurationSeconds, { min: 0, max: 604800 });
+    const exitReason = normalizeInteractionText(req.body.exitReason, 64);
+
+    const [result] = await mysqlConnection.promise().query(
+      `
+        UPDATE interaction_sessions
+        SET
+          ended_at = COALESCE(ended_at, CURRENT_TIMESTAMP),
+          duration_seconds = CASE
+            WHEN ? IS NULL THEN duration_seconds
+            ELSE GREATEST(COALESCE(duration_seconds, 0), ?)
+          END,
+          active_duration_seconds = CASE
+            WHEN ? IS NULL THEN active_duration_seconds
+            ELSE GREATEST(COALESCE(active_duration_seconds, 0), ?)
+          END,
+          exit_reason = COALESCE(exit_reason, ?)
+        WHERE public_id = ?
+      `,
+      [
+        durationSeconds,
+        durationSeconds,
+        activeDurationSeconds,
+        activeDurationSeconds,
+        exitReason,
+        sessionPublicId
+      ]
+    );
+
+    return res.status(200).json({ updated: result.affectedRows > 0 });
+  } catch (error) {
+    console.error('Error ending interaction session:', error);
+    logger.error('Error ending interaction session:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/interaction/event', verifyTokenLenientOptional, async (req, res) => {
+  try {
+    const currentUser = getOptionalRequestUser(req);
+    const visitorId = normalizeInteractionText(req.body.visitorId, 64);
+    const pageType = normalizeInteractionPageType(req.body.pageType);
+    const routePath = normalizeInteractionRoutePath(req.body.routePath);
+    const eventName = normalizeInteractionText(req.body.eventName, 128);
+
+    if (!visitorId || !pageType || !routePath || !eventName) {
+      return res.status(400).json({ error: 'Invalid interaction event payload' });
+    }
+
+    const sessionPublicId = normalizeInteractionText(req.body.sessionPublicId, 64);
+    let sessionId = null;
+
+    if (sessionPublicId) {
+      const [sessionRows] = await mysqlConnection.promise().query(
+        'SELECT id FROM interaction_sessions WHERE public_id = ? LIMIT 1',
+        [sessionPublicId]
+      );
+      sessionId = sessionRows.length ? sessionRows[0].id : null;
+    }
+
+    const entityType = normalizeInteractionEntityType(req.body.entityType);
+    const entityId = normalizeInteractionEntityId(req.body.entityId);
+    const routeGroup = normalizeInteractionRouteGroup(pageType, req.body.routeGroup, routePath);
+    const metadata = normalizeInteractionMetadata(req.body.metadata);
+
+    await mysqlConnection.promise().query(
+      `
+        INSERT INTO interaction_events (
+          session_id,
+          session_public_id,
+          visitor_id,
+          user_id,
+          ip_address,
+          route_path,
+          route_group,
+          page_type,
+          event_name,
+          event_category,
+          entity_type,
+          entity_id,
+          metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        sessionId,
+        sessionPublicId,
+        visitorId,
+        currentUser?.id || null,
+        getInteractionClientIp(req),
+        routePath,
+        routeGroup,
+        pageType,
+        eventName,
+        normalizeInteractionText(req.body.eventCategory, 64) || 'interaction',
+        entityType,
+        entityId,
+        metadata ? JSON.stringify(metadata) : null
+      ]
+    );
+
+    return res.status(201).json({ created: true });
+  } catch (error) {
+    console.error('Error creating interaction event:', error);
+    logger.error('Error creating interaction event:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/metrics/interaction/summary', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+
+    if (!ensureAdminMetricsAccess(cabecera)) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    const language = normalizeInteractionLanguage(req.query.language);
+    const response = await fetchInteractionSummary(mysqlConnection.promise(), language, req.body || {});
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching interaction summary metrics:', error);
+    logger.error('Error fetching interaction summary metrics:', error);
+    return res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/metrics/interaction/routes', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+
+    if (!ensureAdminMetricsAccess(cabecera)) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    const language = normalizeInteractionLanguage(req.query.language);
+    const response = await fetchInteractionRoutes(mysqlConnection.promise(), language, req.body || {});
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching interaction route metrics:', error);
+    logger.error('Error fetching interaction route metrics:', error);
+    return res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/metrics/interaction/content', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+
+    if (!ensureAdminMetricsAccess(cabecera)) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    const language = normalizeInteractionLanguage(req.query.language);
+    const response = await fetchInteractionContent(mysqlConnection.promise(), language, req.body || {});
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching interaction content metrics:', error);
+    logger.error('Error fetching interaction content metrics:', error);
+    return res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/metrics/interaction/users', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+
+    if (!ensureAdminMetricsAccess(cabecera)) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    const response = await fetchInteractionUsers(mysqlConnection.promise(), req.body || {});
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching interaction user metrics:', error);
+    logger.error('Error fetching interaction user metrics:', error);
+    return res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/metrics/interaction/actions', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+
+    if (!ensureAdminMetricsAccess(cabecera)) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    const language = normalizeInteractionLanguage(req.query.language);
+    const response = await fetchInteractionActions(mysqlConnection.promise(), language, req.body || {});
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching interaction action metrics:', error);
+    logger.error('Error fetching interaction action metrics:', error);
+    return res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/metrics/interaction/audience', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+
+    if (!ensureAdminMetricsAccess(cabecera)) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    const language = normalizeInteractionLanguage(req.query.language);
+    const response = await fetchInteractionAudience(mysqlConnection.promise(), language, req.body || {});
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching interaction audience metrics:', error);
+    logger.error('Error fetching interaction audience metrics:', error);
+    return res.status(500).json('Internal server error');
+  }
+});
+
 
 function verifyToken(req, res, next) {
 
@@ -23556,6 +24227,7 @@ router.get('/search', async (req, res) => {
       }
 
       articlesGroupedByCategory[primaryCategory].push({
+        id: article.id,
         imageUrl: article.image_s3_key ? urlMap.get(article.image_s3_key) || '' : '',
         filterName: article.filterName || '',
         title: article.title || '',
