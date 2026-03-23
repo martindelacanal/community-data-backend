@@ -11,11 +11,14 @@ const mysqlConnection = require('../connection/connection');
 const logger = require('../utils/logger.js');
 
 const router = express.Router();
+const MAX_NOTIFICATION_IMAGE_SIZE_BYTES = 1 * 1024 * 1024;
+const DEFAULT_ANDROID_NOTIFICATION_ICON = process.env.PUSH_NOTIFICATION_ANDROID_ICON || 'ic_stat_push_notification';
+const DEFAULT_ANDROID_NOTIFICATION_COLOR = process.env.PUSH_NOTIFICATION_ANDROID_COLOR || '#DF3D7A';
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 1 * 1024 * 1024,
+    fileSize: MAX_NOTIFICATION_IMAGE_SIZE_BYTES,
     files: 1
   }
 }).single('image');
@@ -593,6 +596,8 @@ function buildMulticastMessage(notification, language, imageUrl, tokens) {
     android: {
       priority: 'high',
       notification: {
+        icon: DEFAULT_ANDROID_NOTIFICATION_ICON,
+        color: DEFAULT_ANDROID_NOTIFICATION_COLOR,
         sound: 'default'
       }
     },
