@@ -12,6 +12,11 @@ const { sendVolunteerConfirmation } = require('../email/email');
 const multer = require('multer');
 const sharp = require('sharp');
 const {
+  deleteS3Objects,
+  getImageMetadata,
+  uploadImageWithVariants
+} = require('../services/imageVariants');
+const {
   buildHealthMetricsCsv,
   getHealthMetricAnswerCountMap: getHealthMetricAnswerCountMapService,
   getHealthMetricQuestionCatalog: getHealthMetricQuestionCatalogService,
@@ -20552,43 +20557,35 @@ async function managePriority(newPriority, excludeArticleId = null, connection =
 // Helper function to upload image to S3 and save to database
 async function uploadArticleImage(file, articleId, imageType, altTextEn = '', altTextEs = '', captionEn = '', captionEs = '') {
   try {
-    const { buffer: resizedBuffer } = await resizeArticleImageBuffer(
-      file.buffer,
-      file.mimetype,
-      `article ${imageType}`
-    );
-    const fileHash = calculateFileHash(resizedBuffer);
-    const fileSize = resizedBuffer.length;
+    const fileHash = calculateFileHash(file.buffer);
+    const fileSize = file.buffer.length;
     const fileName = randomImageName();
+    const uploadedImage = await uploadImageWithVariants({
+      originalKey: fileName,
+      buffer: file.buffer,
+      contentType: file.mimetype,
+      presetName: 'article'
+    });
+    const metadata = uploadedImage.metadata || await getImageMetadata(file.buffer, file.mimetype);
 
-    // Upload to S3
-    const uploadParams = {
-      Bucket: bucketName,
-      Key: fileName,
-      Body: resizedBuffer,
-      ContentType: file.mimetype,
-    };
-
-    const command = new PutObjectCommand(uploadParams);
-    await s3.send(command);
-
-    // Save to database
     const [result] = await mysqlConnection.promise().query(
       `INSERT INTO article_images (
-        article_id, image_type, s3_key, s3_bucket, file_hash, 
-        original_filename, mime_type, file_size, alt_text_en, 
+        article_id, image_type, s3_key, s3_key_small, s3_key_medium, s3_bucket, file_hash,
+        original_filename, mime_type, file_size, width, height, alt_text_en,
         alt_text_es, caption_en, caption_es
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        articleId, imageType, fileName, bucketName, fileHash,
-        file.originalname, file.mimetype, fileSize, altTextEn,
+        articleId, imageType, uploadedImage.originalKey, uploadedImage.smallKey, uploadedImage.mediumKey, bucketName, fileHash,
+        file.originalname, file.mimetype, fileSize, metadata.width || null, metadata.height || null, altTextEn,
         altTextEs, captionEn, captionEs
       ]
     );
 
     return {
       id: result.insertId,
-      s3_key: fileName
+      s3_key: uploadedImage.originalKey,
+      s3_key_small: uploadedImage.smallKey,
+      s3_key_medium: uploadedImage.mediumKey
     };
   } catch (error) {
     logger.error('Error uploading article image:', error);
@@ -20596,12 +20593,51 @@ async function uploadArticleImage(file, articleId, imageType, altTextEn = '', al
   }
 }
 
+async function deleteArticleImagesByType(articleId, imageTypes) {
+  const normalizedTypes = Array.isArray(imageTypes) ? imageTypes.filter(Boolean) : [imageTypes].filter(Boolean);
+
+  if (normalizedTypes.length === 0) {
+    return;
+  }
+
+  const placeholders = normalizedTypes.map(() => '?').join(',');
+  const [images] = await mysqlConnection.promise().query(
+    `SELECT id, s3_key, s3_key_small, s3_key_medium
+     FROM article_images
+     WHERE article_id = ? AND image_type IN (${placeholders})`,
+    [articleId, ...normalizedTypes]
+  );
+
+  if (images.length === 0) {
+    return;
+  }
+
+  await deleteS3Objects(images.flatMap((image) => [image.s3_key, image.s3_key_small, image.s3_key_medium]));
+  await mysqlConnection.promise().query(
+    `DELETE FROM article_images WHERE id IN (${images.map(() => '?').join(',')})`,
+    images.map((image) => image.id)
+  );
+}
+
 // Helper function to generate multiple signed URLs in parallel
 async function getSignedUrlsForImages(s3Keys, expiresIn = 3600) {
   if (!s3Keys || s3Keys.length === 0) return [];
 
-  const promises = s3Keys.map(s3Key => getSignedUrlForImage(s3Key, expiresIn));
-  return Promise.all(promises);
+  const normalizedKeys = s3Keys.filter(Boolean);
+
+  if (normalizedKeys.length === 0) {
+    return s3Keys.map(() => null);
+  }
+
+  const uniqueKeys = Array.from(new Set(normalizedKeys));
+  const uniqueUrls = await Promise.all(uniqueKeys.map((s3Key) => getSignedUrlForImage(s3Key, expiresIn)));
+  const urlMap = new Map();
+
+  uniqueKeys.forEach((key, index) => {
+    urlMap.set(key, uniqueUrls[index] || null);
+  });
+
+  return s3Keys.map((s3Key) => (s3Key ? (urlMap.get(s3Key) || null) : null));
 }
 
 // Helper function to generate signed URL for S3 object with caching
@@ -21175,11 +21211,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     if (req.files?.imageEnglish) {
       try {
-        // Delete existing English preview image if any
-        await mysqlConnection.promise().query(
-          'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_en"',
-          [articleId]
-        );
+        await deleteArticleImagesByType(articleId, 'preview_en');
 
         const uploadResult = await uploadArticleImage(
           req.files.imageEnglish[0],
@@ -21198,11 +21230,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     if (req.files?.imageSpanish) {
       try {
-        // Delete existing Spanish preview image if any
-        await mysqlConnection.promise().query(
-          'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_es"',
-          [articleId]
-        );
+        await deleteArticleImagesByType(articleId, 'preview_es');
 
         const uploadResult = await uploadArticleImage(
           req.files.imageSpanish[0],
@@ -21386,8 +21414,11 @@ router.get('/article/public', async (req, res) => {
       SELECT 
         a.id,
         ${language === 'en' ? 'a.title_en' : 'a.title_es'} as title,
+        ${language === 'en' ? 'a.subtitle_en' : 'a.subtitle_es'} as subtitle,
         ${language === 'en' ? 'a.slug_en' : 'a.slug_es'} as slug,
         ai.s3_key as image_s3_key,
+        ai.s3_key_small as image_s3_key_small,
+        ai.s3_key_medium as image_s3_key_medium,
         ${language === 'en' ? 'f.name_en' : 'f.name_es'} as filterName
       FROM article a
       LEFT JOIN article_images ai ON a.id = ai.article_id 
@@ -21410,9 +21441,11 @@ router.get('/article/public', async (req, res) => {
     );
 
     // Collect all S3 keys for batch processing
-    const s3Keys = articles
-      .filter(article => article.image_s3_key)
-      .map(article => article.image_s3_key);
+    const s3Keys = articles.flatMap((article) => [
+      article.image_s3_key,
+      article.image_s3_key_small,
+      article.image_s3_key_medium
+    ]).filter(Boolean);
 
     // Generate all signed URLs in parallel
     const signedUrls = await getSignedUrlsForImages(s3Keys);
@@ -21426,13 +21459,23 @@ router.get('/article/public', async (req, res) => {
     });
 
     // Format response
-    const formattedArticles = articles.map(article => ({
-      id: article.id,
-      imageUrl: article.image_s3_key ? urlMap.get(article.image_s3_key) || '' : '',
-      filterName: article.filterName || '',
-      title: article.title || '',
-      slug: article.slug || ''
-    }));
+    const formattedArticles = articles.map((article) => {
+      const originalKey = article.image_s3_key || null;
+      const smallKey = article.image_s3_key_small || originalKey;
+      const mediumKey = article.image_s3_key_medium || originalKey || smallKey;
+
+      return {
+        id: article.id,
+        imageUrl: originalKey ? urlMap.get(originalKey) || '' : '',
+        imageSmallUrl: smallKey ? urlMap.get(smallKey) || '' : '',
+        imageMediumUrl: mediumKey ? urlMap.get(mediumKey) || '' : '',
+        imageOriginalUrl: originalKey ? urlMap.get(originalKey) || '' : '',
+        filterName: article.filterName || '',
+        title: article.title || '',
+        subtitle: article.subtitle || '',
+        slug: article.slug || ''
+      };
+    });
 
     const response = {
       articles: formattedArticles,
@@ -22253,10 +22296,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     if (req.files?.imageEnglish) {
       try {
-        await mysqlConnection.promise().query(
-          'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_en"',
-          [id]
-        );
+        await deleteArticleImagesByType(id, 'preview_en');
 
         const uploadResult = await uploadArticleImage(
           req.files.imageEnglish[0],
@@ -22275,10 +22315,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     if (req.files?.imageSpanish) {
       try {
-        await mysqlConnection.promise().query(
-          'DELETE FROM article_images WHERE article_id = ? AND image_type = "preview_es"',
-          [id]
-        );
+        await deleteArticleImagesByType(id, 'preview_es');
 
         const uploadResult = await uploadArticleImage(
           req.files.imageSpanish[0],
@@ -22424,23 +22461,16 @@ router.delete('/article/:id', verifyToken, async (req, res) => {
 
     // Get all associated images to delete from S3 (including content images)
     const [images] = await mysqlConnection.promise().query(
-      'SELECT s3_key, image_type FROM article_images WHERE article_id = ?',
+      'SELECT s3_key, s3_key_small, s3_key_medium, image_type FROM article_images WHERE article_id = ?',
       [id]
     );
 
     // Delete images from S3
     if (images.length > 0) {
       try {
-        const deleteParams = {
-          Bucket: bucketName,
-          Delete: {
-            Objects: images.map(img => ({ Key: img.s3_key })),
-            Quiet: false,
-          },
-        };
-
-        const deleteCommand = new DeleteObjectsCommand(deleteParams);
-        await s3.send(deleteCommand);
+        await deleteS3Objects(
+          images.flatMap((img) => [img.s3_key, img.s3_key_small, img.s3_key_medium])
+        );
       } catch (s3Error) {
         logger.error('Error deleting images from S3:', s3Error);
         // Continue with article deletion even if S3 cleanup fails
@@ -24474,6 +24504,27 @@ const trustedResourceUpload = multer({
   }
 }).single('image');
 
+function getTrustedResourceImageKeys(resource = {}) {
+  return [
+    resource.image_url,
+    resource.image_url_small,
+    resource.image_url_medium
+  ].filter(Boolean);
+}
+
+function buildTrustedResourceImageUrls(resource = {}, urlMap = new Map()) {
+  const originalKey = resource.image_url || null;
+  const smallKey = resource.image_url_small || originalKey;
+  const mediumKey = resource.image_url_medium || originalKey || smallKey;
+
+  return {
+    imageUrl: originalKey ? urlMap.get(originalKey) || null : (mediumKey ? urlMap.get(mediumKey) || null : null),
+    imageSmallUrl: smallKey ? urlMap.get(smallKey) || null : null,
+    imageMediumUrl: mediumKey ? urlMap.get(mediumKey) || null : null,
+    imageOriginalUrl: originalKey ? urlMap.get(originalKey) || null : null
+  };
+}
+
 // Helper function to get filters for resources
 async function getFiltersForResources(resourceIds) {
   if (!resourceIds || resourceIds.length === 0) {
@@ -26135,6 +26186,8 @@ router.get('/trusted-resources/public', async (req, res) => {
         tr.email,
         tr.website,
         tr.image_url,
+        tr.image_url_small,
+        tr.image_url_medium,
         tr.is_open
       FROM trusted_resources tr
       ${filterJoin}
@@ -26168,9 +26221,7 @@ router.get('/trusted-resources/public', async (req, res) => {
     ]);
 
     // Collect all S3 keys for batch processing
-    const s3Keys = resources
-      .filter(resource => resource.image_url)
-      .map(resource => resource.image_url);
+    const s3Keys = resources.flatMap((resource) => getTrustedResourceImageKeys(resource));
 
     // Generate all signed URLs in parallel
     const signedUrls = await getSignedUrlsForImages(s3Keys);
@@ -26198,7 +26249,7 @@ router.get('/trusted-resources/public', async (req, res) => {
         phoneNumber: resource.phone_number || null,
         email: resource.email || null,
         website: resource.website || null,
-        imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
+        ...buildTrustedResourceImageUrls(resource, urlMap),
         isOpen: status.isOpen,
         filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
         prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
@@ -26245,6 +26296,8 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
         email,
         website,
         image_url,
+        image_url_small,
+        image_url_medium,
         is_open
       FROM trusted_resources
       WHERE id = ? AND is_active = 1
@@ -26269,11 +26322,14 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
     const schedules = schedulesMap.get(resource.id) || [];
     const status = calculateCurrentStatus(schedules, lang);
 
-    // Generate signed URL for image if exists
-    let imageUrl = null;
-    if (resource.image_url) {
-      imageUrl = await getSignedUrlForImage(resource.image_url);
-    }
+    const imageKeys = getTrustedResourceImageKeys(resource);
+    const signedUrls = await getSignedUrlsForImages(imageKeys);
+    const imageUrlMap = new Map();
+    imageKeys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        imageUrlMap.set(key, signedUrls[index]);
+      }
+    });
 
     const formattedResource = {
       id: resource.id,
@@ -26285,7 +26341,7 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
-      imageUrl: imageUrl,
+      ...buildTrustedResourceImageUrls(resource, imageUrlMap),
       isOpen: status.isOpen,
       filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
       prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
@@ -26395,6 +26451,8 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         tr.email,
         tr.website,
         tr.image_url,
+        tr.image_url_small,
+        tr.image_url_medium,
         tr.is_active,
         tr.is_open,
         DATE_FORMAT(CONVERT_TZ(tr.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
@@ -26430,9 +26488,7 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
     ]);
 
     // Collect all S3 keys for batch processing
-    const s3Keys = resources
-      .filter(resource => resource.image_url)
-      .map(resource => resource.image_url);
+    const s3Keys = resources.flatMap((resource) => getTrustedResourceImageKeys(resource));
 
     // Generate all signed URLs in parallel
     const signedUrls = await getSignedUrlsForImages(s3Keys);
@@ -26463,7 +26519,7 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         phoneNumber: resource.phone_number || null,
         email: resource.email || null,
         website: resource.website || null,
-        imageUrl: resource.image_url ? urlMap.get(resource.image_url) : null,
+        ...buildTrustedResourceImageUrls(resource, urlMap),
         isActive: resource.is_active === 1 || resource.is_active === true,
         isOpen: status.isOpen,
         currentStatus: status.currentStatus,
@@ -26518,6 +26574,8 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
         email,
         website,
         image_url,
+        image_url_small,
+        image_url_medium,
         is_active,
         is_open,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
@@ -26545,11 +26603,14 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
     const resourceSchedules = schedulesMap.get(resource.id) || [];
     const status = calculateCurrentStatus(resourceSchedules, 'en');
 
-    // Generate signed URL for image if exists
-    let imageUrl = null;
-    if (resource.image_url) {
-      imageUrl = await getSignedUrlForImage(resource.image_url);
-    }
+    const imageKeys = getTrustedResourceImageKeys(resource);
+    const signedUrls = await getSignedUrlsForImages(imageKeys);
+    const imageUrlMap = new Map();
+    imageKeys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        imageUrlMap.set(key, signedUrls[index]);
+      }
+    });
 
     const formattedResource = {
       id: resource.id,
@@ -26564,7 +26625,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
-      imageUrl: imageUrl,
+      ...buildTrustedResourceImageUrls(resource, imageUrlMap),
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: status.isOpen,
       currentStatus: status.currentStatus,
@@ -26704,7 +26765,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
         city_id,
         ST_Y(coordinates) as latitude,
         ST_X(coordinates) as longitude,
-        phone_number, email, website, image_url, is_active, is_open,
+        phone_number, email, website, image_url, image_url_small, image_url_medium, is_active, is_open,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM trusted_resources WHERE id = ?`,
@@ -26720,11 +26781,14 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       getSchedulesForResources([resourceId])
     ]);
 
-    // Generate signed URL for image if exists
-    let imageUrl = null;
-    if (resource.image_url) {
-      imageUrl = await getSignedUrlForImage(resource.image_url);
-    }
+    const imageKeys = getTrustedResourceImageKeys(resource);
+    const signedUrls = await getSignedUrlsForImages(imageKeys);
+    const imageUrlMap = new Map();
+    imageKeys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        imageUrlMap.set(key, signedUrls[index]);
+      }
+    });
 
     const formattedResource = {
       id: resource.id,
@@ -26739,7 +26803,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
-      imageUrl: imageUrl,
+      ...buildTrustedResourceImageUrls(resource, imageUrlMap),
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: resource.is_open === 1 || resource.is_open === true,
       createdAt: resource.created_at,
@@ -26891,7 +26955,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
         city_id,
         ST_Y(coordinates) as latitude,
         ST_X(coordinates) as longitude,
-        phone_number, email, website, image_url, is_active, is_open,
+        phone_number, email, website, image_url, image_url_small, image_url_medium, is_active, is_open,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM trusted_resources WHERE id = ?`,
@@ -26910,11 +26974,14 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
     const resourceSchedules = schedulesMap.get(resource.id) || [];
     const status = calculateCurrentStatus(resourceSchedules, 'en');
 
-    // Generate signed URL for image if exists
-    let imageUrl = null;
-    if (resource.image_url) {
-      imageUrl = await getSignedUrlForImage(resource.image_url);
-    }
+    const imageKeys = getTrustedResourceImageKeys(resource);
+    const signedUrls = await getSignedUrlsForImages(imageKeys);
+    const imageUrlMap = new Map();
+    imageKeys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        imageUrlMap.set(key, signedUrls[index]);
+      }
+    });
 
     const formattedResource = {
       id: resource.id,
@@ -26929,7 +26996,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       phoneNumber: resource.phone_number || null,
       email: resource.email || null,
       website: resource.website || null,
-      imageUrl: imageUrl,
+      ...buildTrustedResourceImageUrls(resource, imageUrlMap),
       isActive: resource.is_active === 1 || resource.is_active === true,
       isOpen: status.isOpen,
       currentStatus: status.currentStatus,
@@ -26966,7 +27033,7 @@ router.delete('/trusted-resources/:id', verifyToken, async (req, res) => {
 
     // Get image URL before deleting
     const [resources] = await mysqlConnection.promise().query(
-      'SELECT image_url FROM trusted_resources WHERE id = ?',
+      'SELECT image_url, image_url_small, image_url_medium FROM trusted_resources WHERE id = ?',
       [id]
     );
 
@@ -26977,12 +27044,7 @@ router.delete('/trusted-resources/:id', verifyToken, async (req, res) => {
     // Delete from S3 if image exists
     if (resources[0].image_url) {
       try {
-        const imageKey = resources[0].image_url; // Already stored as S3 key
-        const deleteCommand = new DeleteObjectCommand({
-          Bucket: bucketName,
-          Key: imageKey
-        });
-        await s3.send(deleteCommand);
+        await deleteS3Objects(getTrustedResourceImageKeys(resources[0]));
       } catch (s3Error) {
         console.log('Error deleting image from S3:', s3Error);
         // Continue with database deletion even if S3 deletion fails
@@ -27027,7 +27089,7 @@ router.post('/trusted-resources/:id/image', verifyToken, trustedResourceUpload, 
 
     // Verify resource exists
     const [resources] = await mysqlConnection.promise().query(
-      'SELECT image_url FROM trusted_resources WHERE id = ?',
+      'SELECT image_url, image_url_small, image_url_medium FROM trusted_resources WHERE id = ?',
       [id]
     );
 
@@ -27038,38 +27100,45 @@ router.post('/trusted-resources/:id/image', verifyToken, trustedResourceUpload, 
     // Delete old image from S3 if exists
     if (resources[0].image_url) {
       try {
-        const oldImageKey = resources[0].image_url; // Already stored as S3 key
-        const deleteCommand = new DeleteObjectCommand({
-          Bucket: bucketName,
-          Key: oldImageKey
-        });
-        await s3.send(deleteCommand);
+        await deleteS3Objects(getTrustedResourceImageKeys(resources[0]));
       } catch (s3Error) {
         console.log('Error deleting old image from S3:', s3Error);
       }
     }
 
-    // Upload new image to S3
     const imageName = randomImageName();
-    const putCommand = new PutObjectCommand({
-      Bucket: bucketName,
-      Key: imageName,
-      Body: req.file.buffer,
-      ContentType: req.file.mimetype
+    const uploadedImage = await uploadImageWithVariants({
+      originalKey: imageName,
+      buffer: req.file.buffer,
+      contentType: req.file.mimetype,
+      presetName: 'trustedResource'
     });
 
-    await s3.send(putCommand);
-
-    // Store only the S3 key (hash) in database
     await mysqlConnection.promise().query(
-      'UPDATE trusted_resources SET image_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [imageName, id]
+      `UPDATE trusted_resources
+       SET image_url = ?, image_url_small = ?, image_url_medium = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [uploadedImage.originalKey, uploadedImage.smallKey, uploadedImage.mediumKey, id]
     );
 
-    // Generate signed URL for response
-    const imageUrl = await getSignedUrlForImage(imageName);
+    const imageKeys = [
+      uploadedImage.originalKey,
+      uploadedImage.smallKey,
+      uploadedImage.mediumKey
+    ].filter(Boolean);
+    const signedUrls = await getSignedUrlsForImages(imageKeys);
+    const imageUrlMap = new Map();
+    imageKeys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        imageUrlMap.set(key, signedUrls[index]);
+      }
+    });
 
-    res.json({ imageUrl });
+    res.json(buildTrustedResourceImageUrls({
+      image_url: uploadedImage.originalKey,
+      image_url_small: uploadedImage.smallKey,
+      image_url_medium: uploadedImage.mediumKey
+    }, imageUrlMap));
 
   } catch (err) {
     console.log(err);
@@ -27090,7 +27159,7 @@ router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
 
     // Get image URL
     const [resources] = await mysqlConnection.promise().query(
-      'SELECT image_url FROM trusted_resources WHERE id = ?',
+      'SELECT image_url, image_url_small, image_url_medium FROM trusted_resources WHERE id = ?',
       [id]
     );
 
@@ -27104,19 +27173,16 @@ router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
 
     // Delete from S3
     try {
-      const imageKey = resources[0].image_url; // Already stored as S3 key
-      const deleteCommand = new DeleteObjectCommand({
-        Bucket: bucketName,
-        Key: imageKey
-      });
-      await s3.send(deleteCommand);
+      await deleteS3Objects(getTrustedResourceImageKeys(resources[0]));
     } catch (s3Error) {
       console.log('Error deleting image from S3:', s3Error);
     }
 
     // Update database
     await mysqlConnection.promise().query(
-      'UPDATE trusted_resources SET image_url = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      `UPDATE trusted_resources
+       SET image_url = NULL, image_url_small = NULL, image_url_medium = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
       [id]
     );
 
