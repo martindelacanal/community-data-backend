@@ -22603,6 +22603,776 @@ router.get('/filters', async (req, res) => {
 
 });
 
+router.get('/categories/exists', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const normalizedNameEnglish = typeof req.query.nameEnglish === 'string'
+      ? req.query.nameEnglish.trim()
+      : '';
+    const normalizedNameSpanish = typeof req.query.nameSpanish === 'string'
+      ? req.query.nameSpanish.trim()
+      : '';
+    const excludeId = req.query.excludeId ? parseInt(req.query.excludeId, 10) : null;
+
+    if (!normalizedNameEnglish && !normalizedNameSpanish) {
+      return res.status(400).json('nameEnglish or nameSpanish is required');
+    }
+
+    let englishExists = false;
+    let spanishExists = false;
+
+    if (normalizedNameEnglish) {
+      let query = 'SELECT COUNT(*) as count FROM category WHERE name_en = ?';
+      const params = [normalizedNameEnglish];
+
+      if (excludeId) {
+        query += ' AND id != ?';
+        params.push(excludeId);
+      }
+
+      const [result] = await mysqlConnection.promise().query(query, params);
+      englishExists = result[0].count > 0;
+    }
+
+    if (normalizedNameSpanish) {
+      let query = 'SELECT COUNT(*) as count FROM category WHERE name_es = ?';
+      const params = [normalizedNameSpanish];
+
+      if (excludeId) {
+        query += ' AND id != ?';
+        params.push(excludeId);
+      }
+
+      const [result] = await mysqlConnection.promise().query(query, params);
+      spanishExists = result[0].count > 0;
+    }
+
+    res.json({
+      nameEnglish: englishExists,
+      nameSpanish: spanishExists
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error checking category name existence:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/categories/paginated', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const {
+      page = 1,
+      pageSize = 10,
+      search = '',
+      orderBy = 'id',
+      orderType = 'desc'
+    } = req.query;
+
+    const pageNum = parseInt(page, 10);
+    const pageSizeNum = parseInt(pageSize, 10);
+    const offset = (pageNum - 1) * pageSizeNum;
+    const normalizedSearch = typeof search === 'string' ? search.trim() : '';
+
+    const orderColumns = {
+      id: 'c.id',
+      nameEnglish: 'c.name_en',
+      nameSpanish: 'c.name_es',
+      articleCount: 'article_count',
+      createdAt: 'c.creation_date'
+    };
+    const safeOrderBy = orderColumns[orderBy] || orderColumns.id;
+    const safeOrderType = typeof orderType === 'string' && orderType.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    const whereConditions = [];
+    const queryParams = [];
+
+    if (normalizedSearch) {
+      whereConditions.push('(c.name_en LIKE ? OR c.name_es LIKE ?)');
+      const searchTerm = `%${normalizedSearch}%`;
+      queryParams.push(searchTerm, searchTerm);
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    const [countResult] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as total FROM category c ${whereClause}`,
+      queryParams
+    );
+
+    const totalItems = countResult[0].total;
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+        c.id,
+        c.name_en,
+        c.name_es,
+        DATE_FORMAT(CONVERT_TZ(c.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        (
+          SELECT COUNT(*)
+          FROM article_category ac
+          INNER JOIN article a ON a.id = ac.article_id
+          WHERE ac.category_id = c.id
+        ) as article_count
+      FROM category c
+      ${whereClause}
+      ORDER BY ${safeOrderBy} ${safeOrderType}
+      LIMIT ? OFFSET ?`,
+      [...queryParams, pageSizeNum, offset]
+    );
+
+    res.json({
+      results: rows.map(row => ({
+        id: row.id,
+        nameEnglish: row.name_en,
+        nameSpanish: row.name_es,
+        createdAt: row.created_at,
+        articleCount: row.article_count
+      })),
+      numOfPages: totalItems === 0 ? 0 : Math.ceil(totalItems / pageSizeNum),
+      totalItems,
+      page: pageNum,
+      orderBy,
+      orderType: safeOrderType
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting paginated categories:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/categories/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [categories] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        name_en,
+        name_es,
+        DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+      FROM category
+      WHERE id = ?
+      LIMIT 1`,
+      [id]
+    );
+
+    if (categories.length === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    const [articles] = await mysqlConnection.promise().query(
+      `SELECT
+        a.id,
+        a.title_en,
+        a.title_es,
+        DATE_FORMAT(CONVERT_TZ(a.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at
+      FROM article a
+      INNER JOIN article_category ac ON a.id = ac.article_id
+      WHERE ac.category_id = ?
+      ORDER BY a.title_en ASC`,
+      [id]
+    );
+
+    res.json({
+      id: categories[0].id,
+      nameEnglish: categories[0].name_en,
+      nameSpanish: categories[0].name_es,
+      createdAt: categories[0].created_at,
+      updatedAt: categories[0].updated_at,
+      articles: articles.map(article => ({
+        id: article.id,
+        titleEnglish: article.title_en,
+        titleSpanish: article.title_es,
+        createdAt: article.created_at
+      }))
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting category detail:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/categories', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const nameEnglish = typeof req.body.nameEnglish === 'string' ? req.body.nameEnglish.trim() : '';
+    const nameSpanish = typeof req.body.nameSpanish === 'string' ? req.body.nameSpanish.trim() : '';
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 45 || nameSpanish.length > 45) {
+      return res.status(400).json('Name fields must not exceed 45 characters');
+    }
+
+    const [existingEnglish] = await mysqlConnection.promise().query(
+      'SELECT id FROM category WHERE name_en = ? LIMIT 1',
+      [nameEnglish]
+    );
+
+    if (existingEnglish.length > 0) {
+      return res.status(409).json('A category with this English name already exists');
+    }
+
+    const [existingSpanish] = await mysqlConnection.promise().query(
+      'SELECT id FROM category WHERE name_es = ? LIMIT 1',
+      [nameSpanish]
+    );
+
+    if (existingSpanish.length > 0) {
+      return res.status(409).json('A category with this Spanish name already exists');
+    }
+
+    const [result] = await mysqlConnection.promise().query(
+      'INSERT INTO category (name_en, name_es) VALUES (?, ?)',
+      [nameEnglish, nameSpanish]
+    );
+
+    const [created] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        name_en,
+        name_es,
+        DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+      FROM category
+      WHERE id = ?`,
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      id: created[0].id,
+      nameEnglish: created[0].name_en,
+      nameSpanish: created[0].name_es,
+      createdAt: created[0].created_at,
+      updatedAt: created[0].updated_at,
+      articles: []
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error creating category:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.put('/categories/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+    const nameEnglish = typeof req.body.nameEnglish === 'string' ? req.body.nameEnglish.trim() : '';
+    const nameSpanish = typeof req.body.nameSpanish === 'string' ? req.body.nameSpanish.trim() : '';
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 45 || nameSpanish.length > 45) {
+      return res.status(400).json('Name fields must not exceed 45 characters');
+    }
+
+    const [existingEnglish] = await mysqlConnection.promise().query(
+      'SELECT id FROM category WHERE name_en = ? AND id != ? LIMIT 1',
+      [nameEnglish, id]
+    );
+
+    if (existingEnglish.length > 0) {
+      return res.status(409).json('A category with this English name already exists');
+    }
+
+    const [existingSpanish] = await mysqlConnection.promise().query(
+      'SELECT id FROM category WHERE name_es = ? AND id != ? LIMIT 1',
+      [nameSpanish, id]
+    );
+
+    if (existingSpanish.length > 0) {
+      return res.status(409).json('A category with this Spanish name already exists');
+    }
+
+    const [updateResult] = await mysqlConnection.promise().query(
+      'UPDATE category SET name_en = ?, name_es = ?, modification_date = CURRENT_TIMESTAMP WHERE id = ?',
+      [nameEnglish, nameSpanish, id]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    const [updated] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        name_en,
+        name_es,
+        DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+      FROM category
+      WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      id: updated[0].id,
+      nameEnglish: updated[0].name_en,
+      nameSpanish: updated[0].name_es,
+      createdAt: updated[0].created_at,
+      updatedAt: updated[0].updated_at,
+      articles: []
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error updating category:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.delete('/categories/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [relations] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as count
+      FROM article_category ac
+      INNER JOIN article a ON a.id = ac.article_id
+      WHERE ac.category_id = ?`,
+      [id]
+    );
+
+    if (relations[0].count > 0) {
+      return res.status(409).json('Cannot delete category: it has associated articles. Update those articles first.');
+    }
+
+    const [deleteResult] = await mysqlConnection.promise().query(
+      'DELETE FROM category WHERE id = ?',
+      [id]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    res.json({ message: 'Category deleted successfully' });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting category:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/filters/exists', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const normalizedNameEnglish = typeof req.query.nameEnglish === 'string'
+      ? req.query.nameEnglish.trim()
+      : '';
+    const normalizedNameSpanish = typeof req.query.nameSpanish === 'string'
+      ? req.query.nameSpanish.trim()
+      : '';
+    const excludeId = req.query.excludeId ? parseInt(req.query.excludeId, 10) : null;
+
+    if (!normalizedNameEnglish && !normalizedNameSpanish) {
+      return res.status(400).json('nameEnglish or nameSpanish is required');
+    }
+
+    let englishExists = false;
+    let spanishExists = false;
+
+    if (normalizedNameEnglish) {
+      let query = 'SELECT COUNT(*) as count FROM filter WHERE name_en = ?';
+      const params = [normalizedNameEnglish];
+
+      if (excludeId) {
+        query += ' AND id != ?';
+        params.push(excludeId);
+      }
+
+      const [result] = await mysqlConnection.promise().query(query, params);
+      englishExists = result[0].count > 0;
+    }
+
+    if (normalizedNameSpanish) {
+      let query = 'SELECT COUNT(*) as count FROM filter WHERE name_es = ?';
+      const params = [normalizedNameSpanish];
+
+      if (excludeId) {
+        query += ' AND id != ?';
+        params.push(excludeId);
+      }
+
+      const [result] = await mysqlConnection.promise().query(query, params);
+      spanishExists = result[0].count > 0;
+    }
+
+    res.json({
+      nameEnglish: englishExists,
+      nameSpanish: spanishExists
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error checking filter name existence:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/filters/paginated', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const {
+      page = 1,
+      pageSize = 10,
+      search = '',
+      orderBy = 'id',
+      orderType = 'desc'
+    } = req.query;
+
+    const pageNum = parseInt(page, 10);
+    const pageSizeNum = parseInt(pageSize, 10);
+    const offset = (pageNum - 1) * pageSizeNum;
+    const normalizedSearch = typeof search === 'string' ? search.trim() : '';
+
+    const orderColumns = {
+      id: 'f.id',
+      nameEnglish: 'f.name_en',
+      nameSpanish: 'f.name_es',
+      articleCount: 'article_count',
+      createdAt: 'f.creation_date'
+    };
+    const safeOrderBy = orderColumns[orderBy] || orderColumns.id;
+    const safeOrderType = typeof orderType === 'string' && orderType.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    const whereConditions = [];
+    const queryParams = [];
+
+    if (normalizedSearch) {
+      whereConditions.push('(f.name_en LIKE ? OR f.name_es LIKE ?)');
+      const searchTerm = `%${normalizedSearch}%`;
+      queryParams.push(searchTerm, searchTerm);
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    const [countResult] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as total FROM filter f ${whereClause}`,
+      queryParams
+    );
+
+    const totalItems = countResult[0].total;
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+        f.id,
+        f.name_en,
+        f.name_es,
+        DATE_FORMAT(CONVERT_TZ(f.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        (
+          SELECT COUNT(*)
+          FROM article_filter af
+          INNER JOIN article a ON a.id = af.article_id
+          WHERE af.filter_id = f.id
+        ) as article_count
+      FROM filter f
+      ${whereClause}
+      ORDER BY ${safeOrderBy} ${safeOrderType}
+      LIMIT ? OFFSET ?`,
+      [...queryParams, pageSizeNum, offset]
+    );
+
+    res.json({
+      results: rows.map(row => ({
+        id: row.id,
+        nameEnglish: row.name_en,
+        nameSpanish: row.name_es,
+        createdAt: row.created_at,
+        articleCount: row.article_count
+      })),
+      numOfPages: totalItems === 0 ? 0 : Math.ceil(totalItems / pageSizeNum),
+      totalItems,
+      page: pageNum,
+      orderBy,
+      orderType: safeOrderType
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting paginated filters:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.get('/filters/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [filters] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        name_en,
+        name_es,
+        DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+      FROM filter
+      WHERE id = ?
+      LIMIT 1`,
+      [id]
+    );
+
+    if (filters.length === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    const [articles] = await mysqlConnection.promise().query(
+      `SELECT
+        a.id,
+        a.title_en,
+        a.title_es,
+        DATE_FORMAT(CONVERT_TZ(a.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at
+      FROM article a
+      INNER JOIN article_filter af ON a.id = af.article_id
+      WHERE af.filter_id = ?
+      ORDER BY a.title_en ASC`,
+      [id]
+    );
+
+    res.json({
+      id: filters[0].id,
+      nameEnglish: filters[0].name_en,
+      nameSpanish: filters[0].name_es,
+      createdAt: filters[0].created_at,
+      updatedAt: filters[0].updated_at,
+      articles: articles.map(article => ({
+        id: article.id,
+        titleEnglish: article.title_en,
+        titleSpanish: article.title_es,
+        createdAt: article.created_at
+      }))
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting filter detail:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/filters', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const nameEnglish = typeof req.body.nameEnglish === 'string' ? req.body.nameEnglish.trim() : '';
+    const nameSpanish = typeof req.body.nameSpanish === 'string' ? req.body.nameSpanish.trim() : '';
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 45 || nameSpanish.length > 45) {
+      return res.status(400).json('Name fields must not exceed 45 characters');
+    }
+
+    const [existingEnglish] = await mysqlConnection.promise().query(
+      'SELECT id FROM filter WHERE name_en = ? LIMIT 1',
+      [nameEnglish]
+    );
+
+    if (existingEnglish.length > 0) {
+      return res.status(409).json('A filter with this English name already exists');
+    }
+
+    const [existingSpanish] = await mysqlConnection.promise().query(
+      'SELECT id FROM filter WHERE name_es = ? LIMIT 1',
+      [nameSpanish]
+    );
+
+    if (existingSpanish.length > 0) {
+      return res.status(409).json('A filter with this Spanish name already exists');
+    }
+
+    const [result] = await mysqlConnection.promise().query(
+      'INSERT INTO filter (name_en, name_es) VALUES (?, ?)',
+      [nameEnglish, nameSpanish]
+    );
+
+    const [created] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        name_en,
+        name_es,
+        DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+      FROM filter
+      WHERE id = ?`,
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      id: created[0].id,
+      nameEnglish: created[0].name_en,
+      nameSpanish: created[0].name_es,
+      createdAt: created[0].created_at,
+      updatedAt: created[0].updated_at,
+      articles: []
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error creating filter:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.put('/filters/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+    const nameEnglish = typeof req.body.nameEnglish === 'string' ? req.body.nameEnglish.trim() : '';
+    const nameSpanish = typeof req.body.nameSpanish === 'string' ? req.body.nameSpanish.trim() : '';
+
+    if (!nameEnglish || !nameSpanish) {
+      return res.status(400).json('nameEnglish and nameSpanish are required');
+    }
+
+    if (nameEnglish.length > 45 || nameSpanish.length > 45) {
+      return res.status(400).json('Name fields must not exceed 45 characters');
+    }
+
+    const [existingEnglish] = await mysqlConnection.promise().query(
+      'SELECT id FROM filter WHERE name_en = ? AND id != ? LIMIT 1',
+      [nameEnglish, id]
+    );
+
+    if (existingEnglish.length > 0) {
+      return res.status(409).json('A filter with this English name already exists');
+    }
+
+    const [existingSpanish] = await mysqlConnection.promise().query(
+      'SELECT id FROM filter WHERE name_es = ? AND id != ? LIMIT 1',
+      [nameSpanish, id]
+    );
+
+    if (existingSpanish.length > 0) {
+      return res.status(409).json('A filter with this Spanish name already exists');
+    }
+
+    const [updateResult] = await mysqlConnection.promise().query(
+      'UPDATE filter SET name_en = ?, name_es = ?, modification_date = CURRENT_TIMESTAMP WHERE id = ?',
+      [nameEnglish, nameSpanish, id]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    const [updated] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        name_en,
+        name_es,
+        DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+        DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+      FROM filter
+      WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      id: updated[0].id,
+      nameEnglish: updated[0].name_en,
+      nameSpanish: updated[0].name_es,
+      createdAt: updated[0].created_at,
+      updatedAt: updated[0].updated_at,
+      articles: []
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error updating filter:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.delete('/filters/:id', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [relations] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) as count
+      FROM article_filter af
+      INNER JOIN article a ON a.id = af.article_id
+      WHERE af.filter_id = ?`,
+      [id]
+    );
+
+    if (relations[0].count > 0) {
+      return res.status(409).json('Cannot delete filter: it has associated articles. Update those articles first.');
+    }
+
+    const [deleteResult] = await mysqlConnection.promise().query(
+      'DELETE FROM filter WHERE id = ?',
+      [id]
+    );
+
+    if (deleteResult.affectedRows === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    res.json({ message: 'Filter deleted successfully' });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting filter:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
 // Get all tags
 router.get('/tags', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
