@@ -3259,12 +3259,23 @@ router.get('/locations', verifyToken, async (req, res) => {
 
       // Si es delivery y withFilterEvent es true, filtrar por eventos del día actual
       if (cabecera.role === 'delivery' && withFilterEvent) {
-        whereClause = ` where id IN (
-          SELECT location_id 
-          FROM calendar_event 
-          WHERE date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
-          AND enabled = 'Y'
+        whereClause = ` where (
+          id IN (
+            SELECT location_id
+            FROM calendar_event
+            WHERE date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
+              AND enabled = 'Y'
+          )
+          OR id = (
+            SELECT u.location_id
+            FROM user AS u
+            WHERE u.id = ?
+              AND u.user_status_id = 3
+              AND u.location_id IS NOT NULL
+            LIMIT 1
+          )
         )`;
+        params.push(cabecera.id);
       }
 
       query += whereClause + ' order by community_city';
@@ -4209,7 +4220,7 @@ router.get('/user/location', verifyToken, async (req, res) => {
   if (cabecera.role === 'delivery' || cabecera.role === 'beneficiary') {
     try {
       const [rows] = await mysqlConnection.promise().query(
-        'select location.id, location.organization, location.community_city, location.address \
+        'select location.id, location.organization, location.community_city, location.address, ST_Y(location.coordinates) as latitude, ST_X(location.coordinates) as longitude \
         from user \
         inner join location on user.location_id = location.id \
         where user.id = ?',
@@ -4218,7 +4229,7 @@ router.get('/user/location', verifyToken, async (req, res) => {
       if (rows.length > 0) {
         res.json(rows[0]);
       } else {
-        res.json({ id: null, organization: null, community_city: null, address: null });
+        res.json({ id: null, organization: null, community_city: null, address: null, latitude: null, longitude: null });
       }
     } catch (err) {
       console.log(err);
