@@ -26974,7 +26974,7 @@ router.get('/trusted-resources/public', async (req, res) => {
       ${filterJoin}
       ${scheduleJoin}
       WHERE ${whereClause}
-      ORDER BY tr.created_at DESC
+      ORDER BY tr.title_english ASC
       LIMIT ? OFFSET ?
     `;
     queryParams.push(pageSizeNum, offset);
