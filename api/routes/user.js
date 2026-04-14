@@ -20889,6 +20889,107 @@ function cleanExpiredCache() {
   }
 }
 
+const CATALOG_ICON_ALLOWED_TYPES = new Set(['image/svg+xml', 'image/png']);
+const CATALOG_ICON_MAX_SIZE = 1024 * 1024;
+
+const catalogIconUpload = multer({
+  storage: storage,
+  limits: {
+    fileSize: CATALOG_ICON_MAX_SIZE,
+    files: 1
+  },
+  fileFilter: (req, file, callback) => {
+    const normalizedName = (file.originalname || '').toLowerCase();
+    const hasAllowedExtension = normalizedName.endsWith('.svg') || normalizedName.endsWith('.png');
+    const hasAllowedMimeType = CATALOG_ICON_ALLOWED_TYPES.has(file.mimetype);
+
+    if (!hasAllowedExtension && !hasAllowedMimeType) {
+      return callback(new Error('Only SVG and PNG icons are allowed'));
+    }
+
+    callback(null, true);
+  }
+}).single('icon');
+
+function handleCatalogIconUpload(req, res, next) {
+  catalogIconUpload(req, res, (error) => {
+    if (!error) {
+      return next();
+    }
+
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? 'Icon file must be 1 MB or less'
+      : (error.message || 'Invalid icon upload');
+
+    return res.status(400).json(message);
+  });
+}
+
+function getCatalogIconExtension(file) {
+  const normalizedName = (file.originalname || '').toLowerCase();
+
+  if (file.mimetype === 'image/svg+xml' || normalizedName.endsWith('.svg')) {
+    return '.svg';
+  }
+
+  return '.png';
+}
+
+async function uploadCatalogIconToS3(file, prefix) {
+  const extension = getCatalogIconExtension(file);
+  const iconKey = `${prefix}/${randomImageName(16)}${extension}`;
+  const contentType = extension === '.svg' ? 'image/svg+xml' : 'image/png';
+
+  await s3.send(new PutObjectCommand({
+    Bucket: bucketName,
+    Key: iconKey,
+    Body: file.buffer,
+    ContentType: contentType
+  }));
+
+  return iconKey;
+}
+
+async function getCatalogIconUrl(iconS3Key) {
+  if (!iconS3Key) {
+    return null;
+  }
+
+  return getSignedUrlForImage(iconS3Key);
+}
+
+async function deleteCatalogIconFromS3(iconS3Key, label = 'catalog icon') {
+  if (!iconS3Key) {
+    return;
+  }
+
+  try {
+    await deleteS3Objects([iconS3Key]);
+  } catch (error) {
+    console.log(`Error deleting ${label} from S3:`, error);
+    logger.error(`Error deleting ${label} from S3:`, error);
+  }
+}
+
+async function buildCatalogIconUrlMap(rows, keyName = 'icon_s3_key') {
+  const iconKeys = rows.map(row => row[keyName]).filter(Boolean);
+
+  if (iconKeys.length === 0) {
+    return new Map();
+  }
+
+  const signedUrls = await getSignedUrlsForImages(iconKeys);
+  const urlMap = new Map();
+
+  iconKeys.forEach((key, index) => {
+    if (signedUrls[index]) {
+      urlMap.set(key, signedUrls[index]);
+    }
+  });
+
+  return urlMap;
+}
+
 // Helper function to generate slug from tag name
 function generateTagSlug(name) {
   return name
@@ -22753,7 +22854,8 @@ router.get('/categories', async (req, res) => {
     const query = `
       SELECT 
       id,
-      ${lang === 'en' ? 'name_en' : 'name_es'} AS name
+      ${lang === 'en' ? 'name_en' : 'name_es'} AS name,
+      icon_s3_key
       FROM category
       ${withArticlesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM article_category ac INNER JOIN article a ON a.id = ac.article_id WHERE ac.category_id = category.id AND a.article_status_id = 2)' : ''}
       ORDER BY name ASC
@@ -22762,7 +22864,12 @@ router.get('/categories', async (req, res) => {
     const [rows] = await mysqlConnection.promise().query(query, [lang]);
 
     if (rows.length > 0) {
-      res.status(200).json(rows);
+      const iconUrlMap = await buildCatalogIconUrlMap(rows);
+      res.status(200).json(rows.map(row => ({
+        id: row.id,
+        name: row.name,
+        iconUrl: row.icon_s3_key ? iconUrlMap.get(row.icon_s3_key) || null : null
+      })));
     } else {
       res.status(404).json('categories not found');
     }
@@ -22917,6 +23024,7 @@ router.get('/categories/paginated', verifyToken, async (req, res) => {
         c.id,
         c.name_en,
         c.name_es,
+        c.icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(c.creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         (
           SELECT COUNT(*)
@@ -22931,11 +23039,14 @@ router.get('/categories/paginated', verifyToken, async (req, res) => {
       [...queryParams, pageSizeNum, offset]
     );
 
+    const iconUrlMap = await buildCatalogIconUrlMap(rows);
+
     res.json({
       results: rows.map(row => ({
         id: row.id,
         nameEnglish: row.name_en,
         nameSpanish: row.name_es,
+        iconUrl: row.icon_s3_key ? iconUrlMap.get(row.icon_s3_key) || null : null,
         createdAt: row.created_at,
         articleCount: row.article_count
       })),
@@ -22966,6 +23077,7 @@ router.get('/categories/:id', verifyToken, async (req, res) => {
         id,
         name_en,
         name_es,
+        icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM category
@@ -22995,6 +23107,7 @@ router.get('/categories/:id', verifyToken, async (req, res) => {
       id: categories[0].id,
       nameEnglish: categories[0].name_en,
       nameSpanish: categories[0].name_es,
+      iconUrl: await getCatalogIconUrl(categories[0].icon_s3_key),
       createdAt: categories[0].created_at,
       updatedAt: categories[0].updated_at,
       articles: articles.map(article => ({
@@ -23057,6 +23170,7 @@ router.post('/categories', verifyToken, async (req, res) => {
         id,
         name_en,
         name_es,
+        icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM category
@@ -23068,6 +23182,7 @@ router.post('/categories', verifyToken, async (req, res) => {
       id: created[0].id,
       nameEnglish: created[0].name_en,
       nameSpanish: created[0].name_es,
+      iconUrl: await getCatalogIconUrl(created[0].icon_s3_key),
       createdAt: created[0].created_at,
       updatedAt: created[0].updated_at,
       articles: []
@@ -23130,6 +23245,7 @@ router.put('/categories/:id', verifyToken, async (req, res) => {
         id,
         name_en,
         name_es,
+        icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
       FROM category
@@ -23141,6 +23257,7 @@ router.put('/categories/:id', verifyToken, async (req, res) => {
       id: updated[0].id,
       nameEnglish: updated[0].name_en,
       nameSpanish: updated[0].name_es,
+      iconUrl: await getCatalogIconUrl(updated[0].icon_s3_key),
       createdAt: updated[0].created_at,
       updatedAt: updated[0].updated_at,
       articles: []
@@ -23148,6 +23265,86 @@ router.put('/categories/:id', verifyToken, async (req, res) => {
   } catch (err) {
     console.log(err);
     logger.error('Error updating category:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/categories/:id/icon', verifyToken, handleCatalogIconUpload, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json('Icon file is required');
+    }
+
+    const [categories] = await mysqlConnection.promise().query(
+      'SELECT id, icon_s3_key FROM category WHERE id = ? LIMIT 1',
+      [id]
+    );
+
+    if (categories.length === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    const previousIconKey = categories[0].icon_s3_key;
+    const iconS3Key = await uploadCatalogIconToS3(req.file, `catalog-icons/categories/${id}`);
+
+    await mysqlConnection.promise().query(
+      'UPDATE category SET icon_s3_key = ?, modification_date = CURRENT_TIMESTAMP WHERE id = ?',
+      [iconS3Key, id]
+    );
+
+    if (previousIconKey) {
+      await deleteCatalogIconFromS3(previousIconKey, 'category icon');
+    }
+
+    res.json({
+      iconUrl: await getCatalogIconUrl(iconS3Key),
+      iconS3Key
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error uploading category icon:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.delete('/categories/:id/icon', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [categories] = await mysqlConnection.promise().query(
+      'SELECT id, icon_s3_key FROM category WHERE id = ? LIMIT 1',
+      [id]
+    );
+
+    if (categories.length === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+
+    if (categories[0].icon_s3_key) {
+      await deleteCatalogIconFromS3(categories[0].icon_s3_key, 'category icon');
+    }
+
+    await mysqlConnection.promise().query(
+      'UPDATE category SET icon_s3_key = NULL, modification_date = CURRENT_TIMESTAMP WHERE id = ?',
+      [id]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting category icon:', err);
     res.status(500).json('Internal server error');
   }
 });
@@ -23173,6 +23370,11 @@ router.delete('/categories/:id', verifyToken, async (req, res) => {
       return res.status(409).json('Cannot delete category: it has associated articles. Update those articles first.');
     }
 
+    const [categoryRows] = await mysqlConnection.promise().query(
+      'SELECT icon_s3_key FROM category WHERE id = ? LIMIT 1',
+      [id]
+    );
+
     const [deleteResult] = await mysqlConnection.promise().query(
       'DELETE FROM category WHERE id = ?',
       [id]
@@ -23180,6 +23382,10 @@ router.delete('/categories/:id', verifyToken, async (req, res) => {
 
     if (deleteResult.affectedRows === 0) {
       return res.status(404).json({ message: 'Category not found' });
+    }
+
+    if (categoryRows[0]?.icon_s3_key) {
+      await deleteCatalogIconFromS3(categoryRows[0].icon_s3_key, 'category icon');
     }
 
     res.json({ message: 'Category deleted successfully' });
@@ -26011,16 +26217,19 @@ router.get('/trusted-resources/filters', async (req, res) => {
       : withResourcesOnly === true;
 
     const [filters] = await mysqlConnection.promise().query(
-      `SELECT id, name_english, name_spanish
+      `SELECT id, name_english, name_spanish, icon_s3_key
        FROM resource_filters
        ${withResourcesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM resource_filter_relations rfr WHERE rfr.filter_id = resource_filters.id)' : ''}
        ORDER BY name_english`
     );
 
+    const iconUrlMap = await buildCatalogIconUrlMap(filters);
+
     const formattedFilters = filters.map(filter => ({
       id: filter.id,
       nameEnglish: filter.name_english,
-      nameSpanish: filter.name_spanish
+      nameSpanish: filter.name_spanish,
+      iconUrl: filter.icon_s3_key ? iconUrlMap.get(filter.icon_s3_key) || null : null
     }));
 
     res.json(formattedFilters);
@@ -26157,7 +26366,7 @@ router.get('/trusted-resources/filters/paginated', verifyToken, async (req, res)
 
     // Get paginated results with resource count
     const [filters] = await mysqlConnection.promise().query(
-      `SELECT rf.id, rf.name_english, rf.name_spanish,
+      `SELECT rf.id, rf.name_english, rf.name_spanish, rf.icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(rf.created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         (SELECT COUNT(*) FROM resource_filter_relations rfr WHERE rfr.filter_id = rf.id) as resource_count
        FROM resource_filters rf
@@ -26167,10 +26376,13 @@ router.get('/trusted-resources/filters/paginated', verifyToken, async (req, res)
       [...queryParams, pageSizeNum, offset]
     );
 
+    const iconUrlMap = await buildCatalogIconUrlMap(filters);
+
     const formattedFilters = filters.map(filter => ({
       id: filter.id,
       nameEnglish: filter.name_english,
       nameSpanish: filter.name_spanish,
+      iconUrl: filter.icon_s3_key ? iconUrlMap.get(filter.icon_s3_key) || null : null,
       createdAt: filter.created_at,
       resourceCount: filter.resource_count
     }));
@@ -26202,7 +26414,7 @@ router.get('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
     const { id } = req.params;
 
     const [filters] = await mysqlConnection.promise().query(
-      `SELECT id, name_english, name_spanish,
+      `SELECT id, name_english, name_spanish, icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
        FROM resource_filters WHERE id = ? LIMIT 1`,
@@ -26230,6 +26442,7 @@ router.get('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
       id: filter.id,
       nameEnglish: filter.name_english,
       nameSpanish: filter.name_spanish,
+      iconUrl: await getCatalogIconUrl(filter.icon_s3_key),
       createdAt: filter.created_at,
       updatedAt: filter.updated_at,
       trustedResources: resources.map(r => ({
@@ -26281,7 +26494,7 @@ router.post('/trusted-resources/filters', verifyToken, async (req, res) => {
     );
 
     const [created] = await mysqlConnection.promise().query(
-      `SELECT id, name_english, name_spanish,
+      `SELECT id, name_english, name_spanish, icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
        FROM resource_filters WHERE id = ?`,
@@ -26292,6 +26505,7 @@ router.post('/trusted-resources/filters', verifyToken, async (req, res) => {
       id: created[0].id,
       nameEnglish: created[0].name_english,
       nameSpanish: created[0].name_spanish,
+      iconUrl: await getCatalogIconUrl(created[0].icon_s3_key),
       createdAt: created[0].created_at,
       updatedAt: created[0].updated_at
     });
@@ -26342,7 +26556,7 @@ router.put('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
     }
 
     const [updated] = await mysqlConnection.promise().query(
-      `SELECT id, name_english, name_spanish,
+      `SELECT id, name_english, name_spanish, icon_s3_key,
         DATE_FORMAT(CONVERT_TZ(created_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
         DATE_FORMAT(CONVERT_TZ(updated_at, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
        FROM resource_filters WHERE id = ?`,
@@ -26353,6 +26567,7 @@ router.put('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
       id: updated[0].id,
       nameEnglish: updated[0].name_english,
       nameSpanish: updated[0].name_spanish,
+      iconUrl: await getCatalogIconUrl(updated[0].icon_s3_key),
       createdAt: updated[0].created_at,
       updatedAt: updated[0].updated_at
     });
@@ -26360,6 +26575,86 @@ router.put('/trusted-resources/filters/:id', verifyToken, async (req, res) => {
   } catch (err) {
     console.log(err);
     logger.error('Error updating filter:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/trusted-resources/filters/:id/icon', verifyToken, handleCatalogIconUpload, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json('Icon file is required');
+    }
+
+    const [filters] = await mysqlConnection.promise().query(
+      'SELECT id, icon_s3_key FROM resource_filters WHERE id = ? LIMIT 1',
+      [id]
+    );
+
+    if (filters.length === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    const previousIconKey = filters[0].icon_s3_key;
+    const iconS3Key = await uploadCatalogIconToS3(req.file, `catalog-icons/trusted-resource-filters/${id}`);
+
+    await mysqlConnection.promise().query(
+      'UPDATE resource_filters SET icon_s3_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [iconS3Key, id]
+    );
+
+    if (previousIconKey) {
+      await deleteCatalogIconFromS3(previousIconKey, 'trusted resource filter icon');
+    }
+
+    res.json({
+      iconUrl: await getCatalogIconUrl(iconS3Key),
+      iconS3Key
+    });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error uploading trusted resource filter icon:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.delete('/trusted-resources/filters/:id/icon', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin' && cabecera.role !== 'contentmanager') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [filters] = await mysqlConnection.promise().query(
+      'SELECT id, icon_s3_key FROM resource_filters WHERE id = ? LIMIT 1',
+      [id]
+    );
+
+    if (filters.length === 0) {
+      return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    if (filters[0].icon_s3_key) {
+      await deleteCatalogIconFromS3(filters[0].icon_s3_key, 'trusted resource filter icon');
+    }
+
+    await mysqlConnection.promise().query(
+      'UPDATE resource_filters SET icon_s3_key = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [id]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting trusted resource filter icon:', err);
     res.status(500).json('Internal server error');
   }
 });
@@ -26384,6 +26679,11 @@ router.delete('/trusted-resources/filters/:id', verifyToken, async (req, res) =>
       return res.status(409).json('Cannot delete filter: it has associated trusted resources. Remove the associations first.');
     }
 
+    const [filterRows] = await mysqlConnection.promise().query(
+      'SELECT icon_s3_key FROM resource_filters WHERE id = ? LIMIT 1',
+      [id]
+    );
+
     const [deleteResult] = await mysqlConnection.promise().query(
       'DELETE FROM resource_filters WHERE id = ?',
       [id]
@@ -26391,6 +26691,10 @@ router.delete('/trusted-resources/filters/:id', verifyToken, async (req, res) =>
 
     if (deleteResult.affectedRows === 0) {
       return res.status(404).json({ message: 'Filter not found' });
+    }
+
+    if (filterRows[0]?.icon_s3_key) {
+      await deleteCatalogIconFromS3(filterRows[0].icon_s3_key, 'trusted resource filter icon');
     }
 
     res.json({ message: 'Filter deleted successfully' });
