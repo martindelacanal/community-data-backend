@@ -28496,7 +28496,7 @@ router.get('/web-images/public', async (req, res) => {
       return res.json([]);
     }
 
-    // Generate signed URLs for each image
+    // Generate signed URLs for each image (original + responsive variants)
     const imagesWithUrls = await Promise.all(
       rows.map(async (image) => {
         try {
@@ -28508,8 +28508,7 @@ router.get('/web-images/public', async (req, res) => {
           const command = new GetObjectCommand(getObjectParams);
           const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // URL expires in 1 hour
 
-          // Return image data with URL instead of file_hash
-          return {
+          const result = {
             id: image.id,
             mime_type: image.mime_type,
             original_filename: image.original_filename,
@@ -28517,8 +28516,34 @@ router.get('/web-images/public', async (req, res) => {
             alt_text_es: image.alt_text_es,
             modification_date: image.modification_date,
             creation_date: image.creation_date,
-            url: url
+            url: url,
+            url_sm: null,
+            url_md: null,
+            url_lg: null
           };
+
+          // Generate signed URLs for responsive variants (sm, md, lg)
+          const variants = [
+            { field: 'file_hash_sm', urlField: 'url_sm' },
+            { field: 'file_hash_md', urlField: 'url_md' },
+            { field: 'file_hash_lg', urlField: 'url_lg' }
+          ];
+
+          for (const variant of variants) {
+            if (image[variant.field]) {
+              try {
+                const variantCommand = new GetObjectCommand({
+                  Bucket: bucketName,
+                  Key: image[variant.field]
+                });
+                result[variant.urlField] = await getSignedUrl(s3, variantCommand, { expiresIn: 3600 });
+              } catch (variantErr) {
+                logger.error(`Error generating signed URL for ${variant.field}:`, image[variant.field], variantErr);
+              }
+            }
+          }
+
+          return result;
         } catch (error) {
           logger.error('Error generating signed URL for web image:', image.file_hash, error);
           // Return image data with null URL if there's an error
@@ -28530,7 +28555,10 @@ router.get('/web-images/public', async (req, res) => {
             alt_text_es: image.alt_text_es,
             modification_date: image.modification_date,
             creation_date: image.creation_date,
-            url: null
+            url: null,
+            url_sm: null,
+            url_md: null,
+            url_lg: null
           };
         }
       })
