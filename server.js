@@ -15,9 +15,10 @@ const {
     isHealthMetricsDriveSyncEnabled,
     syncScheduledDriveCsvsToDrive
 } = require('./api/services/healthMetricsDriveSync');
-
-const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
-const { parse } = require('csv-parse/sync');
+const {
+    getRawDataExcel,
+    EXCLUDED_REPORT_USER_IDS
+} = require('./api/services/rawDataReport');
 
 const XLSX = require('xlsx-js-style');
 
@@ -37,229 +38,27 @@ schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
     `);
 });
 
-async function getRawDataExcel(from_date, to_date, client_id) {
-    // Ensure from_date and to_date include time for accurate BETWEEN comparison with CONVERT_TZ
-    const params = [
-        client_id,
-        client_id,
-        from_date, // Expected format: 'YYYY-MM-DD HH:mm:ss'
-        to_date,   // Expected format: 'YYYY-MM-DD HH:mm:ss'
-        from_date, // Expected format: 'YYYY-MM-DD HH:mm:ss'
-        to_date,   // Expected format: 'YYYY-MM-DD HH:mm:ss'
-    ];
+function getUniqueRawDataRecordsByUserId(records) {
+    const uniqueRecordsByUserId = new Map();
 
-    const [rows] = await mysqlConnection.promise().query(
-        `SELECT
-                u.id as user_id,
-                u.username,
-                u.email,
-                u.firstname,
-                u.lastname,
-                DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
-                u.phone,
-                u.zipcode,
-                u.household_size,
-                g.name AS gender,
-                eth.name AS ethnicity,
-                u.other_ethnicity,
-                loc.community_city AS last_location_visited,
-                (SELECT GROUP_CONCAT(DISTINCT loc_visited.community_city)
-                        FROM delivery_beneficiary AS db_visited
-                        LEFT JOIN location AS loc_visited ON db_visited.location_id = loc_visited.id
-                        WHERE db_visited.receiving_user_id = u.id) AS locations_visited,
-                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
-                DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time,
-                q.question_id AS question_id,
-                q.answer_type_id AS answer_type_id,
-                q.question AS question,
-                a.name AS answer,
-                uq.answer_text AS answer_text,
-                uq.answer_number AS answer_number,
-                EXISTS (
-                    SELECT 1
-                    FROM client_location cl_first
-                    WHERE cl_first.location_id = u.first_location_id
-                      AND cl_first.client_id = cu.client_id
-                ) AS registered_at_client_location_flag
-        FROM user u
-        INNER JOIN client_user cu ON u.id = cu.user_id
-        INNER JOIN gender AS g ON u.gender_id = g.id
-        INNER JOIN ethnicity AS eth ON u.ethnicity_id = eth.id
-        LEFT JOIN location AS loc ON u.location_id = loc.id
-        CROSS JOIN (
-            SELECT DISTINCT
-                q.id AS question_id,
-                q.answer_type_id,
-                q.name AS question,
-                q.\`order\` AS question_order
-            FROM question AS q
-            INNER JOIN question_location AS ql
-                ON ql.question_id = q.id
-               AND ql.enabled = 'Y'
-            INNER JOIN client_location AS cl
-                ON cl.location_id = ql.location_id
-               AND cl.client_id = ?
-            WHERE q.enabled = 'Y'
-        ) AS q
-        LEFT JOIN user_question AS uq ON uq.id = (
-            SELECT uq_latest.id
-            FROM user_question AS uq_latest
-            WHERE uq_latest.user_id = u.id
-              AND uq_latest.question_id = q.question_id
-            ORDER BY uq_latest.id DESC
-            LIMIT 1
-        )
-        LEFT JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-        LEFT JOIN answer as a ON a.id = uqa.answer_id and a.question_id = q.question_id
-        WHERE u.role_id = 5
-          AND cu.client_id = ?
-          AND (
-              CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
-              OR
-              u.id IN (
-                  SELECT db3.receiving_user_id
-                  FROM delivery_beneficiary db3
-                  INNER JOIN location loc3 ON db3.location_id = loc3.id
-                  INNER JOIN client_location cl3 ON loc3.id = cl3.location_id
-                  WHERE CONVERT_TZ(db3.creation_date, '+00:00', 'America/Los_Angeles') BETWEEN ? AND ?
-                    AND cl3.client_id = cu.client_id
-              )
-          )
-        ORDER BY u.id, q.question_order, q.question_id, a.\`order\`, a.id`,
-        params
-    );
-    // agregar a headers las preguntas de la encuesta, iterar el array rows y agregar el campo question hasta que se vuelva a repetir el question_id 
-    var question_id_array = [];
-
-    if (rows.length > 0) {
-        for (let i = 0; i < rows.length; i++) {
-            const row = rows[i];
-            // si el id de la pregunta no esta en el question_id_array, agregarlo
-            const id_repetido = question_id_array.some(obj => obj.question_id === row.question_id);
-            if (!id_repetido) {
-                question_id_array.push({ question_id: row.question_id, question: row.question });
-            }
-        }
-    }
-
-    /* iterar el array rows y agregar los campos username, email, firstname, lastname, date_of_birth, phone, zipcode, household_size, gender, ethnicity, other_ethnicity, location, registration_date, registration_time
-    y que cada pregunta sea una columna, si el question_id se repite entonces agregar el campo answer a la columna correspondiente agregando al final del campo texto separando el valor por coma, si no se repite entonces agregar el campo answer a la columna correspondiente y agregar el objeto a rows_filtered
-    */
-    var rows_filtered = [];
-    var row_filtered = {};
-    for (let i = 0; i < rows.length; i++) {
-
-        if (!row_filtered["username"]) {
-            row_filtered["user_id"] = rows[i].user_id;
-            row_filtered["username"] = rows[i].username;
-            row_filtered["email"] = rows[i].email;
-            row_filtered["firstname"] = rows[i].firstname;
-            row_filtered["lastname"] = rows[i].lastname;
-            row_filtered["date_of_birth"] = rows[i].date_of_birth;
-            row_filtered["phone"] = rows[i].phone;
-            row_filtered["zipcode"] = rows[i].zipcode;
-            row_filtered["household_size"] = rows[i].household_size;
-            row_filtered["gender"] = rows[i].gender;
-            row_filtered["ethnicity"] = rows[i].ethnicity;
-            row_filtered["other_ethnicity"] = rows[i].other_ethnicity;
-            row_filtered["last_location_visited"] = rows[i].last_location_visited;
-            row_filtered["locations_visited"] = rows[i].locations_visited;
-            row_filtered["registration_date"] = rows[i].registration_date;
-            row_filtered["registration_time"] = rows[i].registration_time;
-            row_filtered["registered_at_client_location"] = rows[i].registered_at_client_location_flag ? '1' : '0';
-        }
-        if (!row_filtered[rows[i].question_id]) {
-
-            switch (rows[i].answer_type_id) {
-                case 1:
-                    row_filtered[rows[i].question_id] = rows[i].answer_text;
-                    break;
-                case 2:
-                    row_filtered[rows[i].question_id] = rows[i].answer_number;
-                    break;
-                case 3:
-                    row_filtered[rows[i].question_id] = rows[i].answer;
-                    break;
-                case 4:
-                    row_filtered[rows[i].question_id] = rows[i].answer;
-                    break;
-                default:
-                    break;
-            }
-        } else {
-            // es un answer_type_id = 4, agregar el campo answer al final del campo texto separando el valor por coma
-            row_filtered[rows[i].question_id] = row_filtered[rows[i].question_id] + ', ' + rows[i].answer;
-        }
-        if (i < rows.length - 1) {
-            if (rows[i].username !== rows[i + 1].username) {
-                rows_filtered.push(row_filtered);
-                row_filtered = {};
-            }
-        } else {
-            rows_filtered.push(row_filtered);
-            row_filtered = {};
-        }
-    }
-    // iterar el array headers y convertirlo en un array de objetos con id y title para csvWriter
-    // En lugar de usar csvStringifier, crear un workbook de Excel
-    const workbook = XLSX.utils.book_new();
-
-    // Crear las cabeceras
-    const headers = [
-        'User ID', 'Username', 'Email', 'Firstname', 'Lastname', 'Date of birth',
-        'Phone', 'Zipcode', 'Household size', 'Gender', 'Ethnicity', 'Other ethnicity',
-        'Last location visited', 'Locations visited', 'Registration date', 'Registration time',
-        'Registered at Client Location'
-    ];
-
-    // Agregar las preguntas como headers
-    for (let i = 0; i < question_id_array.length; i++) {
-        headers.push(question_id_array[i].question);
-    }
-
-    // Crear los datos para Excel
-    const excelData = [];
-    excelData.push(headers); // Primera fila con headers
-
-    // Agregar los datos
-    rows_filtered.forEach(row => {
-        const excelRow = [
-            row.user_id,
-            row.username,
-            row.email,
-            row.firstname,
-            row.lastname,
-            row.date_of_birth,
-            row.phone,
-            row.zipcode,
-            row.household_size,
-            row.gender,
-            row.ethnicity,
-            row.other_ethnicity,
-            row.last_location_visited,
-            row.locations_visited,
-            row.registration_date,
-            row.registration_time,
-            row.registered_at_client_location
-        ];
-
-        // Agregar las respuestas de las preguntas
-        for (let i = 0; i < question_id_array.length; i++) {
-            const questionId = question_id_array[i].question_id;
-            excelRow.push(row[questionId] || '');
+    records.forEach(record => {
+        const userId = Number(record['User ID']);
+        if (Number.isNaN(userId) || uniqueRecordsByUserId.has(userId)) {
+            return;
         }
 
-        excelData.push(excelRow);
+        uniqueRecordsByUserId.set(userId, record);
     });
 
-    // Crear worksheet
-    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Raw Data');
+    return Array.from(uniqueRecordsByUserId.values());
+}
 
-    // Convertir a buffer
-    const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+function appendExcludedReportUserFilter(query, alias = 'u') {
+    if (!Array.isArray(EXCLUDED_REPORT_USER_IDS) || EXCLUDED_REPORT_USER_IDS.length === 0) {
+        return query;
+    }
 
-    return excelBuffer;
+    return `${query}\n              AND ${alias}.id NOT IN (${EXCLUDED_REPORT_USER_IDS.map(() => '?').join(',')})`;
 }
 
 async function getNewRegistrationsExcel(excelRawData, from_date, to_date) {
@@ -267,8 +66,9 @@ async function getNewRegistrationsExcel(excelRawData, from_date, to_date) {
     const workbook = XLSX.read(excelRawData, { type: 'buffer' });
     const worksheet = workbook.Sheets['Raw Data'];
     const jsonData = XLSX.utils.sheet_to_json(worksheet);
+    const uniqueJsonData = getUniqueRawDataRecordsByUserId(jsonData);
 
-    if (jsonData.length === 0) {
+    if (uniqueJsonData.length === 0) {
         return Buffer.alloc(0);
     }
 
@@ -277,7 +77,7 @@ async function getNewRegistrationsExcel(excelRawData, from_date, to_date) {
     const toDate = moment(to_date, "YYYY-MM-DD").endOf('day');
 
     // Filtrar las filas según registration_date dentro del rango
-    const filteredRecords = jsonData.filter(record => {
+    const filteredRecords = uniqueJsonData.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
         return registrationDate.isBetween(fromDate, toDate, 'day', '[]');
     });
@@ -296,8 +96,9 @@ async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from
     const workbook = XLSX.read(excelRawData, { type: 'buffer' });
     const worksheet = workbook.Sheets['Raw Data'];
     const jsonData = XLSX.utils.sheet_to_json(worksheet);
+    const uniqueJsonData = getUniqueRawDataRecordsByUserId(jsonData);
 
-    if (jsonData.length === 0) {
+    if (uniqueJsonData.length === 0) {
         return Buffer.alloc(0);
     }
 
@@ -306,7 +107,7 @@ async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from
     const toDate = moment(to_date, "YYYY-MM-DD").endOf('day');
 
     // Filtrar las filas sin seguro de salud y con registration_date dentro del rango
-    const filteredRecords = jsonData.filter(record => {
+    const filteredRecords = uniqueJsonData.filter(record => {
         const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
         return registrationDate.isBetween(fromDate, toDate, 'day', '[]') &&
             (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '');
@@ -325,6 +126,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
     const workbook = XLSX.read(excelRawData, { type: 'buffer' });
     const worksheet = workbook.Sheets['Raw Data'];
     const records = XLSX.utils.sheet_to_json(worksheet);
+    const uniqueRecords = getUniqueRawDataRecordsByUserId(records);
 
     // Fetch client name
     let clientName = 'Unknown Client';
@@ -374,11 +176,12 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         const newParams = [
             from_date,
             to_date,
+            ...EXCLUDED_REPORT_USER_IDS,
             ...(hasLocationFilter ? locationIds : [])
         ];
 
         const [newRows] = await mysqlConnection.promise().query(
-            `
+            appendExcludedReportUserFilter(`
             SELECT DISTINCT u.id AS user_id
             FROM user u
             WHERE u.role_id = 5
@@ -386,7 +189,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
               AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ?
               AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
               ${hasLocationFilter ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
-            `,
+            `),
             newParams
         );
 
@@ -400,6 +203,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         const recurringParams = [
             from_date,
             to_date,
+            ...EXCLUDED_REPORT_USER_IDS,
             ...(hasLocationFilter ? locationIds : []), // db_range.location_id filter
             ...(hasLocationFilter ? locationIds : []), // db_prev_original.location_id filter
             from_date,
@@ -407,7 +211,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
             from_date
         ];
         const [recurringRows] = await mysqlConnection.promise().query(
-            `
+            appendExcludedReportUserFilter(`
             SELECT COUNT(DISTINCT u.id) AS recurring
             FROM delivery_beneficiary db_range
             INNER JOIN user u ON db_range.receiving_user_id = u.id
@@ -433,10 +237,10 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
                           FROM delivery_beneficiary db_no_past
                           WHERE db_no_past.receiving_user_id = u.id
                             AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                          )
                       )
                   )
-              )
-            `,
+            `),
             recurringParams
         );
         recurringCount = (recurringRows[0] && recurringRows[0].recurring) || 0;
@@ -445,9 +249,9 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
     }
 
     // Health plan breakdown scoped to the users counted as "new"
-    if (newUserIds.length > 0 && records.length > 0) {
+    if (newUserIds.length > 0 && uniqueRecords.length > 0) {
         const newUserIdsSet = new Set(newUserIds);
-        records.forEach(record => {
+        uniqueRecords.forEach(record => {
             const recordUserId = Number(record['User ID']);
             if (Number.isNaN(recordUserId)) {
                 return;
@@ -493,12 +297,13 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
                   AND u.enabled = 'Y'
                   AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ?
                   AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                  ${EXCLUDED_REPORT_USER_IDS.length > 0 ? `AND u.id NOT IN (${EXCLUDED_REPORT_USER_IDS.map(() => '?').join(',')})` : ''}
                   AND u.first_location_id IN (${locationPlaceholders})
                 GROUP BY u.first_location_id;`;
 
             const [newLocRows] = await mysqlConnection.promise().query(
                 newPerLocationQuery,
-                [from_date, to_date, ...locationIds]
+                [from_date, to_date, ...EXCLUDED_REPORT_USER_IDS, ...locationIds]
             );
             newLocRows.forEach(row => { newPerLocationMap[row.location_id] = row.new_count; });
         }
@@ -517,6 +322,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
                 WHERE u.role_id = 5 AND u.enabled = 'Y'
                   AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') >= ?
                   AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
+                  ${EXCLUDED_REPORT_USER_IDS.length > 0 ? `AND u.id NOT IN (${EXCLUDED_REPORT_USER_IDS.map(() => '?').join(',')})` : ''}
                   AND db_range.location_id IN (${locationPlaceholders})
                   AND (
                       EXISTS (
@@ -543,6 +349,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
             const recurringPerLocationParams = [
                 from_date,
                 to_date,
+                ...EXCLUDED_REPORT_USER_IDS,
                 ...locationIds, // db_range.location_id
                 ...locationIds, // db_prev.location_id
                 from_date,

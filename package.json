@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "serve": "nodemon server.js",
     "start": "node server.js",
-    "drive-csv:sync-all": "node scripts/syncScheduledDriveCsvs.js"
+    "drive-csv:sync-all": "node scripts/syncScheduledDriveCsvs.js",
+    "report:historical:raw-data": "node scripts/generateHistoricalRawDataReport.js"
   },
   "keywords": [],
   "author": "",
