@@ -28,7 +28,7 @@ const VARIANTS = [
   { suffix: 'lg', maxWidth: 1440 },  // desktop 1×, tablets 2×
 ];
 
-const JPEG_QUALITY = 100;
+const JPEG_QUALITY = 80;
 
 // ── AWS S3 ─────────────────────────────────────────────────────────────────────
 
