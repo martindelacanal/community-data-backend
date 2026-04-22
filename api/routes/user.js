@@ -1623,6 +1623,10 @@ router.put('/beneficiary/reset-password', async (req, res) => {
   try {
     const { email } = req.body;
     const { dateOfBirth } = req.body;
+    
+    if (!email || !dateOfBirth) {
+      return res.status(400).json('Email and date of birth are required');
+    }
 
     const [rows] = await mysqlConnection.promise().query('SELECT user.id \
                                                           FROM user \
