@@ -483,6 +483,7 @@ router.post('/signup', async (req, res) => {
   const zipcodeRaw = firstForm.zipcode;
   const householdRaw = firstForm.householdSize;
 
+  // iOS privacy mode: sends "0" for zipcode, null for dateOfBirth, and placeholders for name/gender/ethnicity when user opts out.
   const zipcode = zipcodeRaw == null ? null : String(zipcodeRaw).trim();
 
   const householdParsed = Number.parseInt(String(householdRaw ?? '').trim(), 10);
@@ -9654,6 +9655,92 @@ router.put('/settings/language', verifyToken, async (req, res) => {
   }
 });
 
+// Returns the authenticated user's editable personal information (firstname, lastname, date_of_birth).
+router.get('/settings/personal-info', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const user_id = cabecera.id;
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      'SELECT firstname, lastname, DATE_FORMAT(date_of_birth, \'%Y-%m-%d\') AS date_of_birth FROM user WHERE id = ?',
+      [user_id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json('User not found');
+    }
+    res.json({
+      firstname: rows[0].firstname || '',
+      lastname: rows[0].lastname || '',
+      dateOfBirth: rows[0].date_of_birth || null
+    });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// Updates the authenticated user's firstname, lastname and date_of_birth.
+// dateOfBirth is optional (null preserves the current "not provided" privacy default on iOS);
+// when provided the user must be at least 18 years old.
+router.put('/settings/personal-info', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  const user_id = cabecera.id;
+  const { firstname, lastname, dateOfBirth } = req.body || {};
+
+  const sanitizedFirst = typeof firstname === 'string' ? firstname.trim() : '';
+  const sanitizedLast = typeof lastname === 'string' ? lastname.trim() : '';
+
+  if (!sanitizedFirst) {
+    return res.status(400).json({ code: 'INVALID_FIRSTNAME', message: 'First name is required' });
+  }
+  if (!sanitizedLast) {
+    return res.status(400).json({ code: 'INVALID_LASTNAME', message: 'Last name is required' });
+  }
+  if (/\d/.test(sanitizedFirst) || /\d/.test(sanitizedLast)) {
+    return res.status(400).json({ code: 'INVALID_NAME_CHARACTERS', message: 'First/last name cannot contain numbers' });
+  }
+
+  let normalizedDob = null;
+  if (dateOfBirth !== null && dateOfBirth !== undefined && String(dateOfBirth).trim() !== '') {
+    const birthDate = new Date(dateOfBirth);
+    if (isNaN(birthDate.getTime())) {
+      return res.status(400).json({ code: 'INVALID_DATE_OF_BIRTH', message: 'Invalid date of birth' });
+    }
+    const now = new Date();
+    let age = now.getFullYear() - birthDate.getFullYear();
+    const m = now.getMonth() - birthDate.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < birthDate.getDate())) {
+      age--;
+    }
+    if (age < 18) {
+      return res.status(400).json({ code: 'INVALID_AGE', message: 'User must be at least 18 years old' });
+    }
+    if (age > 120) {
+      return res.status(400).json({ code: 'INVALID_DATE_OF_BIRTH', message: 'Invalid date of birth' });
+    }
+    normalizedDob = birthDate.toISOString().slice(0, 10);
+  }
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      'UPDATE user SET firstname = ?, lastname = ?, date_of_birth = ? WHERE id = ?',
+      [sanitizedFirst, sanitizedLast, normalizedDob, user_id]
+    );
+    if (rows.affectedRows > 0) {
+      res.json({
+        firstname: sanitizedFirst,
+        lastname: sanitizedLast,
+        dateOfBirth: normalizedDob
+      });
+    } else {
+      res.status(500).json('Could not update personal information');
+    }
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
 const { createObjectCsvStringifier } = require('csv-writer');
 
 const HEALTH_METRICS_CHUNK_SIZE = 1000;
@@ -12772,12 +12859,15 @@ async function demographicMetric(dimensionType, cabecera, filters, language) {
       throw new Error('Unsupported dimensionType');
   }
 
+  // Excluir usuarios sin fecha de nacimiento del cálculo de edad (iOS registrations may omit DOB).
+  const ageFilterSql = dimensionType === 'age' ? ' AND u.date_of_birth IS NOT NULL' : '';
+
   const sql = `
     SELECT ${selectExpr} AS name,
            COUNT(*) AS total
     FROM user u
     ${joinExpr}
-    WHERE ${whereSql}
+    WHERE ${whereSql}${ageFilterSql}
     GROUP BY ${groupExpr}
     ORDER BY ${orderExpr}
   `;
