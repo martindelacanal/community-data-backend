@@ -32,6 +32,9 @@ const {
   fetchInteractionAudience
 } = require('../services/interactionMetrics');
 const { resolveInteractionGeoFromIp } = require('../services/interactionGeo');
+const {
+  getParticipantRegisterSummary: getSharedParticipantRegisterSummary
+} = require('../services/participantRegistrationMetrics');
 const storage = multer.memoryStorage();
 
 // Client logo upload (single image)
@@ -15920,7 +15923,7 @@ async function optimizedParticipantRegisterHandler(req, res) {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'director') {
     try {
-      res.json(await getParticipantRegisterSummary(cabecera, req.body));
+      res.json(await getSharedParticipantRegisterSummary(cabecera, req.body));
     } catch (err) {
       console.log(err);
       res.status(500).json('Internal server error');

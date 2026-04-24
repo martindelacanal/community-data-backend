@@ -16,9 +16,11 @@ const {
     syncScheduledDriveCsvsToDrive
 } = require('./api/services/healthMetricsDriveSync');
 const {
-    getRawDataExcel,
-    EXCLUDED_REPORT_USER_IDS
+    getRawDataExcel
 } = require('./api/services/rawDataReport');
+const {
+    getParticipantRegisterSummary
+} = require('./api/services/participantRegistrationMetrics');
 
 const XLSX = require('xlsx-js-style');
 
@@ -53,16 +55,46 @@ function getUniqueRawDataRecordsByUserId(records) {
     return Array.from(uniqueRecordsByUserId.values());
 }
 
-function appendExcludedReportUserFilter(query, alias = 'u') {
-    if (!Array.isArray(EXCLUDED_REPORT_USER_IDS) || EXCLUDED_REPORT_USER_IDS.length === 0) {
-        return query;
+function normalizeUserIdSet(userIds) {
+    if (!Array.isArray(userIds)) {
+        return null;
     }
 
-    return `${query}\n              AND ${alias}.id NOT IN (${EXCLUDED_REPORT_USER_IDS.map(() => '?').join(',')})`;
+    return new Set(
+        userIds
+            .map(userId => Number(userId))
+            .filter(userId => Number.isFinite(userId))
+    );
 }
 
-async function getNewRegistrationsExcel(excelRawData, from_date, to_date) {
-    // Leer el Excel buffer
+function filterNewRegistrationRecords(uniqueJsonData, from_date, to_date, options = {}) {
+    const newUserIdsSet = normalizeUserIdSet(options.newUserIds);
+
+    if (newUserIdsSet) {
+        if (newUserIdsSet.size === 0) {
+            return [];
+        }
+
+        return uniqueJsonData.filter(record => {
+            const userId = Number(record['User ID']);
+            return Number.isFinite(userId) && newUserIdsSet.has(userId);
+        });
+    }
+
+    const fromDate = moment(from_date, "YYYY-MM-DD");
+    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day');
+
+    return uniqueJsonData.filter(record => {
+        const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
+        return registrationDate.isBetween(fromDate, toDate, 'day', '[]');
+    });
+}
+
+function isHealthInsuranceYes(record) {
+    return (record?.['Health Insurance?'] || '').toString().trim().toLowerCase() === 'yes';
+}
+
+async function getNewRegistrationsExcel(excelRawData, from_date, to_date, options = {}) {
     const workbook = XLSX.read(excelRawData, { type: 'buffer' });
     const worksheet = workbook.Sheets['Raw Data'];
     const jsonData = XLSX.utils.sheet_to_json(worksheet);
@@ -72,17 +104,7 @@ async function getNewRegistrationsExcel(excelRawData, from_date, to_date) {
         return Buffer.alloc(0);
     }
 
-    // Convertir from_date y to_date a objetos de fecha
-    const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day');
-
-    // Filtrar las filas según registration_date dentro del rango
-    const filteredRecords = uniqueJsonData.filter(record => {
-        const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, 'day', '[]');
-    });
-
-    // Crear nuevo workbook con datos filtrados
+    const filteredRecords = filterNewRegistrationRecords(uniqueJsonData, from_date, to_date, options);
     const newWorkbook = XLSX.utils.book_new();
     const newWorksheet = XLSX.utils.json_to_sheet(filteredRecords);
     XLSX.utils.book_append_sheet(newWorkbook, newWorksheet, 'New Registrations');
@@ -90,9 +112,7 @@ async function getNewRegistrationsExcel(excelRawData, from_date, to_date) {
     return XLSX.write(newWorkbook, { bookType: 'xlsx', type: 'buffer' });
 }
 
-
-async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from_date, to_date) {
-    // Leer el Excel buffer
+async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from_date, to_date, options = {}) {
     const workbook = XLSX.read(excelRawData, { type: 'buffer' });
     const worksheet = workbook.Sheets['Raw Data'];
     const jsonData = XLSX.utils.sheet_to_json(worksheet);
@@ -102,18 +122,8 @@ async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from
         return Buffer.alloc(0);
     }
 
-    // Convertir from_date y to_date a objetos de fecha
-    const fromDate = moment(from_date, "YYYY-MM-DD");
-    const toDate = moment(to_date, "YYYY-MM-DD").endOf('day');
-
-    // Filtrar las filas sin seguro de salud y con registration_date dentro del rango
-    const filteredRecords = uniqueJsonData.filter(record => {
-        const registrationDate = moment(record['Registration date'], "MM/DD/YYYY");
-        return registrationDate.isBetween(fromDate, toDate, 'day', '[]') &&
-            (record['Health Insurance?'] === 'No' || record['Health Insurance?'] === '');
-    });
-
-    // Crear nuevo workbook con datos filtrados
+    const filteredRecords = filterNewRegistrationRecords(uniqueJsonData, from_date, to_date, options)
+        .filter(record => !isHealthInsuranceYes(record));
     const newWorkbook = XLSX.utils.book_new();
     const newWorksheet = XLSX.utils.json_to_sheet(filteredRecords);
     XLSX.utils.book_append_sheet(newWorkbook, newWorksheet, 'No Health Insurance');
@@ -122,13 +132,12 @@ async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from
 }
 
 async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
-    // Leer el Excel buffer en lugar de parsear CSV
     const workbook = XLSX.read(excelRawData, { type: 'buffer' });
     const worksheet = workbook.Sheets['Raw Data'];
     const records = XLSX.utils.sheet_to_json(worksheet);
     const uniqueRecords = getUniqueRawDataRecordsByUserId(records);
+    const parsedClientId = Number.parseInt(client_id, 10);
 
-    // Fetch client name
     let clientName = 'Unknown Client';
     try {
         const [clientRows] = await mysqlConnection.promise().query(
@@ -142,24 +151,14 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         logger.error(`Error fetching client name for client_id ${client_id}:`, error);
     }
 
-    // Format dates for display and DB
     const displayFromDate = moment(from_date, "YYYY-MM-DD").format("MM/DD/YYYY");
     const displayToDate = moment(to_date, "YYYY-MM-DD").format("MM/DD/YYYY");
     const dateRangeDisplay = `${displayFromDate} - ${displayToDate}`;
 
-    // Overall Summary Calculations aligned with /metrics/participant/register
-    let newCount = 0;
-    let newHealthPlanYes = 0;
-    let newHealthPlanNo = 0;
-    let recurringCount = 0; // Initialize recurringCount
-    let newUserIds = [];
-
-    // Fetch client locations for filters and table rendering
     let allClientLocations = [];
     try {
         let locationQuery = `SELECT l.id, l.community_city as name FROM location l JOIN client_location cl ON l.id = cl.location_id WHERE cl.client_id = ?`;
-        // Exclude Compton (location_id = 32) for Molina (client_id = 2)
-        if (parseInt(client_id) === 2) {
+        if (parsedClientId === 2) {
             locationQuery += ` AND l.id != 32`;
         }
         locationQuery += ` ORDER BY l.id`;
@@ -168,109 +167,52 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         logger.error(`Error fetching locations for client_id ${client_id}:`, error);
     }
 
-    const locationIds = allClientLocations.map(loc => loc.id);
-    const locationPlaceholders = locationIds.map(() => '?').join(',');
+    const locationIds = allClientLocations.map(loc => Number(loc.id)).filter(locationId => Number.isFinite(locationId));
     const hasLocationFilter = locationIds.length > 0;
 
-    try {
-        const newParams = [
-            from_date,
-            to_date,
-            ...EXCLUDED_REPORT_USER_IDS,
-            ...(hasLocationFilter ? locationIds : [])
-        ];
-
-        const [newRows] = await mysqlConnection.promise().query(
-            appendExcludedReportUserFilter(`
-            SELECT DISTINCT u.id AS user_id
-            FROM user u
-            WHERE u.role_id = 5
-              AND u.enabled = 'Y'
-              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ?
-              AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-              ${hasLocationFilter ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
-            `),
-            newParams
-        );
-
-        newUserIds = newRows.map(row => row.user_id);
-        newCount = newUserIds.length;
-    } catch (error) {
-        logger.error(`Error fetching overall new count for client_id ${client_id}:`, error);
-    }
+    let reportMetrics = {
+        new: 0,
+        recurring: 0,
+        newUserIds: [],
+        recurringUserIds: [],
+        newPerLocationMap: {},
+        recurringPerLocationMap: {}
+    };
 
     try {
-        const recurringParams = [
-            from_date,
-            to_date,
-            ...EXCLUDED_REPORT_USER_IDS,
-            ...(hasLocationFilter ? locationIds : []), // db_range.location_id filter
-            ...(hasLocationFilter ? locationIds : []), // db_prev_original.location_id filter
-            from_date,
-            ...(hasLocationFilter ? locationIds : []), // u.first_location_id filter
-            from_date
-        ];
-        const [recurringRows] = await mysqlConnection.promise().query(
-            appendExcludedReportUserFilter(`
-            SELECT COUNT(DISTINCT u.id) AS recurring
-            FROM delivery_beneficiary db_range
-            INNER JOIN user u ON db_range.receiving_user_id = u.id
-            WHERE 
-              CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') >= ?
-              AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-              AND u.role_id = 5 AND u.enabled = 'Y'
-              ${hasLocationFilter ? `AND db_range.location_id IN (${locationPlaceholders})` : ''}
-              AND (
-                  EXISTS (
-                      SELECT 1
-                      FROM delivery_beneficiary db_prev_original
-                      WHERE db_prev_original.receiving_user_id = u.id
-                        AND CONVERT_TZ(db_prev_original.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
-                        ${hasLocationFilter ? `AND db_prev_original.location_id IN (${locationPlaceholders})` : ''}
-                  )
-                  OR
-                  (
-                      CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-                      ${hasLocationFilter ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM delivery_beneficiary db_no_past
-                          WHERE db_no_past.receiving_user_id = u.id
-                            AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-                          )
-                      )
-                  )
-            `),
-            recurringParams
+        reportMetrics = await getParticipantRegisterSummary(
+            { role: 'client', client_id: parsedClientId },
+            { from_date, to_date, locations: locationIds },
+            { includeDetails: true, clientId: parsedClientId }
         );
-        recurringCount = (recurringRows[0] && recurringRows[0].recurring) || 0;
     } catch (error) {
-        logger.error(`Error fetching overall recurring count for client_id ${client_id}:`, error);
+        logger.error(`Error fetching participant register metrics for client_id ${client_id}:`, error);
     }
 
-    // Health plan breakdown scoped to the users counted as "new"
-    if (newUserIds.length > 0 && uniqueRecords.length > 0) {
-        const newUserIdsSet = new Set(newUserIds);
-        uniqueRecords.forEach(record => {
-            const recordUserId = Number(record['User ID']);
-            if (Number.isNaN(recordUserId)) {
-                return;
-            }
-            if (!newUserIdsSet.has(recordUserId)) {
-                return;
-            }
+    const newUserIds = Array.isArray(reportMetrics.newUserIds) ? reportMetrics.newUserIds : [];
+    const newCount = Number(reportMetrics.new || newUserIds.length || 0);
+    const recurringCount = Number(reportMetrics.recurring || 0);
+    const newPerLocationMap = reportMetrics.newPerLocationMap || {};
+    const recurringPerLocationMap = reportMetrics.recurringPerLocationMap || {};
 
-            const healthValue = (record['Health Insurance?'] || '').toString().trim().toLowerCase();
-            if (healthValue === 'yes') {
-                newHealthPlanYes++;
-            } else if (healthValue === 'no' || healthValue === '') {
-                newHealthPlanNo++;
-            }
-        });
-    }
+    const rawRecordByUserId = new Map();
+    uniqueRecords.forEach(record => {
+        const userId = Number(record['User ID']);
+        if (Number.isFinite(userId) && !rawRecordByUserId.has(userId)) {
+            rawRecordByUserId.set(userId, record);
+        }
+    });
 
+    let newHealthPlanYes = 0;
+    newUserIds.forEach(userId => {
+        if (isHealthInsuranceYes(rawRecordByUserId.get(Number(userId)))) {
+            newHealthPlanYes++;
+        }
+    });
+
+    const newHealthPlanNo = Math.max(newCount - newHealthPlanYes, 0);
     const totalNewRecurring = newCount + recurringCount;
-    const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo;
+    const totalNewHealthPlan = newCount;
 
     const summaryPartRows = [
         { col1: 'Client Name', col2: clientName, col3: '', col4: '', col5: '' },
@@ -286,87 +228,6 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         { col1: '  Total', col2: totalNewHealthPlan, col3: '', col4: '', col5: '' }
     ];
 
-    const newPerLocationMap = {};
-    try {
-        if (hasLocationFilter) {
-            const newPerLocationQuery = `SELECT
-                    u.first_location_id AS location_id,
-                    COUNT(DISTINCT u.id) AS new_count
-                FROM user u
-                WHERE u.role_id = 5
-                  AND u.enabled = 'Y'
-                  AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ?
-                  AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-                  ${EXCLUDED_REPORT_USER_IDS.length > 0 ? `AND u.id NOT IN (${EXCLUDED_REPORT_USER_IDS.map(() => '?').join(',')})` : ''}
-                  AND u.first_location_id IN (${locationPlaceholders})
-                GROUP BY u.first_location_id;`;
-
-            const [newLocRows] = await mysqlConnection.promise().query(
-                newPerLocationQuery,
-                [from_date, to_date, ...EXCLUDED_REPORT_USER_IDS, ...locationIds]
-            );
-            newLocRows.forEach(row => { newPerLocationMap[row.location_id] = row.new_count; });
-        }
-    } catch (error) {
-        logger.error(`Error fetching new per location for client_id ${client_id}:`, error);
-    }
-
-    const recurringPerLocationMap = {};
-    try {
-        if (hasLocationFilter) {
-            const recurringPerLocationQuery = `SELECT
-                    db_range.location_id,
-                    COUNT(DISTINCT u.id) AS recurring_count
-                FROM delivery_beneficiary db_range
-                INNER JOIN user u ON db_range.receiving_user_id = u.id
-                WHERE u.role_id = 5 AND u.enabled = 'Y'
-                  AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') >= ?
-                  AND CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-                  ${EXCLUDED_REPORT_USER_IDS.length > 0 ? `AND u.id NOT IN (${EXCLUDED_REPORT_USER_IDS.map(() => '?').join(',')})` : ''}
-                  AND db_range.location_id IN (${locationPlaceholders})
-                  AND (
-                      EXISTS (
-                          SELECT 1
-                          FROM delivery_beneficiary db_prev
-                          WHERE db_prev.receiving_user_id = u.id
-                            AND CONVERT_TZ(db_prev.creation_date, '+00:00', 'America/Los_Angeles') < CONVERT_TZ(db_range.creation_date, '+00:00', 'America/Los_Angeles')
-                            AND db_prev.location_id IN (${locationPlaceholders})
-                      )
-                      OR
-                      (
-                          CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-                          AND u.first_location_id IN (${locationPlaceholders})
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM delivery_beneficiary db_no_past
-                              WHERE db_no_past.receiving_user_id = u.id
-                                AND CONVERT_TZ(db_no_past.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-                          )
-                      )
-                  )
-                GROUP BY db_range.location_id;`;
-
-            const recurringPerLocationParams = [
-                from_date,
-                to_date,
-                ...EXCLUDED_REPORT_USER_IDS,
-                ...locationIds, // db_range.location_id
-                ...locationIds, // db_prev.location_id
-                from_date,
-                ...locationIds, // u.first_location_id
-                from_date
-            ];
-
-            const [recLocRows] = await mysqlConnection.promise().query(
-                recurringPerLocationQuery,
-                recurringPerLocationParams
-            );
-            recLocRows.forEach(row => { recurringPerLocationMap[row.location_id] = row.recurring_count; });
-        }
-    } catch (error) {
-        logger.error(`Error fetching recurring per location for client_id ${client_id}:`, error);
-    }
-
     if (!hasLocationFilter) {
         logger.warn(`No locations found for client_id ${client_id}; location breakdown will be empty.`);
     }
@@ -375,7 +236,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
     locationTableRows.push({ col1: '', col2: '', col3: '', col4: '', col5: '' });
 
     let locationRowBuilder;
-    if (parseInt(client_id) === 1) {
+    if (parsedClientId === 1) {
         locationTableRows.push({ col1: '', col2: 'Location', col3: 'New' });
         locationRowBuilder = (loc, newAtLoc) => ({
             col1: '',
@@ -399,11 +260,11 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
 
     if (allClientLocations.length > 0) {
         allClientLocations.forEach(loc => {
-            const newAtLoc = newPerLocationMap[loc.id] || 0;
-            const recurringAtLoc = recurringPerLocationMap[loc.id] || 0;
+            const newAtLoc = Number(newPerLocationMap[loc.id] || 0);
+            const recurringAtLoc = Number(recurringPerLocationMap[loc.id] || 0);
             const totalAtLoc = newAtLoc + recurringAtLoc;
 
-            if (parseInt(client_id) === 1) {
+            if (parsedClientId === 1) {
                 locationTableRows.push(locationRowBuilder(loc, newAtLoc));
             } else {
                 locationTableRows.push(locationRowBuilder(loc, newAtLoc, recurringAtLoc, totalAtLoc));
@@ -414,7 +275,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
             grandTotalByLocation += totalAtLoc;
         });
 
-        if (parseInt(client_id) === 1) {
+        if (parsedClientId === 1) {
             locationTableRows.push({
                 col1: '',
                 col2: 'TOTAL',
@@ -431,28 +292,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         }
     }
 
-    let allCsvRows = summaryPartRows.concat(locationTableRows);
-
-    // let csvFileStringifier;
-    // if (parseInt(client_id) === 1) {
-    //     csvFileStringifier = createCsvStringifier({
-    //         header: [
-    //             { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
-    //             { id: 'col3', title: 'Column3' }
-    //         ],
-    //         fieldDelimiter: ';'
-    //     });
-    // } else {
-    //     csvFileStringifier = createCsvStringifier({
-    //         header: [
-    //             { id: 'col1', title: 'Column1' }, { id: 'col2', title: 'Column2' },
-    //             { id: 'col3', title: 'Column3' }, { id: 'col4', title: 'Column4' },
-    //             { id: 'col5', title: 'Column5' }
-    //         ],
-    //         fieldDelimiter: ';'
-    //     });
-    // }
-    // const csvString = csvFileStringifier.stringifyRecords(allCsvRows);
+    const allCsvRows = summaryPartRows.concat(locationTableRows);
 
     const emailReportData = {
         clientName: clientName,
@@ -472,21 +312,10 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         clientId: client_id
     };
 
-    // Check if there's any meaningful data to report
-    // If csvString is just headers (or empty), and emailReportData has all zeros and empty arrays, consider it no data.
-    // For simplicity, we'll rely on csvString length. If it's short (just headers), it implies minimal data.
-    // The original check was: records.length === 0 && recurringCount === 0 && allClientLocations.length === 0
-    // This might be too restrictive. Let's assume if csvString has content beyond headers, we send data.
-    // A more robust check could be if (newCount === 0 && recurringCount === 0 && totalNewByLocation === 0 && totalRecurringByLocation === 0)
-
-    // En lugar de crear CSV, crear Excel
     const summaryWorkbook = XLSX.utils.book_new();
-
-    // Crear datos para el summary
     const summaryData = [];
 
-    if (parseInt(client_id) === 1) {
-        // Para client_id = 1, 3 columnas (col1 vacia, Location, New)
+    if (parsedClientId === 1) {
         allCsvRows.forEach(row => {
             summaryData.push([
                 row.col1 !== undefined && row.col1 !== null ? row.col1 : '',
@@ -495,7 +324,6 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
             ]);
         });
     } else {
-        // Para otros clientes, 5 columnas (col1 vacia, Location, New, Recurring, Totals)
         allCsvRows.forEach(row => {
             summaryData.push([
                 row.col1 !== undefined && row.col1 !== null ? row.col1 : '',
@@ -509,7 +337,6 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
 
     const summaryWorksheet = XLSX.utils.aoa_to_sheet(summaryData);
 
-    // Ajustes de estilo y formato para cumplir requisitos visuales
     const setBold = (cellAddress) => {
         if (!summaryWorksheet[cellAddress]) { return; }
         summaryWorksheet[cellAddress].s = {
@@ -517,29 +344,25 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         };
     };
 
-    // Bold for Date Range value, first Total (New+Recurring), and YES value (column B)
-    setBold('B2'); // Date Range value
-    setBold('B4'); // New value
-    setBold('B6'); // First Total value
-    setBold('B9'); // YES value
+    setBold('B2');
+    setBold('B4');
+    setBold('B6');
+    setBold('B9');
 
-    // Calcular filas para la tabla de locations
-    const headerRowIndex = summaryPartRows.length + 2; // blank row + header row
+    const headerRowIndex = summaryPartRows.length + 2;
     const firstDataRowIndex = headerRowIndex + 1;
     const totalRowIndex = summaryPartRows.length + locationTableRows.length;
 
-    // Encabezados de la tabla de locations en negrita (Location, New, Recurring, Totals)
-    if (parseInt(client_id) === 1) {
-        setBold(`B${headerRowIndex}`); // Location
-        setBold(`C${headerRowIndex}`); // New
+    if (parsedClientId === 1) {
+        setBold(`B${headerRowIndex}`);
+        setBold(`C${headerRowIndex}`);
     } else {
-        setBold(`B${headerRowIndex}`); // Location
-        setBold(`C${headerRowIndex}`); // New
-        setBold(`D${headerRowIndex}`); // Recurring
-        setBold(`E${headerRowIndex}`); // Totals
+        setBold(`B${headerRowIndex}`);
+        setBold(`C${headerRowIndex}`);
+        setBold(`D${headerRowIndex}`);
+        setBold(`E${headerRowIndex}`);
     }
 
-    // Columna New (column C): valores > 0 en negrita y total de New en negrita
     const newColumnLetter = 'C';
     for (let rowIdx = firstDataRowIndex; rowIdx < totalRowIndex; rowIdx++) {
         const cellAddress = `${newColumnLetter}${rowIdx}`;
@@ -550,18 +373,17 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
     }
     setBold(`${newColumnLetter}${totalRowIndex}`);
 
-    // Calcular anchos automáticos de columna basados en el contenido
     const range = XLSX.utils.decode_range(summaryWorksheet['!ref']);
     const colWidths = [];
-    
+
     for (let C = range.s.c; C <= range.e.c; ++C) {
-        let maxWidth = 10; // Ancho mínimo
+        let maxWidth = 10;
         for (let R = range.s.r; R <= range.e.r; ++R) {
             const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
             const cell = summaryWorksheet[cellAddress];
             if (cell && cell.v) {
                 const cellValue = cell.v.toString();
-                const cellWidth = cellValue.length + 2; // Agregar padding
+                const cellWidth = cellValue.length + 2;
                 if (cellWidth > maxWidth) {
                     maxWidth = cellWidth;
                 }
@@ -569,14 +391,14 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         }
         colWidths.push({ wch: maxWidth });
     }
-    
+
     summaryWorksheet['!cols'] = colWidths;
 
     XLSX.utils.book_append_sheet(summaryWorkbook, summaryWorksheet, 'Summary');
 
     const excelBuffer = XLSX.write(summaryWorkbook, { bookType: 'xlsx', type: 'buffer', cellStyles: true });
 
-    return { excelBuffer: excelBuffer, emailReportData: emailReportData };
+    return { excelBuffer: excelBuffer, emailReportData: emailReportData, newUserIds: newUserIds };
 }
 
 // schedule.scheduleJob('*/5 * * * *', async () => { // Se ejecuta cada 5 minutos
@@ -644,8 +466,9 @@ schedule.scheduleJob(adminRule, async () => {
                     excelRawData);
 
                 if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
 
                     await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail]);
                 } else {
@@ -713,8 +536,9 @@ schedule.scheduleJob(rule, async () => {
                     excelRawData);
 
                 if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
-                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
+                    const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
 
                     await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails);
                 } else {
@@ -803,8 +627,9 @@ schedule.scheduleJob(monthlyClientRule, async () => {
                         excelRawData);
 
                     if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                        const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate);
-                        const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate);
+                        const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
+                        const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
+                        const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
 
                         await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails);
                     } else {
@@ -882,8 +707,9 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
                     excelRawData);
 
                 if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate);
-                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate);
+                    const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
 
                     await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail]);
                 } else {

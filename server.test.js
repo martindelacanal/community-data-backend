@@ -73,8 +73,9 @@ async function testWeeklyReports() {
 
                 // CAMBIO: Verificar que summaryObject tenga la estructura correcta
                 if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, date_only_from, date_only_to);
-                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, date_only_from, date_only_to);
+                    const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, date_only_from, date_only_to, newRegistrationOptions);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, date_only_from, date_only_to, newRegistrationOptions);
 
                     console.log(`Sending email for client: ${client.name} to: ${customEmail}`);
 
@@ -185,8 +186,9 @@ async function testMonthlyReports() {
 
                 // CAMBIO: Verificar que summaryObject tenga la estructura correcta
                 if (summaryObject && summaryObject.excelBuffer && summaryObject.emailReportData) {
-                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, date_only_from, date_only_to);
-                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, date_only_from, date_only_to);
+                    const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
+                    const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, date_only_from, date_only_to, newRegistrationOptions);
+                    const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, date_only_from, date_only_to, newRegistrationOptions);
 
                     console.log(`Sending email for client: ${client.name} to: ${customEmail}`);
 

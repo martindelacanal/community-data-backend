@@ -8,7 +8,8 @@
     "serve": "nodemon server.js",
     "start": "node server.js",
     "drive-csv:sync-all": "node scripts/syncScheduledDriveCsvs.js",
-    "report:historical:raw-data": "node scripts/generateHistoricalRawDataReport.js"
+    "report:historical:raw-data": "node scripts/generateHistoricalRawDataReport.js",
+    "report:verify-participant-metrics": "node scripts/verifyParticipantReportMetrics.js"
   },
   "keywords": [],
   "author": "",

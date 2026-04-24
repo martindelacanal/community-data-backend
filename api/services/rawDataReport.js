@@ -186,6 +186,7 @@ async function fetchParticipantBaseRows(fromDate, toDate, clientId) {
       LEFT JOIN ethnicity AS eth ON u.ethnicity_id = eth.id
       LEFT JOIN location AS loc ON u.location_id = loc.id
       WHERE u.role_id = 5
+        AND u.enabled = 'Y'
         AND cu.client_id = ?
         AND u.id NOT IN (?)
         AND (
