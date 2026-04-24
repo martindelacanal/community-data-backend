@@ -3,6 +3,8 @@ const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const moment = require('moment-timezone');
 
 const HEALTH_METRICS_CHUNK_SIZE = 1000;
+const HEALTH_METRICS_TIMEZONE = 'America/Los_Angeles';
+const EVENT_TIME_UNMATCHED_THRESHOLD_HOURS = 1;
 const SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING = 'ascending';
 const SURVEY_TRAFFIC_LIGHT_DIRECTION_DESCENDING = 'descending';
 
@@ -185,7 +187,7 @@ function getHealthMetricBirthDateRange(minAge, maxAge) {
     return null;
   }
 
-  const today = moment.tz('America/Los_Angeles').startOf('day');
+  const today = moment.tz(HEALTH_METRICS_TIMEZONE).startOf('day');
 
   return {
     minBirthDate: maxAge === null
@@ -523,6 +525,143 @@ async function getHealthMetricDeliverySummaryByUserIds(userIds, filters) {
   return summaryByUserId;
 }
 
+function getHealthMetricEventTimeValue(eventRow, scannedWindow) {
+  if (eventRow.approved === 'Y') {
+    return eventRow.event_time || '';
+  }
+
+  if (!scannedWindow) {
+    return 'Unmatched';
+  }
+
+  const eventDateTime = moment.tz(
+    eventRow.event_datetime_la,
+    'YYYY-MM-DD HH:mm:ss',
+    true,
+    HEALTH_METRICS_TIMEZONE
+  );
+
+  if (!eventDateTime.isValid()) {
+    return 'Unmatched';
+  }
+
+  const earliestAllowed = scannedWindow.first.clone().subtract(EVENT_TIME_UNMATCHED_THRESHOLD_HOURS, 'hour');
+  const latestAllowed = scannedWindow.last.clone().add(EVENT_TIME_UNMATCHED_THRESHOLD_HOURS, 'hour');
+
+  if (eventDateTime.isBefore(earliestAllowed) || eventDateTime.isAfter(latestAllowed)) {
+    return 'Unmatched';
+  }
+
+  return eventRow.event_time || '';
+}
+
+function groupHealthMetricDeliveryEventsByUserId(eventRows) {
+  const eventsByUserId = new Map();
+  const scannedWindowByLocationDate = new Map();
+
+  for (let i = 0; i < eventRows.length; i++) {
+    const eventRow = eventRows[i];
+    if (eventRow.approved !== 'Y') {
+      continue;
+    }
+
+    const eventDateTime = moment.tz(
+      eventRow.event_datetime_la,
+      'YYYY-MM-DD HH:mm:ss',
+      true,
+      HEALTH_METRICS_TIMEZONE
+    );
+
+    if (!eventDateTime.isValid()) {
+      continue;
+    }
+
+    const windowKey = `${eventRow.location_id}:${eventRow.event_date_key}`;
+    const scannedWindow = scannedWindowByLocationDate.get(windowKey);
+
+    if (!scannedWindow) {
+      scannedWindowByLocationDate.set(windowKey, {
+        first: eventDateTime,
+        last: eventDateTime
+      });
+      continue;
+    }
+
+    if (eventDateTime.isBefore(scannedWindow.first)) {
+      scannedWindow.first = eventDateTime;
+    }
+
+    if (eventDateTime.isAfter(scannedWindow.last)) {
+      scannedWindow.last = eventDateTime;
+    }
+  }
+
+  for (let i = 0; i < eventRows.length; i++) {
+    const eventRow = eventRows[i];
+    const windowKey = `${eventRow.location_id}:${eventRow.event_date_key}`;
+    const eventTime = getHealthMetricEventTimeValue(
+      eventRow,
+      scannedWindowByLocationDate.get(windowKey)
+    );
+    const userEvents = eventsByUserId.get(eventRow.user_id) || [];
+
+    userEvents.push({
+      event_date: eventRow.event_date || '',
+      event_time: eventTime,
+      event_location: eventRow.event_location || ''
+    });
+    eventsByUserId.set(eventRow.user_id, userEvents);
+  }
+
+  return eventsByUserId;
+}
+
+async function getHealthMetricDeliveryEventsByUserIds(userIds, filters) {
+  if (!Array.isArray(userIds) || userIds.length === 0) {
+    return new Map();
+  }
+
+  const eventRows = [];
+  const userIdChunks = chunkArray(userIds);
+  for (let i = 0; i < userIdChunks.length; i++) {
+    const userIdChunk = userIdChunks[i];
+    const params = [
+      userIdChunk,
+      filters.laFromDate,
+      filters.laToDate
+    ];
+
+    if (filters.locations.length > 0) {
+      params.push(filters.locations);
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+         db.id AS delivery_beneficiary_id,
+         db.receiving_user_id AS user_id,
+         db.location_id,
+         loc.community_city AS event_location,
+         db.approved,
+         DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS event_date,
+         DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS event_time,
+         DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%d') AS event_date_key,
+         DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%d %H:%i:%s') AS event_datetime_la
+       FROM delivery_beneficiary db
+       LEFT JOIN location loc ON loc.id = db.location_id
+       WHERE db.receiving_user_id IN (?)
+         AND db.creation_date >= CONVERT_TZ(CONCAT(?, ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+         AND db.creation_date < CONVERT_TZ(CONCAT(DATE_ADD(?, INTERVAL 1 DAY), ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+         ${filters.locations.length > 0 ? 'AND db.location_id IN (?)' : ''}
+       ORDER BY db.receiving_user_id, db.creation_date, db.id`,
+      params
+    );
+
+    eventRows.push(...rows);
+  }
+
+  return groupHealthMetricDeliveryEventsByUserId(eventRows);
+}
+
 async function getHealthMetricAnswerValueMap(userIds, questionIds, language) {
   const answerValueByUserQuestion = new Map();
   if (!Array.isArray(userIds) || userIds.length === 0 || !Array.isArray(questionIds) || questionIds.length === 0) {
@@ -629,7 +768,10 @@ function baseHeaders() {
     { id: 'delivery_count_between_dates_scanned', title: 'D.C. between dates scanned' },
     { id: 'delivery_count_between_dates_not_scanned', title: 'D.C. between dates not scanned' },
     { id: 'registration_date', title: 'Registration date' },
-    { id: 'registration_time', title: 'Registration time' }
+    { id: 'registration_time', title: 'Registration time' },
+    { id: 'event_date', title: 'Event Date' },
+    { id: 'event_time', title: 'Event Time' },
+    { id: 'event_location', title: 'Event Location' }
   ];
 }
 
@@ -677,12 +819,15 @@ async function buildHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }
   }
 
   const metricUserIds = metricUsers.map(user => user.user_id);
-  const [deliverySummaryByUserId, answerValueByUserQuestion] = await Promise.all([
+  const [deliverySummaryByUserId, deliveryEventsByUserId, answerValueByUserQuestion] = await Promise.all([
     getHealthMetricDeliverySummaryByUserIds(metricUserIds, normalizedFilters),
+    getHealthMetricDeliveryEventsByUserIds(metricUserIds, normalizedFilters),
     getHealthMetricAnswerValueMap(metricUserIds, questionIds, language)
   ]);
 
-  const rowsForCsv = metricUsers.map(user => {
+  const rowsForCsv = [];
+
+  metricUsers.forEach(user => {
     const deliverySummary = deliverySummaryByUserId.get(user.user_id) || {
       locations_visited: '',
       delivery_count: 0,
@@ -693,7 +838,7 @@ async function buildHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }
       delivery_count_between_dates_not_scanned: 0
     };
 
-    const row = {
+    const baseRow = {
       user_id: user.user_id,
       username: user.username,
       email: user.email,
@@ -723,10 +868,23 @@ async function buildHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }
 
     for (let i = 0; i < questions.length; i++) {
       const question = questions[i];
-      row[String(question.id)] = answerValueByUserQuestion.get(`${user.user_id}:${question.id}`) || '';
+      baseRow[String(question.id)] = answerValueByUserQuestion.get(`${user.user_id}:${question.id}`) || '';
     }
 
-    return row;
+    const userEvents = deliveryEventsByUserId.get(user.user_id) || [{
+      event_date: '',
+      event_time: '',
+      event_location: ''
+    }];
+
+    userEvents.forEach(eventRow => {
+      rowsForCsv.push({
+        ...baseRow,
+        event_date: eventRow.event_date,
+        event_time: eventRow.event_time,
+        event_location: eventRow.event_location
+      });
+    });
   });
 
   let csvData = csvStringifier.getHeaderString();
