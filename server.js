@@ -727,7 +727,7 @@ healthMetricsDriveSyncRule.hour = [12, 18];
 healthMetricsDriveSyncRule.minute = 0;
 healthMetricsDriveSyncRule.tz = 'America/Los_Angeles';
 
-schedule.scheduleJob(healthMetricsDriveSyncRule, async () => {
+const driveSyncJob = schedule.scheduleJob(healthMetricsDriveSyncRule, async () => {
     if (!isHealthMetricsDriveSyncEnabled()) {
         logger.info('Scheduled Drive CSV sync is disabled. Skipping scheduled execution.');
         return;
@@ -739,6 +739,7 @@ schedule.scheduleJob(healthMetricsDriveSyncRule, async () => {
     }
 
     isHealthMetricsDriveSyncRunning = true;
+    logger.info('Scheduled Drive CSV sync started.');
     try {
         const result = await syncScheduledDriveCsvsToDrive();
         if (!result.skipped) {
@@ -749,6 +750,20 @@ schedule.scheduleJob(healthMetricsDriveSyncRule, async () => {
     } finally {
         isHealthMetricsDriveSyncRunning = false;
     }
+});
+
+const driveSyncEnabledAtBoot = isHealthMetricsDriveSyncEnabled();
+const driveSyncNextRun = driveSyncJob && driveSyncJob.nextInvocation();
+logger.info(
+    `Drive CSV sync scheduler registered. enabled=${driveSyncEnabledAtBoot}, ` +
+    `tz=America/Los_Angeles, hours=12,18, nextRun=${driveSyncNextRun ? driveSyncNextRun.toISOString() : 'none'}`
+);
+
+process.on('unhandledRejection', (reason) => {
+    logger.error(`Unhandled promise rejection: ${reason && reason.stack ? reason.stack : reason}`);
+});
+process.on('uncaughtException', (error) => {
+    logger.error(`Uncaught exception: ${error && error.stack ? error.stack : error}`);
 });
 
 module.exports = {
