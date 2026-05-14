@@ -69,22 +69,26 @@ async function getGoogleDriveFileMetadata(fileId) {
   return response.data;
 }
 
-async function updateGoogleDriveFile({ fileId, fileName, content, mimeType = 'text/csv; charset=utf-8' }) {
+async function updateGoogleDriveFile({ fileId, fileName, body, content, mimeType = 'text/csv; charset=utf-8' }) {
   if (!fileId) {
     throw new Error('Google Drive fileId is required');
   }
 
-  const drive = await getGoogleDriveClient();
-  const bodyContent = Buffer.isBuffer(content)
-    ? content
-    : Buffer.from(String(content ?? ''), 'utf8');
+  let mediaBody = body;
+  if (!mediaBody) {
+    const bodyContent = Buffer.isBuffer(content)
+      ? content
+      : Buffer.from(String(content ?? ''), 'utf8');
+    mediaBody = Readable.from([bodyContent]);
+  }
 
+  const drive = await getGoogleDriveClient();
   const response = await drive.files.update({
     fileId,
     requestBody: fileName ? { name: fileName } : undefined,
     media: {
       mimeType,
-      body: Readable.from([bodyContent])
+      body: mediaBody
     },
     fields: 'id, name, parents, webViewLink, webContentLink',
     supportsAllDrives: true

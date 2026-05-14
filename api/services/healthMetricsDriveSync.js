@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
-const { buildHealthMetricsCsv } = require('./healthMetrics');
+const { streamHealthMetricsCsv } = require('./healthMetrics');
 const { getGoogleDriveFileMetadata, updateGoogleDriveFile } = require('./googleDrive');
 const {
   generateBeneficiarySummaryCsv,
@@ -97,7 +97,7 @@ function validateCsvDriveSyncConfig(label, config) {
   }
 }
 
-async function syncCsvContentToDrive({ label, folderId, fileId, fileName, csvData, rowCount }) {
+async function syncCsvStreamToDrive({ label, folderId, fileId, fileName, body, getRowCount }) {
   validateCsvDriveSyncConfig(label, { folderId, fileId });
   const existingFile = await getGoogleDriveFileMetadata(fileId);
   const parents = Array.isArray(existingFile.parents) ? existingFile.parents : [];
@@ -110,10 +110,11 @@ async function syncCsvContentToDrive({ label, folderId, fileId, fileName, csvDat
   const updatedFile = await updateGoogleDriveFile({
     fileId,
     fileName,
-    content: csvData,
+    body,
     mimeType: 'text/csv; charset=utf-8'
   });
 
+  const rowCount = typeof getRowCount === 'function' ? getRowCount() : 0;
   logger.info(
     `${label} Drive sync completed. fileId=${updatedFile.id || fileId}, rows=${rowCount}`
   );
@@ -138,19 +139,19 @@ async function syncHealthMetricsCsvToDrive({ ignoreEnabledFlag = false } = {}) {
   }
 
   const config = getHealthMetricsDriveSyncConfig();
-  const { csvData, rowCount, fileName } = await buildHealthMetricsCsv({
+  const { body, getRowCount, fileName } = streamHealthMetricsCsv({
     cabecera: { role: 'admin' },
     filters: {},
     language: config.language
   });
 
-  return syncCsvContentToDrive({
+  return syncCsvStreamToDrive({
     label: 'Health metrics',
     folderId: config.folderId,
     fileId: config.fileId,
     fileName: config.fileName || fileName,
-    csvData,
-    rowCount
+    body,
+    getRowCount
   });
 }
 
@@ -272,13 +273,13 @@ async function syncScheduledDriveCsvsToDrive({ ignoreEnabledFlag = false, notify
       task.label,
       async () => {
         const exportData = await task.generator();
-        return syncCsvContentToDrive({
+        return syncCsvStreamToDrive({
           label: task.label,
           folderId: config.folderId,
           fileId: task.config.fileId,
           fileName: task.config.fileName || exportData.fileName,
-          csvData: exportData.csvData,
-          rowCount: exportData.rowCount
+          body: exportData.body,
+          getRowCount: exportData.getRowCount
         });
       },
       results,
@@ -297,13 +298,13 @@ async function syncScheduledDriveCsvsToDrive({ ignoreEnabledFlag = false, notify
   if (ticketExports) {
     await runDriveSyncTask(
       'Tickets',
-      () => syncCsvContentToDrive({
+      () => syncCsvStreamToDrive({
         label: 'Tickets',
         folderId: config.folderId,
         fileId: config.tickets.fileId,
         fileName: config.tickets.fileName || ticketExports.tickets.fileName,
-        csvData: ticketExports.tickets.csvData,
-        rowCount: ticketExports.tickets.rowCount
+        body: ticketExports.tickets.body,
+        getRowCount: ticketExports.tickets.getRowCount
       }),
       results,
       errors
@@ -311,13 +312,13 @@ async function syncScheduledDriveCsvsToDrive({ ignoreEnabledFlag = false, notify
 
     await runDriveSyncTask(
       'Tickets with food',
-      () => syncCsvContentToDrive({
+      () => syncCsvStreamToDrive({
         label: 'Tickets with food',
         folderId: config.folderId,
         fileId: config.ticketsWithFood.fileId,
         fileName: config.ticketsWithFood.fileName || ticketExports.ticketsWithFood.fileName,
-        csvData: ticketExports.ticketsWithFood.csvData,
-        rowCount: ticketExports.ticketsWithFood.rowCount
+        body: ticketExports.ticketsWithFood.body,
+        getRowCount: ticketExports.ticketsWithFood.getRowCount
       }),
       results,
       errors

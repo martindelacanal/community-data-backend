@@ -1,18 +1,26 @@
+const { Readable } = require('stream');
 const mysqlConnection = require('../connection/connection');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 
 const ALL_DATA_FROM_DATE = '1970-01-01';
 const ALL_DATA_TO_DATE = '2100-01-01';
+const CSV_STREAM_BATCH_SIZE = 500;
 
-function stringifyCsv(header, rows) {
+function createCsvReadableFromRows(header, rows) {
   const csvStringifier = createCsvStringifier({
     header,
     fieldDelimiter: ';'
   });
 
-  let csvData = csvStringifier.getHeaderString();
-  csvData += csvStringifier.stringifyRecords(rows);
-  return csvData;
+  async function* generator() {
+    yield Buffer.from(csvStringifier.getHeaderString(), 'utf8');
+    for (let i = 0; i < rows.length; i += CSV_STREAM_BATCH_SIZE) {
+      const batch = rows.slice(i, i + CSV_STREAM_BATCH_SIZE);
+      yield Buffer.from(csvStringifier.stringifyRecords(batch), 'utf8');
+    }
+  }
+
+  return Readable.from(generator(), { objectMode: false });
 }
 
 function parseUsDate(value) {
@@ -67,8 +75,8 @@ async function generateVolunteerTableCsv() {
   ];
 
   return {
-    csvData: stringifyCsv(headers, rows),
-    rowCount: rows.length,
+    body: createCsvReadableFromRows(headers, rows),
+    getRowCount: () => rows.length,
     fileName: 'volunteers-table.csv'
   };
 }
@@ -104,8 +112,8 @@ async function generateWorkerTableCsv() {
   ];
 
   return {
-    csvData: stringifyCsv(headers, rows),
-    rowCount: rows.length,
+    body: createCsvReadableFromRows(headers, rows),
+    getRowCount: () => rows.length,
     fileName: 'workers-table.csv'
   };
 }
@@ -183,13 +191,13 @@ async function generateTicketTableCsvs() {
 
   return {
     tickets: {
-      csvData: stringifyCsv(headersWithoutProduct, uniqueRows),
-      rowCount: uniqueRows.length,
+      body: createCsvReadableFromRows(headersWithoutProduct, uniqueRows),
+      getRowCount: () => uniqueRows.length,
       fileName: 'tickets.csv'
     },
     ticketsWithFood: {
-      csvData: stringifyCsv(headers, rows),
-      rowCount: rows.length,
+      body: createCsvReadableFromRows(headers, rows),
+      getRowCount: () => rows.length,
       fileName: 'tickets-with-food.csv'
     }
   };
@@ -430,8 +438,8 @@ async function generateBeneficiarySummaryCsv() {
   ];
 
   return {
-    csvData: stringifyCsv(headers, rows),
-    rowCount: rows.length,
+    body: createCsvReadableFromRows(headers, rows),
+    getRowCount: () => rows.length,
     fileName: 'beneficiary-summary.csv'
   };
 }
@@ -477,8 +485,8 @@ async function generateDeliverySummaryCsv() {
   ];
 
   return {
-    csvData: stringifyCsv(headers, rows),
-    rowCount: rows.length,
+    body: createCsvReadableFromRows(headers, rows),
+    getRowCount: () => rows.length,
     fileName: 'delivery-summary.csv'
   };
 }

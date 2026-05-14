@@ -1,8 +1,10 @@
+const { Readable } = require('stream');
 const mysqlConnection = require('../connection/connection');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const moment = require('moment-timezone');
 
 const HEALTH_METRICS_CHUNK_SIZE = 1000;
+const HEALTH_METRICS_CSV_BATCH_SIZE = 500;
 const HEALTH_METRICS_TIMEZONE = 'America/Los_Angeles';
 const EVENT_TIME_UNMATCHED_THRESHOLD_HOURS = 1;
 const SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING = 'ascending';
@@ -789,111 +791,142 @@ function assertHealthMetricsScope(cabecera) {
   }
 }
 
-async function buildHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
+function streamHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
   assertHealthMetricsScope(cabecera);
 
   const normalizedFilters = normalizeHealthMetricFilters(filters);
-  const [questionCatalog, metricUsers] = await Promise.all([
-    getHealthMetricQuestionCatalog(cabecera, language),
-    getHealthMetricUsers(cabecera, normalizedFilters)
-  ]);
-  const { questions, questionIds } = questionCatalog;
-  const headers = baseHeaders().concat(
-    questions.map(question => ({
-      id: String(question.id),
-      title: question.question
-    }))
-  );
+  const fileName = 'health-metrics.csv';
+  let rowCount = 0;
 
-  const csvStringifier = createCsvStringifier({
-    header: headers,
-    fieldDelimiter: ';'
-  });
+  async function* generator() {
+    const [questionCatalog, metricUsers] = await Promise.all([
+      getHealthMetricQuestionCatalog(cabecera, language),
+      getHealthMetricUsers(cabecera, normalizedFilters)
+    ]);
+    const { questions, questionIds } = questionCatalog;
+    const headers = baseHeaders().concat(
+      questions.map(question => ({
+        id: String(question.id),
+        title: question.question
+      }))
+    );
+    const csvStringifier = createCsvStringifier({
+      header: headers,
+      fieldDelimiter: ';'
+    });
 
-  if (metricUsers.length === 0) {
-    return {
-      csvData: csvStringifier.getHeaderString(),
-      rowCount: 0,
-      fileName: 'health-metrics.csv'
-    };
-  }
+    yield Buffer.from(csvStringifier.getHeaderString(), 'utf8');
 
-  const metricUserIds = metricUsers.map(user => user.user_id);
-  const [deliverySummaryByUserId, deliveryEventsByUserId, answerValueByUserQuestion] = await Promise.all([
-    getHealthMetricDeliverySummaryByUserIds(metricUserIds, normalizedFilters),
-    getHealthMetricDeliveryEventsByUserIds(metricUserIds, normalizedFilters),
-    getHealthMetricAnswerValueMap(metricUserIds, questionIds, language)
-  ]);
-
-  const rowsForCsv = [];
-
-  metricUsers.forEach(user => {
-    const deliverySummary = deliverySummaryByUserId.get(user.user_id) || {
-      locations_visited: '',
-      delivery_count: 0,
-      delivery_count_scanned: 0,
-      delivery_count_not_scanned: 0,
-      delivery_count_between_dates: 0,
-      delivery_count_between_dates_scanned: 0,
-      delivery_count_between_dates_not_scanned: 0
-    };
-
-    const baseRow = {
-      user_id: user.user_id,
-      username: user.username,
-      email: user.email,
-      firstname: user.firstname,
-      lastname: user.lastname,
-      language: user.language,
-      date_of_birth: user.date_of_birth,
-      age: user.age,
-      phone: user.phone,
-      zipcode: user.zipcode,
-      household_size: user.household_size,
-      gender: user.gender,
-      ethnicity: user.ethnicity,
-      other_ethnicity: user.other_ethnicity,
-      first_location_visited: user.first_location_visited,
-      last_location_visited: user.last_location_visited,
-      locations_visited: deliverySummary.locations_visited,
-      delivery_count: deliverySummary.delivery_count,
-      delivery_count_scanned: deliverySummary.delivery_count_scanned,
-      delivery_count_not_scanned: deliverySummary.delivery_count_not_scanned,
-      delivery_count_between_dates: deliverySummary.delivery_count_between_dates,
-      delivery_count_between_dates_scanned: deliverySummary.delivery_count_between_dates_scanned,
-      delivery_count_between_dates_not_scanned: deliverySummary.delivery_count_between_dates_not_scanned,
-      registration_date: user.registration_date,
-      registration_time: user.registration_time
-    };
-
-    for (let i = 0; i < questions.length; i++) {
-      const question = questions[i];
-      baseRow[String(question.id)] = answerValueByUserQuestion.get(`${user.user_id}:${question.id}`) || '';
+    if (metricUsers.length === 0) {
+      return;
     }
 
-    const userEvents = deliveryEventsByUserId.get(user.user_id) || [{
-      event_date: '',
-      event_time: '',
-      event_location: ''
-    }];
+    const metricUserIds = metricUsers.map(user => user.user_id);
+    const [
+      deliverySummaryByUserId,
+      deliveryEventsByUserId,
+      answerValueByUserQuestion
+    ] = await Promise.all([
+      getHealthMetricDeliverySummaryByUserIds(metricUserIds, normalizedFilters),
+      getHealthMetricDeliveryEventsByUserIds(metricUserIds, normalizedFilters),
+      getHealthMetricAnswerValueMap(metricUserIds, questionIds, language)
+    ]);
 
-    userEvents.forEach(eventRow => {
-      rowsForCsv.push({
-        ...baseRow,
-        event_date: eventRow.event_date,
-        event_time: eventRow.event_time,
-        event_location: eventRow.event_location
-      });
-    });
-  });
+    let batch = [];
 
-  let csvData = csvStringifier.getHeaderString();
-  csvData += csvStringifier.stringifyRecords(rowsForCsv);
+    for (let userIndex = 0; userIndex < metricUsers.length; userIndex++) {
+      const user = metricUsers[userIndex];
+      const deliverySummary = deliverySummaryByUserId.get(user.user_id) || {
+        locations_visited: '',
+        delivery_count: 0,
+        delivery_count_scanned: 0,
+        delivery_count_not_scanned: 0,
+        delivery_count_between_dates: 0,
+        delivery_count_between_dates_scanned: 0,
+        delivery_count_between_dates_not_scanned: 0
+      };
+
+      const baseRow = {
+        user_id: user.user_id,
+        username: user.username,
+        email: user.email,
+        firstname: user.firstname,
+        lastname: user.lastname,
+        language: user.language,
+        date_of_birth: user.date_of_birth,
+        age: user.age,
+        phone: user.phone,
+        zipcode: user.zipcode,
+        household_size: user.household_size,
+        gender: user.gender,
+        ethnicity: user.ethnicity,
+        other_ethnicity: user.other_ethnicity,
+        first_location_visited: user.first_location_visited,
+        last_location_visited: user.last_location_visited,
+        locations_visited: deliverySummary.locations_visited,
+        delivery_count: deliverySummary.delivery_count,
+        delivery_count_scanned: deliverySummary.delivery_count_scanned,
+        delivery_count_not_scanned: deliverySummary.delivery_count_not_scanned,
+        delivery_count_between_dates: deliverySummary.delivery_count_between_dates,
+        delivery_count_between_dates_scanned: deliverySummary.delivery_count_between_dates_scanned,
+        delivery_count_between_dates_not_scanned: deliverySummary.delivery_count_between_dates_not_scanned,
+        registration_date: user.registration_date,
+        registration_time: user.registration_time
+      };
+
+      for (let qIndex = 0; qIndex < questions.length; qIndex++) {
+        const question = questions[qIndex];
+        baseRow[String(question.id)] =
+          answerValueByUserQuestion.get(`${user.user_id}:${question.id}`) || '';
+      }
+
+      const userEvents = deliveryEventsByUserId.get(user.user_id) || [{
+        event_date: '',
+        event_time: '',
+        event_location: ''
+      }];
+
+      for (let eIndex = 0; eIndex < userEvents.length; eIndex++) {
+        const eventRow = userEvents[eIndex];
+        batch.push({
+          ...baseRow,
+          event_date: eventRow.event_date,
+          event_time: eventRow.event_time,
+          event_location: eventRow.event_location
+        });
+
+        if (batch.length >= HEALTH_METRICS_CSV_BATCH_SIZE) {
+          rowCount += batch.length;
+          yield Buffer.from(csvStringifier.stringifyRecords(batch), 'utf8');
+          batch = [];
+        }
+      }
+    }
+
+    if (batch.length > 0) {
+      rowCount += batch.length;
+      yield Buffer.from(csvStringifier.stringifyRecords(batch), 'utf8');
+    }
+  }
 
   return {
-    csvData,
-    rowCount: rowsForCsv.length,
-    fileName: 'health-metrics.csv'
+    body: Readable.from(generator(), { objectMode: false }),
+    getRowCount: () => rowCount,
+    fileName
+  };
+}
+
+async function buildHealthMetricsCsv(options) {
+  const { body, getRowCount, fileName } = streamHealthMetricsCsv(options);
+  const chunks = [];
+  for await (const chunk of body) {
+    chunks.push(chunk);
+  }
+
+  return {
+    csvData: Buffer.concat(chunks).toString('utf8'),
+    rowCount: getRowCount(),
+    fileName
   };
 }
 
@@ -902,5 +935,6 @@ module.exports = {
   getHealthMetricAnswerCountMap,
   getHealthMetricQuestionCatalog,
   getHealthMetricUserIds,
-  normalizeHealthMetricFilters
+  normalizeHealthMetricFilters,
+  streamHealthMetricsCsv
 };
