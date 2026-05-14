@@ -358,8 +358,25 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, language)
   }
 }
 
+async function sendAlertEmail(subject, body, emails) {
+  const mailOptions = {
+    from: 'bienestarcommunity@gmail.com',
+    to: Array.isArray(emails) ? emails.join(', ') : emails,
+    subject,
+    text: body,
+    html: `<pre style="font-family: monospace; white-space: pre-wrap;">${body
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')}</pre>`
+  };
+
+  await transporter.sendMail(mailOptions);
+}
+
 module.exports.sendVolunteerConfirmation = sendVolunteerConfirmation;
 
 module.exports.sendTicketEmail = sendTicketEmail;
 
 module.exports.sendEmailWithExcelAttachment = sendEmailWithExcelAttachment;
+
+module.exports.sendAlertEmail = sendAlertEmail;

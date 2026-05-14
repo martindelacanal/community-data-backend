@@ -5,6 +5,7 @@
 /api/public/uploads/*
 .env
 /logs/*
+.drive-sync-last-alert.json
 
 # compiled output
 /dist

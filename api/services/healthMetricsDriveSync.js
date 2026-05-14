@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const logger = require('../utils/logger');
 const { buildHealthMetricsCsv } = require('./healthMetrics');
 const { getGoogleDriveFileMetadata, updateGoogleDriveFile } = require('./googleDrive');
@@ -8,6 +10,9 @@ const {
   generateVolunteerTableCsv,
   generateWorkerTableCsv
 } = require('./tableCsvExports');
+
+const ALERT_DEDUP_FILE = path.join(__dirname, '..', '..', '.drive-sync-last-alert.json');
+const ALERT_DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000;
 
 function parseBooleanEnv(value, defaultValue = false) {
   if (value === undefined || value === null || value === '') {
@@ -159,7 +164,64 @@ async function runDriveSyncTask(label, taskFn, results, errors) {
   }
 }
 
-async function syncScheduledDriveCsvsToDrive({ ignoreEnabledFlag = false } = {}) {
+function readLastDriveSyncAlert() {
+  try {
+    return JSON.parse(fs.readFileSync(ALERT_DEDUP_FILE, 'utf8'));
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeLastDriveSyncAlert(payload) {
+  try {
+    fs.writeFileSync(ALERT_DEDUP_FILE, JSON.stringify(payload));
+  } catch (err) {
+    logger.warn(`Could not persist Drive sync alert dedup state: ${err.message}`);
+  }
+}
+
+async function maybeSendDriveSyncAlert({ errors, notifyOnError }) {
+  if (!notifyOnError || !notifyOnError.sendEmail || !Array.isArray(notifyOnError.emails) || notifyOnError.emails.length === 0) {
+    return;
+  }
+  if (!Array.isArray(errors) || errors.length === 0) {
+    return;
+  }
+
+  const signature = errors
+    .map(e => `${e.label}:${e.message}`)
+    .sort()
+    .join('\n');
+  const last = readLastDriveSyncAlert();
+  const now = Date.now();
+  if (last && last.signature === signature && now - last.timestamp < ALERT_DEDUP_WINDOW_MS) {
+    logger.info(`Drive sync alert email suppressed (same errors within ${ALERT_DEDUP_WINDOW_MS / 3600000}h).`);
+    return;
+  }
+
+  const subject = `[community-data] Drive CSV sync had ${errors.length} error(s)`;
+  const body = [
+    `Drive CSV sync run finished with ${errors.length} error(s) at ${new Date().toISOString()}.`,
+    '',
+    'Errors:',
+    ...errors.map(e => `  - ${e.label}: ${e.message}`),
+    '',
+    'Drive folder: https://drive.google.com/drive/folders/1qpLUheUhPtQYgwT0YuaK3Yv4JLCtEv2e',
+    'Diagnostic on EC2: cd /home/ubuntu/community-data-backend && node scripts/diagnoseDriveSync.js',
+    '',
+    'This alert is deduped: same errors will not re-send within 12 hours.'
+  ].join('\n');
+
+  try {
+    await notifyOnError.sendEmail(subject, body, notifyOnError.emails);
+    writeLastDriveSyncAlert({ signature, timestamp: now });
+    logger.info(`Drive sync alert email sent to ${notifyOnError.emails.join(',')}.`);
+  } catch (err) {
+    logger.error(`Failed to send Drive sync alert email: ${err.message}`);
+  }
+}
+
+async function syncScheduledDriveCsvsToDrive({ ignoreEnabledFlag = false, notifyOnError = null } = {}) {
   if (!ignoreEnabledFlag && !isHealthMetricsDriveSyncEnabled()) {
     logger.info('Scheduled Drive CSV sync is disabled. Skipping execution.');
     return {
@@ -261,6 +323,8 @@ async function syncScheduledDriveCsvsToDrive({ ignoreEnabledFlag = false } = {})
       errors
     );
   }
+
+  await maybeSendDriveSyncAlert({ errors, notifyOnError });
 
   return {
     skipped: false,

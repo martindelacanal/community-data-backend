@@ -727,6 +727,8 @@ healthMetricsDriveSyncRule.hour = [12, 18];
 healthMetricsDriveSyncRule.minute = 0;
 healthMetricsDriveSyncRule.tz = 'America/Los_Angeles';
 
+const DRIVE_SYNC_ALERT_EMAILS = ['martin.delacanalerbetta@gmail.com'];
+
 const driveSyncJob = schedule.scheduleJob(healthMetricsDriveSyncRule, async () => {
     if (!isHealthMetricsDriveSyncEnabled()) {
         logger.info('Scheduled Drive CSV sync is disabled. Skipping scheduled execution.');
@@ -739,32 +741,34 @@ const driveSyncJob = schedule.scheduleJob(healthMetricsDriveSyncRule, async () =
     }
 
     isHealthMetricsDriveSyncRunning = true;
-    logger.info('Scheduled Drive CSV sync started.');
     try {
-        const result = await syncScheduledDriveCsvsToDrive();
+        const result = await syncScheduledDriveCsvsToDrive({
+            notifyOnError: { emails: DRIVE_SYNC_ALERT_EMAILS, sendEmail: email.sendAlertEmail }
+        });
         if (!result.skipped) {
             logger.info(`Scheduled Drive CSV sync finished. synced=${result.results.length}, errors=${result.errors.length}`);
         }
     } catch (error) {
         logger.error(`Scheduled Drive CSV sync failed: ${error.message}`);
+        try {
+            await email.sendAlertEmail(
+                '[community-data] Drive CSV sync failed (top-level)',
+                `Scheduled Drive CSV sync threw an unhandled error.\n\n${error && error.stack ? error.stack : error}`,
+                DRIVE_SYNC_ALERT_EMAILS
+            );
+        } catch (mailErr) {
+            logger.error(`Failed to send Drive sync alert email: ${mailErr.message}`);
+        }
     } finally {
         isHealthMetricsDriveSyncRunning = false;
     }
 });
 
-const driveSyncEnabledAtBoot = isHealthMetricsDriveSyncEnabled();
 const driveSyncNextRun = driveSyncJob && driveSyncJob.nextInvocation();
 logger.info(
-    `Drive CSV sync scheduler registered. enabled=${driveSyncEnabledAtBoot}, ` +
+    `Drive CSV sync scheduler registered. enabled=${isHealthMetricsDriveSyncEnabled()}, ` +
     `tz=America/Los_Angeles, hours=12,18, nextRun=${driveSyncNextRun ? driveSyncNextRun.toISOString() : 'none'}`
 );
-
-process.on('unhandledRejection', (reason) => {
-    logger.error(`Unhandled promise rejection: ${reason && reason.stack ? reason.stack : reason}`);
-});
-process.on('uncaughtException', (error) => {
-    logger.error(`Uncaught exception: ${error && error.stack ? error.stack : error}`);
-});
 
 module.exports = {
     getRawDataExcel,
