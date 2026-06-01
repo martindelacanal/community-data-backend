@@ -597,7 +597,7 @@ router.post('/signup', async (req, res) => {
       const answer = secondForm[i].answer;
       var user_question_id = null;
 
-      if (answer) {
+      if (hasMeaningfulSubmittedSurveyAnswer(answer_type_id, answer)) {
         switch (answer_type_id) {
           case 1: // texto
             const [rows] = await connection.query('insert into user_question(user_id, question_id, answer_type_id, answer_text) values(?,?,?,?)',
@@ -651,6 +651,15 @@ router.post('/signup', async (req, res) => {
     }
 
     // Confirmar transacción
+    const requiredValidationError = await validateRequiredSurveyAnswersForUser(connection, {
+      user_id,
+      location_id
+    });
+    if (requiredValidationError) {
+      await connection.rollback();
+      return res.status(requiredValidationError.status).json(requiredValidationError.payload);
+    }
+
     await connection.commit();
 
     // Responder éxito antes de procesar Mailchimp (para no afectar la transacción)
@@ -3916,6 +3925,10 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
         return res.status(400).json(`Unsupported answer_type_id for question_id=${question_id}`);
       }
 
+      if (!hasMeaningfulSubmittedSurveyAnswer(answer_type_id, answerValue)) {
+        continue;
+      }
+
       const existingUserQuestion = await getLatestUserQuestionRow(connection, user_id, question_id);
       const previousSnapshot = await getUserQuestionSnapshot(connection, existingUserQuestion);
       let userQuestionId = null;
@@ -3979,6 +3992,15 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
         source: BENEFICIARY_ANSWER_SOURCE_AUTO_CLEAR,
         submitted_at_client: null
       });
+    }
+
+    const requiredValidationError = await validateRequiredSurveyAnswersForUser(connection, {
+      user_id,
+      location_id
+    });
+    if (requiredValidationError) {
+      await connection.rollback();
+      return res.status(requiredValidationError.status).json(requiredValidationError.payload);
     }
 
     await connection.commit();
@@ -4890,6 +4912,7 @@ router.post('/survey/question', verifyToken, async (req, res) => {
   const depends_on_question_id = parseSurveyNullablePositiveInt(body.depends_on_question_id);
   const depends_on_answer_id = parseSurveyNullablePositiveInt(body.depends_on_answer_id);
   const requestedQuestionOrder = parseSurveyNullablePositiveInt(body.order);
+  const requestedRequired = hasSurveyValue(body.required) ? normalizeSurveyRequired(body.required) : 'Y';
   const hasTrafficLightEnabledField = Object.prototype.hasOwnProperty.call(body, 'traffic_light_enabled');
   const hasTrafficLightDirectionField = Object.prototype.hasOwnProperty.call(body, 'traffic_light_direction');
   const parsedTrafficLightEnabled = hasTrafficLightEnabledField
@@ -4904,6 +4927,9 @@ router.post('/survey/question', verifyToken, async (req, res) => {
   }
   if (!answer_type_id) {
     return res.status(400).json('answer_type_id is required and must be a positive integer');
+  }
+  if (!requestedRequired) {
+    return res.status(400).json('required must be Y or N');
   }
   if (hasTrafficLightEnabledField && parsedTrafficLightEnabled === null) {
     return res.status(400).json('traffic_light_enabled must be a boolean');
@@ -4987,6 +5013,8 @@ router.post('/survey/question', verifyToken, async (req, res) => {
       normalizedLocationIds.push(locationId);
     }
   }
+  const enabled = normalizedLocationIds.length > 0 ? 'Y' : 'N';
+  const required = enabled === 'Y' ? requestedRequired : 'N';
 
   const connection = await mysqlConnection.promise().getConnection();
   try {
@@ -5014,7 +5042,7 @@ router.post('/survey/question', verifyToken, async (req, res) => {
 
     if (depends_on_question_id) {
       const [parentRows] = await connection.query(
-        'select id, enabled, answer_type_id, `order` from question where id = ? limit 1',
+        'select id, enabled, `required`, answer_type_id, `order` from question where id = ? limit 1',
         [depends_on_question_id]
       );
       if (parentRows.length === 0) {
@@ -5032,6 +5060,14 @@ router.post('/survey/question', verifyToken, async (req, res) => {
         return res.status(400).json(buildSurveyErrorPayload(
           'SURVEY_DEP_PARENT_DISABLED',
           'Parent question must be enabled',
+          { depends_on_question_id }
+        ));
+      }
+      if (required === 'Y' && (normalizeSurveyRequired(parent.required) || 'N') !== 'Y') {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_REQUIRED_OPTIONAL_PARENT',
+          'A required question cannot depend on an optional question',
           { depends_on_question_id }
         ));
       }
@@ -5098,16 +5134,20 @@ router.post('/survey/question', verifyToken, async (req, res) => {
         depends_on_question_id,
         depends_on_answer_id,
         answer_type_id,
+        enabled,
+        \`required\`,
         traffic_light_enabled,
         traffic_light_direction,
         \`order\`
-      ) values(?,?,?,?,?,?,?,?)`,
+      ) values(?,?,?,?,?,?,?,?,?,?)`,
       [
         name,
         name_es,
         depends_on_question_id,
         depends_on_answer_id,
         answer_type_id,
+        enabled,
+        required,
         trafficLightConfig.traffic_light_enabled,
         trafficLightConfig.traffic_light_direction,
         questionOrder
@@ -5282,7 +5322,7 @@ router.post('/survey/location', verifyToken, async (req, res) => {
     }
 
     const [allQuestionRows] = await connection.query(
-      'select id, `order`, enabled, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
+      'select id, `order`, enabled, `required`, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
     );
     const questionStateById = new Map();
     const allQuestionIds = [];
@@ -5292,6 +5332,7 @@ router.post('/survey/location', verifyToken, async (req, res) => {
         question_id: row.id,
         order: row.order,
         enabled: row.enabled,
+        required: row.required,
         answer_type_id: row.answer_type_id,
         depends_on_question_id: row.depends_on_question_id,
         depends_on_answer_id: row.depends_on_answer_id
@@ -5491,10 +5532,14 @@ router.post('/survey/location/bulk', verifyToken, async (req, res) => {
         'update question_location set enabled = ? where question_id = ?',
         ['N', question_id]
       );
+      await connection.query(
+        'update question set `required` = ? where id = ?',
+        ['N', question_id]
+      );
     }
 
     const [allQuestionRows] = await connection.query(
-      'select id, `order`, enabled, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
+      'select id, `order`, enabled, `required`, answer_type_id, depends_on_question_id, depends_on_answer_id from question'
     );
     const questionStateById = new Map();
     const allQuestionIds = [];
@@ -5504,6 +5549,7 @@ router.post('/survey/location/bulk', verifyToken, async (req, res) => {
         question_id: row.id,
         order: row.order,
         enabled: row.enabled,
+        required: row.required,
         answer_type_id: row.answer_type_id,
         depends_on_question_id: row.depends_on_question_id,
         depends_on_answer_id: row.depends_on_answer_id
@@ -5617,8 +5663,8 @@ async function disableQuestions(connection, question_id, enabled, answer_id = nu
   var rows = null;
   if (!answer_id) {
     [rows] = await connection.query(
-      'update question set enabled = ? where id = ?',
-      [enabled, question_id]
+      'update question set enabled = ?, `required` = case when ? = ? then ? else `required` end where id = ?',
+      [enabled, enabled, 'N', 'N', question_id]
     );
   }
   if ((rows && rows.affectedRows > 0) || answer_id) {
@@ -5945,6 +5991,30 @@ function hasMeaningfulUserAnswerState(answerTypeId, answerState) {
   return false;
 }
 
+function hasMeaningfulSubmittedSurveyAnswer(answerTypeId, answerValue) {
+  if (answerTypeId === 1) {
+    return typeof answerValue === 'string' && answerValue.trim().length > 0;
+  }
+
+  if (answerTypeId === 2) {
+    if (!hasSurveyValue(answerValue)) {
+      return false;
+    }
+    const parsedNumber = Number(answerValue);
+    return Number.isFinite(parsedNumber);
+  }
+
+  if (answerTypeId === 3) {
+    return !!parseSurveyPositiveInt(answerValue);
+  }
+
+  if (answerTypeId === 4) {
+    return Array.isArray(answerValue) && answerValue.some((value) => !!parseSurveyPositiveInt(value));
+  }
+
+  return false;
+}
+
 function normalizeSurveyEnabled(value) {
   if (typeof value !== 'string') {
     return null;
@@ -5958,6 +6028,10 @@ function normalizeSurveyEnabled(value) {
   return normalized;
 }
 
+function normalizeSurveyRequired(value) {
+  return normalizeSurveyEnabled(value);
+}
+
 function getSurveyStatusLabels(enabled) {
   if (enabled === 'Y') {
     return {
@@ -5969,6 +6043,20 @@ function getSurveyStatusLabels(enabled) {
   return {
     name: 'Disabled',
     name_es: 'Deshabilitada'
+  };
+}
+
+function getSurveyRequiredLabels(required) {
+  if (required === 'Y') {
+    return {
+      name: 'Required',
+      name_es: 'Obligatoria'
+    };
+  }
+
+  return {
+    name: 'Optional',
+    name_es: 'Opcional'
   };
 }
 
@@ -6494,6 +6582,20 @@ async function validateSurveyDependencyGraphState(connection, questionStateById,
       };
     }
 
+    if ((normalizeSurveyRequired(childQuestion.required) || 'N') === 'Y' && (normalizeSurveyRequired(parentQuestion.required) || 'N') !== 'Y') {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_REQUIRED_OPTIONAL_PARENT',
+          'A required question cannot depend on an optional question',
+          {
+            question_id: dependencyItem.question_id,
+            depends_on_question_id: dependencyItem.depends_on_question_id
+          }
+        )
+      };
+    }
+
     if (!isSurveySelectableAnswerType(parentQuestion.answer_type_id)) {
       return {
         status: 400,
@@ -6663,6 +6765,150 @@ async function insertBeneficiaryAnswerHistory(connection, payload) {
   if (rows.affectedRows === 0) {
     throw new Error('Could not insert beneficiary answer history');
   }
+}
+
+async function validateRequiredSurveyAnswersForUser(connection, payload) {
+  const locationId = parseSurveyPositiveInt(payload.location_id);
+  const userId = parseSurveyPositiveInt(payload.user_id);
+  if (!locationId || !userId) {
+    return {
+      status: 400,
+      payload: buildSurveyErrorPayload(
+        'SURVEY_REQUIRED_VALIDATION_INVALID',
+        'user_id and location_id are required to validate survey answers'
+      )
+    };
+  }
+
+  const [questionRows] = await connection.query(
+    `select
+       q.id,
+       q.answer_type_id,
+       q.required,
+       q.depends_on_question_id,
+       q.depends_on_answer_id,
+       q.\`order\`
+     from question q
+     inner join question_location ql on q.id = ql.question_id
+     where q.enabled = 'Y' and ql.location_id = ? and ql.enabled = 'Y'
+     order by q.\`order\`, q.id`,
+    [locationId]
+  );
+
+  if (questionRows.length === 0) {
+    return null;
+  }
+
+  const questionById = new Map();
+  const questionIds = [];
+  for (let i = 0; i < questionRows.length; i++) {
+    const row = questionRows[i];
+    questionById.set(row.id, {
+      ...row,
+      required: normalizeSurveyRequired(row.required) || 'N'
+    });
+    questionIds.push(row.id);
+  }
+
+  const questionPlaceholders = questionIds.map(() => '?').join(',');
+  const [latestUserRows] = await connection.query(
+    `select uq.id, uq.question_id, uq.answer_type_id, uq.answer_text, uq.answer_number
+     from user_question uq
+     inner join (
+       select question_id, max(id) as max_id
+       from user_question
+       where user_id = ? and question_id in (${questionPlaceholders})
+       group by question_id
+     ) latest on latest.max_id = uq.id`,
+    [userId, ...questionIds]
+  );
+
+  const latestUserRowByQuestionId = new Map();
+  const latestUserQuestionIds = [];
+  for (let i = 0; i < latestUserRows.length; i++) {
+    const row = latestUserRows[i];
+    latestUserRowByQuestionId.set(row.question_id, row);
+    latestUserQuestionIds.push(row.id);
+  }
+
+  const selectedAnswerIdsByQuestionId = new Map();
+  if (latestUserQuestionIds.length > 0) {
+    const userQuestionPlaceholders = latestUserQuestionIds.map(() => '?').join(',');
+    const [selectedAnswerRows] = await connection.query(
+      `select uq.question_id, uqa.answer_id
+       from user_question_answer uqa
+       inner join user_question uq on uq.id = uqa.user_question_id
+       where uqa.user_question_id in (${userQuestionPlaceholders})`,
+      latestUserQuestionIds
+    );
+    for (let i = 0; i < selectedAnswerRows.length; i++) {
+      const row = selectedAnswerRows[i];
+      if (!selectedAnswerIdsByQuestionId.has(row.question_id)) {
+        selectedAnswerIdsByQuestionId.set(row.question_id, new Set());
+      }
+      selectedAnswerIdsByQuestionId.get(row.question_id).add(row.answer_id);
+    }
+  }
+
+  const reachabilityCache = new Map();
+  const isReachable = (questionId, visited = new Set()) => {
+    if (reachabilityCache.has(questionId)) {
+      return reachabilityCache.get(questionId);
+    }
+    if (visited.has(questionId)) {
+      reachabilityCache.set(questionId, false);
+      return false;
+    }
+    visited.add(questionId);
+
+    const question = questionById.get(questionId);
+    if (!question) {
+      reachabilityCache.set(questionId, false);
+      return false;
+    }
+    if (!question.depends_on_question_id) {
+      reachabilityCache.set(questionId, true);
+      return true;
+    }
+
+    const parentAnswers = selectedAnswerIdsByQuestionId.get(question.depends_on_question_id);
+    if (!parentAnswers || !parentAnswers.has(question.depends_on_answer_id)) {
+      reachabilityCache.set(questionId, false);
+      return false;
+    }
+
+    const parentReachable = isReachable(question.depends_on_question_id, visited);
+    reachabilityCache.set(questionId, parentReachable);
+    return parentReachable;
+  };
+
+  for (let i = 0; i < questionRows.length; i++) {
+    const question = questionById.get(questionRows[i].id);
+    if (question.required !== 'Y' || !isReachable(question.id)) {
+      continue;
+    }
+
+    const latestUserRow = latestUserRowByQuestionId.get(question.id);
+    const selectedCount = selectedAnswerIdsByQuestionId.get(question.id)?.size || 0;
+    const hasMeaningfulAnswer = hasMeaningfulUserAnswerState(question.answer_type_id, {
+      answer_text: latestUserRow?.answer_text,
+      answer_number: latestUserRow?.answer_number,
+      selected_answer_count: selectedCount
+    });
+
+    if (!hasMeaningfulAnswer) {
+      return {
+        status: 400,
+        payload: buildSurveyErrorPayload(
+          'SURVEY_REQUIRED_ANSWER_MISSING',
+          'A required survey question is missing an answer',
+          { question_id: question.id }
+        )
+      };
+    }
+  }
+
+  return null;
 }
 
 async function clearUnreachableOnboardAnswers(connection, payload) {
@@ -7108,6 +7354,7 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
          id,
          \`order\`,
          enabled,
+         \`required\`,
          answer_type_id,
          depends_on_question_id,
          depends_on_answer_id,
@@ -7128,6 +7375,7 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
         question_id: row.id,
         order: row.order,
         enabled: row.enabled,
+        required: normalizeSurveyRequired(row.required) || 'N',
         answer_type_id: row.answer_type_id,
         depends_on_question_id: row.depends_on_question_id,
         depends_on_answer_id: row.depends_on_answer_id,
@@ -7151,6 +7399,7 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
         question_id: questionData.question_id,
         order: questionData.order,
         enabled: questionData.enabled,
+        required: questionData.required,
         answer_type_id: questionData.answer_type_id,
         depends_on_question_id: questionData.depends_on_question_id,
         depends_on_answer_id: questionData.depends_on_answer_id,
@@ -7449,9 +7698,11 @@ function buildSurveyDraftQuestionValidationMap(finalQuestionById) {
   const validationMap = new Map();
   for (const [questionId, questionData] of finalQuestionById.entries()) {
     const enabled = normalizeSurveyEnabled(questionData.enabled) || 'N';
+    const required = enabled === 'Y' ? (normalizeSurveyRequired(questionData.required) || 'N') : 'N';
     validationMap.set(questionId, {
       ...questionData,
       enabled,
+      required,
       depends_on_question_id: enabled === 'Y' ? questionData.depends_on_question_id : null,
       depends_on_answer_id: enabled === 'Y' ? questionData.depends_on_answer_id : null
     });
@@ -7493,6 +7744,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
     const nameEs = normalizeSurveyDraftName(questionItem.name_es, SURVEY_EDIT_TEXT_MAX_LENGTH);
     const answerTypeId = parseSurveyPositiveInt(questionItem.answer_type_id);
     const enabled = normalizeSurveyEnabled(questionItem.enabled);
+    const requestedRequired = normalizeSurveyRequired(questionItem.required);
     const questionOrder = parseSurveyPositiveInt(questionItem.order);
     const dependsOnQuestionRef = parseSurveyNullableIntegerRef(questionItem.depends_on_question_ref);
     const dependsOnAnswerRef = parseSurveyNullableIntegerRef(questionItem.depends_on_answer_ref);
@@ -7522,6 +7774,9 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
     }
     if (!enabled) {
       return res.status(400).json(`questions[${i}].enabled must be Y or N`);
+    }
+    if (!requestedRequired) {
+      return res.status(400).json(`questions[${i}].required must be Y or N`);
     }
     if (!questionOrder) {
       return res.status(400).json(`questions[${i}].order is invalid`);
@@ -7628,6 +7883,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
 
     seenQuestionClientIds.add(clientId);
     seenQuestionOrders.add(questionOrder);
+    const required = enabled === 'Y' && locationIds.length > 0 ? requestedRequired : 'N';
     normalizedQuestions.push({
       client_id: clientId,
       question_id: questionId,
@@ -7636,6 +7892,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
       name_es: nameEs,
       answer_type_id: answerTypeId,
       enabled,
+      required,
       order: questionOrder,
       depends_on_question_ref: dependsOnQuestionRef,
       depends_on_answer_ref: dependsOnAnswerRef,
@@ -7700,6 +7957,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
          name_es,
          answer_type_id,
          enabled,
+         \`required\`,
          \`order\`,
          depends_on_question_id,
          depends_on_answer_id,
@@ -7719,6 +7977,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
       questionBeforeById.set(row.id, {
         ...row,
         enabled: normalizeSurveyEnabled(row.enabled) || 'N',
+        required: normalizeSurveyRequired(row.required) || 'N',
         traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
         traffic_light_direction: trafficLightConfig.traffic_light_direction
       });
@@ -7762,10 +8021,11 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
           depends_on_answer_id,
           answer_type_id,
           enabled,
+          \`required\`,
           traffic_light_enabled,
           traffic_light_direction,
           \`order\`
-        ) values(?,?,?,?,?,?,?,?,?)`,
+        ) values(?,?,?,?,?,?,?,?,?,?)`,
         [
           questionItem.name,
           questionItem.name_es,
@@ -7773,6 +8033,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
           null,
           questionItem.answer_type_id,
           questionItem.enabled,
+          questionItem.required,
           trafficLightConfig.traffic_light_enabled,
           trafficLightConfig.traffic_light_direction,
           questionItem.order
@@ -7793,6 +8054,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
         name_es: questionItem.name_es,
         answer_type_id: questionItem.answer_type_id,
         enabled: questionItem.enabled,
+        required: questionItem.required,
         order: questionItem.order,
         depends_on_question_id: null,
         depends_on_answer_id: null,
@@ -7987,6 +8249,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
         question_id: questionId,
         order: beforeQuestion.order,
         enabled: beforeQuestion.enabled,
+        required: beforeQuestion.required,
         answer_type_id: beforeQuestion.answer_type_id,
         depends_on_question_id: beforeQuestion.depends_on_question_id,
         depends_on_answer_id: beforeQuestion.depends_on_answer_id,
@@ -8052,6 +8315,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
         question_id: resolvedQuestionId,
         order: questionItem.order,
         enabled: questionItem.enabled,
+        required: questionItem.required,
         answer_type_id: questionItem.answer_type_id,
         depends_on_question_id: resolvedDependsOnQuestionId,
         depends_on_answer_id: resolvedDependsOnAnswerId,
@@ -8065,6 +8329,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
         resolved_question_id: resolvedQuestionId,
         resolved_depends_on_question_id: resolvedDependsOnQuestionId,
         resolved_depends_on_answer_id: resolvedDependsOnAnswerId,
+        required: questionItem.required,
         traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
         traffic_light_direction: trafficLightConfig.traffic_light_direction
       });
@@ -8100,6 +8365,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
 
       const nameChanged = beforeQuestion.name !== questionItem.name || beforeQuestion.name_es !== questionItem.name_es;
       const statusChanged = beforeQuestion.enabled !== questionItem.enabled;
+      const requiredChanged = beforeQuestion.required !== questionItem.required;
       const orderChanged = beforeQuestion.order !== questionItem.order;
       const dependencyChanged =
         (beforeQuestion.depends_on_question_id || null) !== (questionItem.resolved_depends_on_question_id || null) ||
@@ -8113,6 +8379,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
          set name = ?,
              name_es = ?,
              enabled = ?,
+             \`required\` = ?,
              \`order\` = ?,
              depends_on_question_id = ?,
              depends_on_answer_id = ?,
@@ -8123,6 +8390,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
           questionItem.name,
           questionItem.name_es,
           questionItem.enabled,
+          questionItem.required,
           questionItem.order,
           questionItem.resolved_depends_on_question_id,
           questionItem.resolved_depends_on_answer_id,
@@ -8139,7 +8407,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
       const beforeLocationSet = locationSetBeforeByQuestionId.get(questionItem.resolved_question_id) || new Set();
       const locationChanged = !areSurveyNumberSetsEqual(beforeLocationSet, finalLocationSet);
 
-      if (!isCreatedQuestion && (nameChanged || statusChanged || orderChanged || dependencyChanged || trafficLightChanged || locationChanged)) {
+      if (!isCreatedQuestion && (nameChanged || statusChanged || requiredChanged || orderChanged || dependencyChanged || trafficLightChanged || locationChanged)) {
         updatedQuestions += 1;
       }
 
@@ -8165,6 +8433,23 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
           entity_type: 'question',
           before_enabled: beforeQuestion.enabled,
           after_enabled: questionItem.enabled,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: appliedAtClient
+        });
+      }
+
+      if (!isCreatedQuestion && requiredChanged) {
+        const beforeRequiredLabels = getSurveyRequiredLabels(beforeQuestion.required);
+        const afterRequiredLabels = getSurveyRequiredLabels(questionItem.required);
+        await insertSurveyHistoryRecord(connection, {
+          question_id: questionItem.resolved_question_id,
+          answer_id: null,
+          entity_type: 'question',
+          before_name: beforeRequiredLabels.name,
+          before_name_es: beforeRequiredLabels.name_es,
+          after_name: afterRequiredLabels.name,
+          after_name_es: afterRequiredLabels.name_es,
           edited_by_user_id: cabecera.id || null,
           source,
           edited_at_client: appliedAtClient
@@ -8240,7 +8525,7 @@ router.post('/survey/draft/apply', verifyToken, async (req, res) => {
         });
       }
 
-      if (trafficLightChanged && !nameChanged && !statusChanged && !orderChanged && !dependencyChanged && !locationChanged && beforeQuestion.updated_at) {
+      if (trafficLightChanged && !nameChanged && !statusChanged && !requiredChanged && !orderChanged && !dependencyChanged && !locationChanged && beforeQuestion.updated_at) {
         await connection.query(
           'update question set updated_at = ? where id = ?',
           [beforeQuestion.updated_at, questionItem.resolved_question_id]
@@ -8560,6 +8845,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
                   q.depends_on_question_id,
                   q.depends_on_answer_id,
                   q.enabled as question_enabled,
+                  q.\`required\` as question_required,
                   a.id as answer_id, 
                   a.name AS answer_name_en,
           a.name_es AS answer_name_es,
@@ -8598,6 +8884,7 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
             answer_type_id: row.answer_type_id,
             answer_type: row.answer_type_name,
             enabled: row.question_enabled,
+            required: normalizeSurveyRequired(row.question_required) || 'N',
             traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
             traffic_light_direction: trafficLightConfig.traffic_light_direction,
             loading: 'N',
@@ -8666,6 +8953,7 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
           q.name_es AS question_name_es,
           q.\`order\` AS question_order,
           q.answer_type_id,
+          q.\`required\` as question_required,
           q.depends_on_question_id,
           q.depends_on_answer_id,
           a.id as answer_id,
@@ -8696,6 +8984,7 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
             depends_on_question_id: row.depends_on_question_id,
             depends_on_answer_id: row.depends_on_answer_id,
             answer_type_id: row.answer_type_id,
+            required: normalizeSurveyRequired(row.question_required) || 'N',
             available_since: row.available_since || null,
             answers: []
           });
@@ -9086,6 +9375,7 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
           q.name_es AS question_name_es,
                   q.\`order\` AS question_order,
                   q.answer_type_id,
+                  q.\`required\` as question_required,
                   q.depends_on_question_id,
                   q.depends_on_answer_id,
                   a.id as answer_id, 
@@ -9114,6 +9404,7 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
           depends_on_question_id: row.depends_on_question_id,
           depends_on_answer_id: row.depends_on_answer_id,
           answer_type_id: row.answer_type_id,
+          required: normalizeSurveyRequired(row.question_required) || 'N',
           answers: []
         });
         question_id = row.question_id;
@@ -9448,7 +9739,6 @@ router.get('/total-beneficiaries-without-health-insurance', verifyToken, async (
             (SELECT COUNT(DISTINCT(u.id)) 
               FROM user as u
               INNER JOIN client_user as cu ON u.id = cu.user_id
-              INNER JOIN user_question AS uq ON u.id = uq.user_id 
               WHERE u.role_id = 5 and u.enabled = 'Y' and cu.client_id = ?) AS total_beneficiaries
           FROM user AS u
           INNER JOIN client_user AS cu ON u.id = cu.user_id
@@ -18118,14 +18408,24 @@ router.post('/table/user', verifyToken, async (req, res) => {
                                           FROM user_question AS uq
                                           INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
                                           WHERE uqa.answer_id IN (${content.join()}) AND uq.question_id = ${question_id}
+                                            AND uq.id = (
+                                              SELECT MAX(uq2.id)
+                                              FROM user_question AS uq2
+                                              WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
+                                            )
                                         )`);
                 }
               } else if (content) {
-                conditions.push(`u.id IN (
+                  conditions.push(`u.id IN (
                                           SELECT uq.user_id 
                                           FROM user_question AS uq
                                           INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
                                           WHERE uqa.answer_id = ${content} AND uq.question_id = ${question_id}
+                                            AND uq.id = (
+                                              SELECT MAX(uq2.id)
+                                              FROM user_question AS uq2
+                                              WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
+                                            )
                                         )`);
               }
             }

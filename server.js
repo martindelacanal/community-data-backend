@@ -90,8 +90,16 @@ function filterNewRegistrationRecords(uniqueJsonData, from_date, to_date, option
     });
 }
 
+function getHealthInsuranceValue(record) {
+    return (record?.['Health Insurance?'] || '').toString().trim().toLowerCase();
+}
+
 function isHealthInsuranceYes(record) {
-    return (record?.['Health Insurance?'] || '').toString().trim().toLowerCase() === 'yes';
+    return getHealthInsuranceValue(record) === 'yes';
+}
+
+function isHealthInsuranceNo(record) {
+    return getHealthInsuranceValue(record) === 'no';
 }
 
 async function getNewRegistrationsExcel(excelRawData, from_date, to_date, options = {}) {
@@ -123,7 +131,7 @@ async function getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, from
     }
 
     const filteredRecords = filterNewRegistrationRecords(uniqueJsonData, from_date, to_date, options)
-        .filter(record => !isHealthInsuranceYes(record));
+        .filter(record => isHealthInsuranceNo(record));
     const newWorkbook = XLSX.utils.book_new();
     const newWorksheet = XLSX.utils.json_to_sheet(filteredRecords);
     XLSX.utils.book_append_sheet(newWorkbook, newWorksheet, 'No Health Insurance');
@@ -204,15 +212,21 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
     });
 
     let newHealthPlanYes = 0;
+    let newHealthPlanNo = 0;
+    let newHealthPlanUnanswered = 0;
     newUserIds.forEach(userId => {
-        if (isHealthInsuranceYes(rawRecordByUserId.get(Number(userId)))) {
+        const rawRecord = rawRecordByUserId.get(Number(userId));
+        if (isHealthInsuranceYes(rawRecord)) {
             newHealthPlanYes++;
+        } else if (isHealthInsuranceNo(rawRecord)) {
+            newHealthPlanNo++;
+        } else {
+            newHealthPlanUnanswered++;
         }
     });
 
-    const newHealthPlanNo = Math.max(newCount - newHealthPlanYes, 0);
     const totalNewRecurring = newCount + recurringCount;
-    const totalNewHealthPlan = newCount;
+    const totalNewHealthPlan = newHealthPlanYes + newHealthPlanNo + newHealthPlanUnanswered;
 
     const summaryPartRows = [
         { col1: 'Client Name', col2: clientName, col3: '', col4: '', col5: '' },
@@ -225,6 +239,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         { col1: '(New) Health Plan', col2: '', col3: '', col4: '', col5: '' },
         { col1: '  YES', col2: newHealthPlanYes, col3: '', col4: '', col5: '' },
         { col1: '  NO', col2: newHealthPlanNo, col3: '', col4: '', col5: '' },
+        { col1: '  Unanswered', col2: newHealthPlanUnanswered, col3: '', col4: '', col5: '' },
         { col1: '  Total', col2: totalNewHealthPlan, col3: '', col4: '', col5: '' }
     ];
 
@@ -302,6 +317,7 @@ async function getSummaryExcel(from_date, to_date, client_id, excelRawData) {
         totalNewRecurring: totalNewRecurring,
         newHealthPlanYes: newHealthPlanYes,
         newHealthPlanNo: newHealthPlanNo,
+        newHealthPlanUnanswered: newHealthPlanUnanswered,
         totalNewHealthPlan: totalNewHealthPlan,
         locations: allClientLocations,
         newPerLocationMap: newPerLocationMap,

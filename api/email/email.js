@@ -90,7 +90,7 @@ function generateSummaryHtmlReport(reportData) {
     const {
         clientName, dateRangeDisplay,
         newCount, recurringCount, totalNewRecurring,
-        newHealthPlanYes, newHealthPlanNo, totalNewHealthPlan,
+        newHealthPlanYes, newHealthPlanNo, newHealthPlanUnanswered = 0, totalNewHealthPlan,
         locations, newPerLocationMap, recurringPerLocationMap,
         totalNewByLocation, totalRecurringByLocation, grandTotalByLocation,
         clientId
@@ -120,6 +120,7 @@ function generateSummaryHtmlReport(reportData) {
     html += '<tbody>';
     html += `<tr><td ${tdStyle}>&nbsp;&nbsp;YES</td><td ${tdRightStyle}>${newHealthPlanYes}</td></tr>`;
     html += `<tr><td ${tdStyle}>&nbsp;&nbsp;NO</td><td ${tdRightStyle}>${newHealthPlanNo}</td></tr>`;
+    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;Unanswered</td><td ${tdRightStyle}>${newHealthPlanUnanswered}</td></tr>`;
     html += `<tr><td ${tdStyle}>&nbsp;&nbsp;<b>Total</b></td><td ${tdRightStyle}><b>${totalNewHealthPlan}</b></td></tr>`;
     html += '</tbody></table>';
 
