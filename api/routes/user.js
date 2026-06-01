@@ -5916,6 +5916,7 @@ router.post('/survey/modify-checkbox', verifyToken, async (req, res) => {
 const SURVEY_EDIT_TEXT_MAX_LENGTH = 500;
 const SURVEY_HISTORY_DEFAULT_LIMIT = 20;
 const SURVEY_HISTORY_MAX_LIMIT = 100;
+const SURVEY_ANSWER_TEXT_MAX_LENGTH = 150;
 const SURVEY_STATUS_SOURCE_SINGLE = 'admin-survey-status-single';
 const SURVEY_STATUS_SOURCE_BATCH = 'admin-survey-status-batch';
 const SURVEY_REORDER_SOURCE_DEFAULT = 'admin-survey-ui';
@@ -6073,6 +6074,32 @@ function parseSurveyNullablePositiveInt(value) {
     return null;
   }
   return parseSurveyPositiveInt(value);
+}
+
+function parseSurveyIntegerRef(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value !== 0) {
+    return value;
+  }
+  if (typeof value !== 'string' || !/^-?\d+$/.test(value.trim())) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed === 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseSurveyNullableIntegerRef(value) {
+  if (!hasSurveyValue(value)) {
+    return null;
+  }
+  return parseSurveyIntegerRef(value);
+}
+
+function parseSurveyTempInt(value) {
+  const parsed = parseSurveyIntegerRef(value);
+  return parsed && parsed < 0 ? parsed : null;
 }
 
 function parseSurveyBoolean(value) {
@@ -6236,6 +6263,31 @@ function buildSurveyErrorPayload(error_code, message, details = null) {
     payload.details = details;
   }
   return payload;
+}
+
+function formatSurveyOrderLabel(orderValue, isSpanish = false) {
+  return isSpanish ? `Orden: ${orderValue}` : `Order: ${orderValue}`;
+}
+
+function formatSurveyDependencyLabel(dependsQuestionId, dependsAnswerId, isSpanish = false) {
+  if (!dependsQuestionId) {
+    return isSpanish ? 'Sin dependencia' : 'No dependency';
+  }
+  return isSpanish
+    ? `Depende de pregunta ${dependsQuestionId}, respuesta ${dependsAnswerId}`
+    : `Depends on question ${dependsQuestionId}, answer ${dependsAnswerId}`;
+}
+
+function formatSurveyTrafficLightLabel(enabled, direction, isSpanish = false) {
+  const enabledLabel = isSpanish
+    ? (enabled ? 'Activado' : 'Desactivado')
+    : (enabled ? 'Enabled' : 'Disabled');
+  const directionLabel = direction === SURVEY_TRAFFIC_LIGHT_DIRECTION_DESCENDING
+    ? (isSpanish ? 'Descendente' : 'Descending')
+    : (isSpanish ? 'Ascendente' : 'Ascending');
+  return isSpanish
+    ? `Semaforo: ${enabledLabel}, ${directionLabel}`
+    : `Traffic light: ${enabledLabel}, ${directionLabel}`;
 }
 
 function isSurveySelectableAnswerType(answerTypeId) {
@@ -7355,6 +7407,892 @@ router.post('/survey/reorder', verifyToken, async (req, res) => {
       updated_questions: updatedQuestions,
       updated_answers: updatedAnswers,
       orphaned_questions: [...orphanedQuestionSet],
+      updated_at: new Date().toISOString()
+    });
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    return res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
+function areSurveyNumberSetsEqual(leftSet, rightSet) {
+  if (leftSet.size !== rightSet.size) {
+    return false;
+  }
+  for (const value of leftSet.values()) {
+    if (!rightSet.has(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizeSurveyDraftName(value, maxLength) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength) {
+    return null;
+  }
+  return normalized;
+}
+
+function buildSurveyDraftQuestionValidationMap(finalQuestionById) {
+  const validationMap = new Map();
+  for (const [questionId, questionData] of finalQuestionById.entries()) {
+    const enabled = normalizeSurveyEnabled(questionData.enabled) || 'N';
+    validationMap.set(questionId, {
+      ...questionData,
+      enabled,
+      depends_on_question_id: enabled === 'Y' ? questionData.depends_on_question_id : null,
+      depends_on_answer_id: enabled === 'Y' ? questionData.depends_on_answer_id : null
+    });
+  }
+  return validationMap;
+}
+
+router.post('/survey/draft/apply', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const body = req.body || {};
+  const sourceParsed = parseSurveySource(body.source);
+  const appliedAtParsed = parseSurveyClientDate(body.applied_at);
+  if (sourceParsed.error) {
+    return res.status(400).json('source must be a string with a maximum length of 64 characters');
+  }
+  if (appliedAtParsed.error) {
+    return res.status(400).json('applied_at must be a valid ISO date string');
+  }
+  if (!Array.isArray(body.questions)) {
+    return res.status(400).json('questions must be an array');
+  }
+
+  const source = sourceParsed.value || 'admin-survey-ui';
+  const appliedAtClient = appliedAtParsed.value;
+  const normalizedQuestions = [];
+  const seenQuestionClientIds = new Set();
+  const seenQuestionOrders = new Set();
+
+  for (let i = 0; i < body.questions.length; i++) {
+    const questionItem = body.questions[i] || {};
+    const clientId = parseSurveyIntegerRef(questionItem.client_id);
+    const questionId = parseSurveyNullablePositiveInt(questionItem.question_id);
+    const tempId = parseSurveyTempInt(questionItem.temp_id);
+    const name = normalizeSurveyDraftName(questionItem.name, SURVEY_EDIT_TEXT_MAX_LENGTH);
+    const nameEs = normalizeSurveyDraftName(questionItem.name_es, SURVEY_EDIT_TEXT_MAX_LENGTH);
+    const answerTypeId = parseSurveyPositiveInt(questionItem.answer_type_id);
+    const enabled = normalizeSurveyEnabled(questionItem.enabled);
+    const questionOrder = parseSurveyPositiveInt(questionItem.order);
+    const dependsOnQuestionRef = parseSurveyNullableIntegerRef(questionItem.depends_on_question_ref);
+    const dependsOnAnswerRef = parseSurveyNullableIntegerRef(questionItem.depends_on_answer_ref);
+    const trafficLightEnabled = normalizeSurveyTrafficLightEnabled(questionItem.traffic_light_enabled);
+    const trafficLightDirection = normalizeSurveyTrafficLightDirection(questionItem.traffic_light_direction);
+
+    if (!clientId) {
+      return res.status(400).json(`questions[${i}].client_id is invalid`);
+    }
+    if (seenQuestionClientIds.has(clientId)) {
+      return res.status(400).json(`Duplicate question client_id in payload: ${clientId}`);
+    }
+    if (clientId > 0 && questionId !== clientId) {
+      return res.status(400).json(`questions[${i}].question_id must match client_id for existing questions`);
+    }
+    if (clientId < 0 && tempId !== clientId) {
+      return res.status(400).json(`questions[${i}].temp_id must match client_id for draft questions`);
+    }
+    if (clientId < 0 && questionId) {
+      return res.status(400).json(`questions[${i}].question_id is not allowed for draft questions`);
+    }
+    if (!name || !nameEs) {
+      return res.status(400).json(`questions[${i}].name and name_es are required and cannot exceed ${SURVEY_EDIT_TEXT_MAX_LENGTH} characters`);
+    }
+    if (!answerTypeId) {
+      return res.status(400).json(`questions[${i}].answer_type_id is invalid`);
+    }
+    if (!enabled) {
+      return res.status(400).json(`questions[${i}].enabled must be Y or N`);
+    }
+    if (!questionOrder) {
+      return res.status(400).json(`questions[${i}].order is invalid`);
+    }
+    if (seenQuestionOrders.has(questionOrder)) {
+      return res.status(400).json(`Duplicate question order in payload: ${questionOrder}`);
+    }
+    if (!dependsOnQuestionRef && dependsOnAnswerRef) {
+      return res.status(400).json(buildSurveyErrorPayload(
+        'SURVEY_DEP_ANSWER_INVALID',
+        'depends_on_answer_ref must be null when depends_on_question_ref is null',
+        { client_id: clientId, depends_on_answer_ref: dependsOnAnswerRef }
+      ));
+    }
+    if (dependsOnQuestionRef && !dependsOnAnswerRef) {
+      return res.status(400).json(buildSurveyErrorPayload(
+        'SURVEY_DEP_ANSWER_REQUIRED',
+        'depends_on_answer_ref is required when depends_on_question_ref is provided',
+        { client_id: clientId, depends_on_question_ref: dependsOnQuestionRef }
+      ));
+    }
+    if (trafficLightEnabled === null) {
+      return res.status(400).json(`questions[${i}].traffic_light_enabled must be a boolean`);
+    }
+    if (!trafficLightDirection) {
+      return res.status(400).json(`questions[${i}].traffic_light_direction must be "ascending" or "descending"`);
+    }
+    if (!Array.isArray(questionItem.location_ids)) {
+      return res.status(400).json(`questions[${i}].location_ids must be an array`);
+    }
+    if (!Array.isArray(questionItem.answers)) {
+      return res.status(400).json(`questions[${i}].answers must be an array`);
+    }
+
+    const locationIds = [];
+    const seenLocationIds = new Set();
+    for (let locationIndex = 0; locationIndex < questionItem.location_ids.length; locationIndex++) {
+      const locationId = parseSurveyPositiveInt(questionItem.location_ids[locationIndex]);
+      if (!locationId) {
+        return res.status(400).json(`questions[${i}].location_ids[${locationIndex}] must be a positive integer`);
+      }
+      if (!seenLocationIds.has(locationId)) {
+        seenLocationIds.add(locationId);
+        locationIds.push(locationId);
+      }
+    }
+
+    const answers = [];
+    const seenAnswerClientIds = new Set();
+    const seenAnswerOrders = new Set();
+    for (let answerIndex = 0; answerIndex < questionItem.answers.length; answerIndex++) {
+      const answerItem = questionItem.answers[answerIndex] || {};
+      const answerClientId = parseSurveyIntegerRef(answerItem.client_id);
+      const answerId = parseSurveyNullablePositiveInt(answerItem.answer_id);
+      const answerTempId = parseSurveyTempInt(answerItem.temp_id);
+      const answerName = normalizeSurveyDraftName(answerItem.name, SURVEY_ANSWER_TEXT_MAX_LENGTH);
+      const answerNameEs = normalizeSurveyDraftName(answerItem.name_es, SURVEY_ANSWER_TEXT_MAX_LENGTH);
+      const answerEnabled = normalizeSurveyEnabled(answerItem.enabled);
+      const answerOrder = parseSurveyPositiveInt(answerItem.order);
+
+      if (!answerClientId) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}].client_id is invalid`);
+      }
+      if (seenAnswerClientIds.has(answerClientId)) {
+        return res.status(400).json(`Duplicate answer client_id in question ${clientId}: ${answerClientId}`);
+      }
+      if (clientId < 0 && answerClientId > 0) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}] must use a temp_id for draft questions`);
+      }
+      if (answerClientId > 0 && answerId !== answerClientId) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}].answer_id must match client_id for existing answers`);
+      }
+      if (answerClientId < 0 && answerTempId !== answerClientId) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}].temp_id must match client_id for draft answers`);
+      }
+      if (answerClientId < 0 && answerId) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}].answer_id is not allowed for draft answers`);
+      }
+      if (!answerName || !answerNameEs) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}].name and name_es are required and cannot exceed ${SURVEY_ANSWER_TEXT_MAX_LENGTH} characters`);
+      }
+      if (!answerEnabled) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}].enabled must be Y or N`);
+      }
+      if (!answerOrder) {
+        return res.status(400).json(`questions[${i}].answers[${answerIndex}].order is invalid`);
+      }
+      if (seenAnswerOrders.has(answerOrder)) {
+        return res.status(400).json(`Duplicate answer order in question ${clientId}: ${answerOrder}`);
+      }
+
+      seenAnswerClientIds.add(answerClientId);
+      seenAnswerOrders.add(answerOrder);
+      answers.push({
+        client_id: answerClientId,
+        answer_id: answerId,
+        temp_id: answerTempId,
+        name: answerName,
+        name_es: answerNameEs,
+        enabled: answerEnabled,
+        order: answerOrder
+      });
+    }
+
+    seenQuestionClientIds.add(clientId);
+    seenQuestionOrders.add(questionOrder);
+    normalizedQuestions.push({
+      client_id: clientId,
+      question_id: questionId,
+      temp_id: tempId,
+      name,
+      name_es: nameEs,
+      answer_type_id: answerTypeId,
+      enabled,
+      order: questionOrder,
+      depends_on_question_ref: dependsOnQuestionRef,
+      depends_on_answer_ref: dependsOnAnswerRef,
+      traffic_light_enabled: trafficLightEnabled,
+      traffic_light_direction: trafficLightDirection,
+      location_ids: locationIds,
+      answers
+    });
+  }
+
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const answerTypeIds = [...new Set(normalizedQuestions.map(question => question.answer_type_id))];
+    if (answerTypeIds.length > 0) {
+      const answerTypePlaceholders = answerTypeIds.map(() => '?').join(',');
+      const [answerTypeRows] = await connection.query(
+        `select id from answer_type where id in (${answerTypePlaceholders})`,
+        answerTypeIds
+      );
+      const validAnswerTypeIds = new Set(answerTypeRows.map(row => row.id));
+      const invalidAnswerTypeIds = answerTypeIds.filter(id => !validAnswerTypeIds.has(id));
+      if (invalidAnswerTypeIds.length > 0) {
+        await connection.rollback();
+        return res.status(400).json(`Invalid answer_type_id values: ${invalidAnswerTypeIds.join(', ')}`);
+      }
+    }
+
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      const selectable = isSurveySelectableAnswerType(questionItem.answer_type_id);
+      if (selectable && questionItem.answers.length === 0) {
+        await connection.rollback();
+        return res.status(400).json(`questions[${i}].answers is required for single or multiple choice questions`);
+      }
+      if (!selectable && questionItem.answers.length > 0) {
+        await connection.rollback();
+        return res.status(400).json(`questions[${i}].answers must be empty for non-selectable questions`);
+      }
+    }
+
+    const allLocationIds = [...new Set(normalizedQuestions.flatMap(question => question.location_ids))];
+    if (allLocationIds.length > 0) {
+      const locationPlaceholders = allLocationIds.map(() => '?').join(',');
+      const [validLocationRows] = await connection.query(
+        `select id from location where id in (${locationPlaceholders})`,
+        allLocationIds
+      );
+      const validLocationIdSet = new Set(validLocationRows.map(row => row.id));
+      const invalidLocationIds = allLocationIds.filter(id => !validLocationIdSet.has(id));
+      if (invalidLocationIds.length > 0) {
+        await connection.rollback();
+        return res.status(400).json(`Invalid location_ids: ${invalidLocationIds.join(', ')}`);
+      }
+    }
+
+    const [allQuestionRowsBefore] = await connection.query(
+      `select
+         id,
+         name,
+         name_es,
+         answer_type_id,
+         enabled,
+         \`order\`,
+         depends_on_question_id,
+         depends_on_answer_id,
+         updated_at,
+         traffic_light_enabled,
+         traffic_light_direction
+       from question`
+    );
+    const questionBeforeById = new Map();
+    for (let i = 0; i < allQuestionRowsBefore.length; i++) {
+      const row = allQuestionRowsBefore[i];
+      const trafficLightConfig = getSurveyTrafficLightConfig(
+        row.answer_type_id,
+        row.traffic_light_enabled,
+        row.traffic_light_direction
+      );
+      questionBeforeById.set(row.id, {
+        ...row,
+        enabled: normalizeSurveyEnabled(row.enabled) || 'N',
+        traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
+        traffic_light_direction: trafficLightConfig.traffic_light_direction
+      });
+    }
+
+    const existingQuestionIds = normalizedQuestions
+      .filter(question => question.client_id > 0)
+      .map(question => question.client_id);
+    for (let i = 0; i < existingQuestionIds.length; i++) {
+      if (!questionBeforeById.has(existingQuestionIds[i])) {
+        await connection.rollback();
+        return res.status(404).json(`Question not found: ${existingQuestionIds[i]}`);
+      }
+    }
+
+    const questionIdByClientRef = new Map();
+    existingQuestionIds.forEach(questionId => questionIdByClientRef.set(questionId, questionId));
+    const createdQuestions = [];
+
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      if (questionItem.client_id > 0) {
+        const beforeQuestion = questionBeforeById.get(questionItem.client_id);
+        if (beforeQuestion.answer_type_id !== questionItem.answer_type_id) {
+          await connection.rollback();
+          return res.status(400).json(`answer_type_id cannot be changed for existing question ${questionItem.client_id}`);
+        }
+        continue;
+      }
+
+      const trafficLightConfig = getSurveyTrafficLightConfig(
+        questionItem.answer_type_id,
+        questionItem.traffic_light_enabled,
+        questionItem.traffic_light_direction
+      );
+      const [insertQuestionRows] = await connection.query(
+        `insert into question(
+          name,
+          name_es,
+          depends_on_question_id,
+          depends_on_answer_id,
+          answer_type_id,
+          enabled,
+          traffic_light_enabled,
+          traffic_light_direction,
+          \`order\`
+        ) values(?,?,?,?,?,?,?,?,?)`,
+        [
+          questionItem.name,
+          questionItem.name_es,
+          null,
+          null,
+          questionItem.answer_type_id,
+          questionItem.enabled,
+          trafficLightConfig.traffic_light_enabled,
+          trafficLightConfig.traffic_light_direction,
+          questionItem.order
+        ]
+      );
+      if (insertQuestionRows.affectedRows === 0) {
+        throw new Error('Could not insert draft question');
+      }
+      const insertedQuestionId = insertQuestionRows.insertId;
+      questionIdByClientRef.set(questionItem.client_id, insertedQuestionId);
+      createdQuestions.push({
+        temp_id: questionItem.client_id,
+        question_id: insertedQuestionId
+      });
+      questionBeforeById.set(insertedQuestionId, {
+        id: insertedQuestionId,
+        name: questionItem.name,
+        name_es: questionItem.name_es,
+        answer_type_id: questionItem.answer_type_id,
+        enabled: questionItem.enabled,
+        order: questionItem.order,
+        depends_on_question_id: null,
+        depends_on_answer_id: null,
+        updated_at: null,
+        traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
+        traffic_light_direction: trafficLightConfig.traffic_light_direction,
+        is_created_in_draft: true
+      });
+    }
+
+    const allExistingQuestionIds = [...questionBeforeById.keys()];
+    const locationSetBeforeByQuestionId = await getEnabledSurveyLocationsByQuestionIds(connection, allExistingQuestionIds);
+    const affectedQuestionIds = normalizedQuestions
+      .map(question => questionIdByClientRef.get(question.client_id))
+      .filter(questionId => !!questionId);
+    const answerBeforeByKey = new Map();
+    if (affectedQuestionIds.length > 0) {
+      const affectedQuestionPlaceholders = affectedQuestionIds.map(() => '?').join(',');
+      const [answerRowsBefore] = await connection.query(
+        `select question_id, id as answer_id, name, name_es, enabled, \`order\`
+         from answer
+         where question_id in (${affectedQuestionPlaceholders})`,
+        affectedQuestionIds
+      );
+      for (let i = 0; i < answerRowsBefore.length; i++) {
+        const row = answerRowsBefore[i];
+        answerBeforeByKey.set(`${row.question_id}:${row.answer_id}`, {
+          ...row,
+          enabled: normalizeSurveyEnabled(row.enabled) || 'N'
+        });
+      }
+    }
+
+    const answerIdByClientKey = new Map();
+    const createdAnswers = [];
+    const questionIdsWithCreatedAnswers = new Set();
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      const resolvedQuestionId = questionIdByClientRef.get(questionItem.client_id);
+      let nextAnswerId = 1;
+      const [maxAnswerRows] = await connection.query(
+        'select ifnull(max(id), 0) + 1 as next_answer_id from answer where question_id = ?',
+        [resolvedQuestionId]
+      );
+      nextAnswerId = maxAnswerRows[0]?.next_answer_id || 1;
+
+      for (let answerIndex = 0; answerIndex < questionItem.answers.length; answerIndex++) {
+        const answerItem = questionItem.answers[answerIndex];
+        const answerClientKey = `${questionItem.client_id}:${answerItem.client_id}`;
+        if (answerItem.client_id > 0) {
+          const answerKey = `${resolvedQuestionId}:${answerItem.client_id}`;
+          if (!answerBeforeByKey.has(answerKey)) {
+            await connection.rollback();
+            return res.status(404).json(`Answer not found: question_id=${resolvedQuestionId}, answer_id=${answerItem.client_id}`);
+          }
+          answerIdByClientKey.set(answerClientKey, answerItem.client_id);
+          continue;
+        }
+
+        const assignedAnswerId = nextAnswerId;
+        nextAnswerId += 1;
+        const [insertAnswerRows] = await connection.query(
+          'insert into answer(question_id, id, name, name_es, enabled, `order`) values(?,?,?,?,?,?)',
+          [
+            resolvedQuestionId,
+            assignedAnswerId,
+            answerItem.name,
+            answerItem.name_es,
+            answerItem.enabled,
+            answerItem.order
+          ]
+        );
+        if (insertAnswerRows.affectedRows === 0) {
+          throw new Error(`Could not insert draft answer for question ${resolvedQuestionId}`);
+        }
+        answerIdByClientKey.set(answerClientKey, assignedAnswerId);
+        if (questionItem.client_id > 0) {
+          questionIdsWithCreatedAnswers.add(resolvedQuestionId);
+        }
+        createdAnswers.push({
+          question_ref: questionItem.client_id,
+          temp_id: answerItem.client_id,
+          question_id: resolvedQuestionId,
+          answer_id: assignedAnswerId
+        });
+      }
+    }
+
+    let updatedAnswers = 0;
+    const touchedQuestionIdsByAnswerContent = new Set();
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      const resolvedQuestionId = questionIdByClientRef.get(questionItem.client_id);
+      for (let answerIndex = 0; answerIndex < questionItem.answers.length; answerIndex++) {
+        const answerItem = questionItem.answers[answerIndex];
+        if (answerItem.client_id < 0) {
+          continue;
+        }
+
+        const answerKey = `${resolvedQuestionId}:${answerItem.client_id}`;
+        const beforeAnswer = answerBeforeByKey.get(answerKey);
+        const nameChanged = beforeAnswer.name !== answerItem.name || beforeAnswer.name_es !== answerItem.name_es;
+        const statusChanged = beforeAnswer.enabled !== answerItem.enabled;
+        const orderChanged = beforeAnswer.order !== answerItem.order;
+        if (!nameChanged && !statusChanged && !orderChanged) {
+          continue;
+        }
+
+        const [answerUpdateRows] = await connection.query(
+          'update answer set name = ?, name_es = ?, enabled = ?, `order` = ? where question_id = ? and id = ?',
+          [
+            answerItem.name,
+            answerItem.name_es,
+            answerItem.enabled,
+            answerItem.order,
+            resolvedQuestionId,
+            answerItem.client_id
+          ]
+        );
+        if (answerUpdateRows.affectedRows === 0) {
+          throw new Error(`Could not update answer question_id=${resolvedQuestionId} answer_id=${answerItem.client_id}`);
+        }
+        updatedAnswers += 1;
+
+        if (nameChanged || statusChanged) {
+          touchedQuestionIdsByAnswerContent.add(resolvedQuestionId);
+        }
+
+        if (nameChanged) {
+          await insertSurveyHistoryRecord(connection, {
+            question_id: resolvedQuestionId,
+            answer_id: answerItem.client_id,
+            entity_type: 'answer',
+            before_name: beforeAnswer.name,
+            before_name_es: beforeAnswer.name_es,
+            after_name: answerItem.name,
+            after_name_es: answerItem.name_es,
+            edited_by_user_id: cabecera.id || null,
+            source,
+            edited_at_client: appliedAtClient
+          });
+        }
+
+        if (statusChanged) {
+          await insertSurveyStatusHistory(connection, {
+            question_id: resolvedQuestionId,
+            answer_id: answerItem.client_id,
+            entity_type: 'answer',
+            before_enabled: beforeAnswer.enabled,
+            after_enabled: answerItem.enabled,
+            edited_by_user_id: cabecera.id || null,
+            source,
+            edited_at_client: appliedAtClient
+          });
+        }
+
+        if (orderChanged) {
+          await insertSurveyReorderHistory(connection, {
+            question_id: resolvedQuestionId,
+            answer_id: answerItem.client_id,
+            entity_type: 'answer_order',
+            before_name: formatSurveyOrderLabel(beforeAnswer.order),
+            before_name_es: formatSurveyOrderLabel(beforeAnswer.order, true),
+            after_name: formatSurveyOrderLabel(answerItem.order),
+            after_name_es: formatSurveyOrderLabel(answerItem.order, true),
+            before_order: beforeAnswer.order,
+            after_order: answerItem.order,
+            edited_by_user_id: cabecera.id || null,
+            source,
+            edited_at_client: appliedAtClient
+          });
+        }
+      }
+    }
+
+    for (const questionId of touchedQuestionIdsByAnswerContent.values()) {
+      await connection.query(
+        'update question set updated_at = NOW() where id = ?',
+        [questionId]
+      );
+    }
+    for (const questionId of questionIdsWithCreatedAnswers.values()) {
+      await connection.query(
+        'update question set updated_at = NOW() where id = ?',
+        [questionId]
+      );
+    }
+
+    const finalQuestionById = new Map();
+    for (const [questionId, beforeQuestion] of questionBeforeById.entries()) {
+      finalQuestionById.set(questionId, {
+        question_id: questionId,
+        order: beforeQuestion.order,
+        enabled: beforeQuestion.enabled,
+        answer_type_id: beforeQuestion.answer_type_id,
+        depends_on_question_id: beforeQuestion.depends_on_question_id,
+        depends_on_answer_id: beforeQuestion.depends_on_answer_id,
+        updated_at: beforeQuestion.updated_at || null,
+        traffic_light_enabled: beforeQuestion.traffic_light_enabled,
+        traffic_light_direction: beforeQuestion.traffic_light_direction
+      });
+    }
+
+    const finalLocationSetByQuestionId = new Map();
+    for (const [questionId, locationSet] of locationSetBeforeByQuestionId.entries()) {
+      finalLocationSetByQuestionId.set(questionId, new Set(locationSet));
+    }
+
+    const finalDraftQuestions = [];
+    for (let i = 0; i < normalizedQuestions.length; i++) {
+      const questionItem = normalizedQuestions[i];
+      const resolvedQuestionId = questionIdByClientRef.get(questionItem.client_id);
+      const resolvedDependsOnQuestionId = questionItem.depends_on_question_ref
+        ? questionIdByClientRef.get(questionItem.depends_on_question_ref) || questionItem.depends_on_question_ref
+        : null;
+      let resolvedDependsOnAnswerId = null;
+
+      if (questionItem.depends_on_question_ref && questionItem.depends_on_answer_ref) {
+        if (questionItem.depends_on_answer_ref < 0) {
+          const answerClientKey = `${questionItem.depends_on_question_ref}:${questionItem.depends_on_answer_ref}`;
+          resolvedDependsOnAnswerId = answerIdByClientKey.get(answerClientKey);
+          if (!resolvedDependsOnAnswerId) {
+            await connection.rollback();
+            return res.status(400).json(buildSurveyErrorPayload(
+              'SURVEY_DEP_ANSWER_INVALID',
+              'Parent answer draft reference could not be resolved',
+              {
+                question_id: resolvedQuestionId,
+                depends_on_question_ref: questionItem.depends_on_question_ref,
+                depends_on_answer_ref: questionItem.depends_on_answer_ref
+              }
+            ));
+          }
+        } else {
+          resolvedDependsOnAnswerId = questionItem.depends_on_answer_ref;
+        }
+      }
+
+      if (questionItem.depends_on_question_ref && !resolvedDependsOnQuestionId) {
+        await connection.rollback();
+        return res.status(400).json(buildSurveyErrorPayload(
+          'SURVEY_DEP_PARENT_NOT_FOUND',
+          'Parent question draft reference could not be resolved',
+          {
+            question_id: resolvedQuestionId,
+            depends_on_question_ref: questionItem.depends_on_question_ref
+          }
+        ));
+      }
+
+      const trafficLightConfig = getSurveyTrafficLightConfig(
+        questionItem.answer_type_id,
+        questionItem.traffic_light_enabled,
+        questionItem.traffic_light_direction
+      );
+      const finalQuestion = {
+        question_id: resolvedQuestionId,
+        order: questionItem.order,
+        enabled: questionItem.enabled,
+        answer_type_id: questionItem.answer_type_id,
+        depends_on_question_id: resolvedDependsOnQuestionId,
+        depends_on_answer_id: resolvedDependsOnAnswerId,
+        traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
+        traffic_light_direction: trafficLightConfig.traffic_light_direction
+      };
+      finalQuestionById.set(resolvedQuestionId, finalQuestion);
+      finalLocationSetByQuestionId.set(resolvedQuestionId, new Set(questionItem.location_ids));
+      finalDraftQuestions.push({
+        ...questionItem,
+        resolved_question_id: resolvedQuestionId,
+        resolved_depends_on_question_id: resolvedDependsOnQuestionId,
+        resolved_depends_on_answer_id: resolvedDependsOnAnswerId,
+        traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
+        traffic_light_direction: trafficLightConfig.traffic_light_direction
+      });
+    }
+
+    const finalQuestionOrderToId = new Map();
+    for (const [questionId, questionData] of finalQuestionById.entries()) {
+      if (finalQuestionOrderToId.has(questionData.order)) {
+        await connection.rollback();
+        return res.status(400).json(
+          `Duplicate question order detected in final state: ${questionData.order} (question_id ${finalQuestionOrderToId.get(questionData.order)} and ${questionId})`
+        );
+      }
+      finalQuestionOrderToId.set(questionData.order, questionId);
+    }
+
+    const dependencyValidationError = await validateSurveyDependencyGraphState(
+      connection,
+      buildSurveyDraftQuestionValidationMap(finalQuestionById),
+      { locationSetByQuestionId: finalLocationSetByQuestionId }
+    );
+    if (dependencyValidationError) {
+      await connection.rollback();
+      return res.status(dependencyValidationError.status).json(dependencyValidationError.payload);
+    }
+
+    let updatedQuestions = 0;
+    let updatedLocations = 0;
+    for (let i = 0; i < finalDraftQuestions.length; i++) {
+      const questionItem = finalDraftQuestions[i];
+      const beforeQuestion = questionBeforeById.get(questionItem.resolved_question_id);
+      const isCreatedQuestion = !!beforeQuestion.is_created_in_draft;
+
+      const nameChanged = beforeQuestion.name !== questionItem.name || beforeQuestion.name_es !== questionItem.name_es;
+      const statusChanged = beforeQuestion.enabled !== questionItem.enabled;
+      const orderChanged = beforeQuestion.order !== questionItem.order;
+      const dependencyChanged =
+        (beforeQuestion.depends_on_question_id || null) !== (questionItem.resolved_depends_on_question_id || null) ||
+        (beforeQuestion.depends_on_answer_id || null) !== (questionItem.resolved_depends_on_answer_id || null);
+      const trafficLightChanged =
+        beforeQuestion.traffic_light_enabled !== questionItem.traffic_light_enabled ||
+        beforeQuestion.traffic_light_direction !== questionItem.traffic_light_direction;
+
+      const [questionUpdateRows] = await connection.query(
+        `update question
+         set name = ?,
+             name_es = ?,
+             enabled = ?,
+             \`order\` = ?,
+             depends_on_question_id = ?,
+             depends_on_answer_id = ?,
+             traffic_light_enabled = ?,
+             traffic_light_direction = ?
+         where id = ?`,
+        [
+          questionItem.name,
+          questionItem.name_es,
+          questionItem.enabled,
+          questionItem.order,
+          questionItem.resolved_depends_on_question_id,
+          questionItem.resolved_depends_on_answer_id,
+          questionItem.traffic_light_enabled,
+          questionItem.traffic_light_direction,
+          questionItem.resolved_question_id
+        ]
+      );
+      if (questionUpdateRows.affectedRows === 0) {
+        throw new Error(`Could not update question ${questionItem.resolved_question_id}`);
+      }
+
+      const finalLocationSet = finalLocationSetByQuestionId.get(questionItem.resolved_question_id) || new Set();
+      const beforeLocationSet = locationSetBeforeByQuestionId.get(questionItem.resolved_question_id) || new Set();
+      const locationChanged = !areSurveyNumberSetsEqual(beforeLocationSet, finalLocationSet);
+
+      if (!isCreatedQuestion && (nameChanged || statusChanged || orderChanged || dependencyChanged || trafficLightChanged || locationChanged)) {
+        updatedQuestions += 1;
+      }
+
+      if (!isCreatedQuestion && nameChanged) {
+        await insertSurveyHistoryRecord(connection, {
+          question_id: questionItem.resolved_question_id,
+          answer_id: null,
+          entity_type: 'question',
+          before_name: beforeQuestion.name,
+          before_name_es: beforeQuestion.name_es,
+          after_name: questionItem.name,
+          after_name_es: questionItem.name_es,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: appliedAtClient
+        });
+      }
+
+      if (!isCreatedQuestion && statusChanged) {
+        await insertSurveyStatusHistory(connection, {
+          question_id: questionItem.resolved_question_id,
+          answer_id: null,
+          entity_type: 'question',
+          before_enabled: beforeQuestion.enabled,
+          after_enabled: questionItem.enabled,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: appliedAtClient
+        });
+      }
+
+      if (!isCreatedQuestion && orderChanged) {
+        await insertSurveyReorderHistory(connection, {
+          question_id: questionItem.resolved_question_id,
+          answer_id: null,
+          entity_type: 'question_order',
+          before_name: formatSurveyOrderLabel(beforeQuestion.order),
+          before_name_es: formatSurveyOrderLabel(beforeQuestion.order, true),
+          after_name: formatSurveyOrderLabel(questionItem.order),
+          after_name_es: formatSurveyOrderLabel(questionItem.order, true),
+          before_order: beforeQuestion.order,
+          after_order: questionItem.order,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: appliedAtClient
+        });
+      }
+
+      if (!isCreatedQuestion && dependencyChanged) {
+        await insertSurveyReorderHistory(connection, {
+          question_id: questionItem.resolved_question_id,
+          answer_id: null,
+          entity_type: 'question_dependency',
+          before_name: formatSurveyDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id),
+          before_name_es: formatSurveyDependencyLabel(beforeQuestion.depends_on_question_id, beforeQuestion.depends_on_answer_id, true),
+          after_name: formatSurveyDependencyLabel(questionItem.resolved_depends_on_question_id, questionItem.resolved_depends_on_answer_id),
+          after_name_es: formatSurveyDependencyLabel(questionItem.resolved_depends_on_question_id, questionItem.resolved_depends_on_answer_id, true),
+          before_depends_on_question_id: beforeQuestion.depends_on_question_id,
+          after_depends_on_question_id: questionItem.resolved_depends_on_question_id,
+          before_depends_on_answer_id: beforeQuestion.depends_on_answer_id,
+          after_depends_on_answer_id: questionItem.resolved_depends_on_answer_id,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: appliedAtClient
+        });
+      }
+
+      if (!isCreatedQuestion && trafficLightChanged) {
+        await insertSurveyReorderHistory(connection, {
+          question_id: questionItem.resolved_question_id,
+          answer_id: null,
+          entity_type: 'question_traffic_light',
+          before_name: formatSurveyTrafficLightLabel(
+            beforeQuestion.traffic_light_enabled,
+            beforeQuestion.traffic_light_direction
+          ),
+          before_name_es: formatSurveyTrafficLightLabel(
+            beforeQuestion.traffic_light_enabled,
+            beforeQuestion.traffic_light_direction,
+            true
+          ),
+          after_name: formatSurveyTrafficLightLabel(
+            questionItem.traffic_light_enabled,
+            questionItem.traffic_light_direction
+          ),
+          after_name_es: formatSurveyTrafficLightLabel(
+            questionItem.traffic_light_enabled,
+            questionItem.traffic_light_direction,
+            true
+          ),
+          before_traffic_light_enabled: beforeQuestion.traffic_light_enabled,
+          after_traffic_light_enabled: questionItem.traffic_light_enabled,
+          before_traffic_light_direction: beforeQuestion.traffic_light_direction,
+          after_traffic_light_direction: questionItem.traffic_light_direction,
+          edited_by_user_id: cabecera.id || null,
+          source,
+          edited_at_client: appliedAtClient
+        });
+      }
+
+      if (trafficLightChanged && !nameChanged && !statusChanged && !orderChanged && !dependencyChanged && !locationChanged && beforeQuestion.updated_at) {
+        await connection.query(
+          'update question set updated_at = ? where id = ?',
+          [beforeQuestion.updated_at, questionItem.resolved_question_id]
+        );
+      }
+
+      if (locationChanged) {
+        updatedLocations += 1;
+        const finalLocationIds = [...finalLocationSet.values()];
+        if (finalLocationIds.length > 0) {
+          const locationPlaceholders = finalLocationIds.map(() => '?').join(',');
+          const [existingQuestionLocationRows] = await connection.query(
+            `select location_id from question_location where question_id = ? and location_id in (${locationPlaceholders})`,
+            [questionItem.resolved_question_id, ...finalLocationIds]
+          );
+          const existingLocationIdSet = new Set(existingQuestionLocationRows.map(row => row.location_id));
+          const missingLocationIds = finalLocationIds.filter(locationId => !existingLocationIdSet.has(locationId));
+          if (missingLocationIds.length > 0) {
+            const insertValues = missingLocationIds.map(() => '(?,?,?)').join(',');
+            const insertParams = [];
+            for (let locationIndex = 0; locationIndex < missingLocationIds.length; locationIndex++) {
+              insertParams.push(questionItem.resolved_question_id, missingLocationIds[locationIndex], 'Y');
+            }
+            await connection.query(
+              `insert into question_location(question_id, location_id, enabled) values ${insertValues}`,
+              insertParams
+            );
+          }
+          await connection.query(
+            `update question_location set enabled = 'Y' where question_id = ? and location_id in (${locationPlaceholders})`,
+            [questionItem.resolved_question_id, ...finalLocationIds]
+          );
+          await connection.query(
+            `update question_location set enabled = 'N' where question_id = ? and location_id not in (${locationPlaceholders})`,
+            [questionItem.resolved_question_id, ...finalLocationIds]
+          );
+        } else {
+          await connection.query(
+            'update question_location set enabled = ? where question_id = ?',
+            ['N', questionItem.resolved_question_id]
+          );
+        }
+      }
+    }
+
+    await connection.commit();
+    return res.json({
+      created_questions: createdQuestions,
+      created_answers: createdAnswers,
+      updated_questions: updatedQuestions,
+      updated_answers: updatedAnswers,
+      updated_locations: updatedLocations,
       updated_at: new Date().toISOString()
     });
   } catch (err) {
