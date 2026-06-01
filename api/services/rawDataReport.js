@@ -28,6 +28,10 @@ function buildUserBaseRow(row) {
     gender: row.gender,
     ethnicity: row.ethnicity,
     other_ethnicity: row.other_ethnicity,
+    second_ethnicity: row.second_ethnicity,
+    other_second_ethnicity: row.other_second_ethnicity,
+    preferred_language: row.preferred_language,
+    other_language: row.other_language,
     last_location_visited: row.last_location_visited,
     locations_visited: row.locations_visited,
     registration_date: row.registration_date,
@@ -164,6 +168,10 @@ async function fetchParticipantBaseRows(fromDate, toDate, clientId) {
         g.name AS gender,
         eth.name AS ethnicity,
         u.other_ethnicity,
+        se.name AS second_ethnicity,
+        u.other_second_ethnicity,
+        lang.name AS preferred_language,
+        u.other_language,
         loc.community_city AS last_location_visited,
         (
           SELECT GROUP_CONCAT(DISTINCT loc_visited.community_city ORDER BY loc_visited.community_city SEPARATOR ', ')
@@ -184,6 +192,8 @@ async function fetchParticipantBaseRows(fromDate, toDate, clientId) {
       INNER JOIN client_user cu ON u.id = cu.user_id
       LEFT JOIN gender AS g ON u.gender_id = g.id
       LEFT JOIN ethnicity AS eth ON u.ethnicity_id = eth.id
+      LEFT JOIN ethnicity AS se ON u.second_ethnicity_id = se.id
+      LEFT JOIN language AS lang ON u.language_id = lang.id
       LEFT JOIN location AS loc ON u.location_id = loc.id
       WHERE u.role_id = 5
         AND u.enabled = 'Y'
@@ -363,6 +373,7 @@ async function buildRawDataReport({ from_date, to_date, client_id }) {
   const headers = [
     'User ID', 'Username', 'Email', 'Firstname', 'Lastname', 'Date of birth',
     'Phone', 'Zipcode', 'Household size', 'Gender', 'Ethnicity', 'Other ethnicity',
+    'Second ethnicity', 'Other second ethnicity', 'Preferred language', 'Other language',
     'Last location visited', 'Locations visited', 'Registration date', 'Registration time',
     'Event Date', 'Event Time', 'Event Location', 'Registered at Client Location'
   ];
@@ -392,6 +403,10 @@ async function buildRawDataReport({ from_date, to_date, client_id }) {
         baseRow.gender,
         baseRow.ethnicity,
         baseRow.other_ethnicity,
+        baseRow.second_ethnicity,
+        baseRow.other_second_ethnicity,
+        baseRow.preferred_language,
+        baseRow.other_language,
         baseRow.last_location_visited,
         baseRow.locations_visited,
         baseRow.registration_date,
@@ -438,6 +453,10 @@ async function buildRawDataReport({ from_date, to_date, client_id }) {
         baseRow.gender,
         baseRow.ethnicity,
         baseRow.other_ethnicity,
+        baseRow.second_ethnicity,
+        baseRow.other_second_ethnicity,
+        baseRow.preferred_language,
+        baseRow.other_language,
         baseRow.last_location_visited,
         baseRow.locations_visited,
         baseRow.registration_date,

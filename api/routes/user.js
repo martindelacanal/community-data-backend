@@ -534,6 +534,13 @@ router.post('/signup', async (req, res) => {
   const gender = firstForm.gender || null;
   const ethnicity = firstForm.ethnicity || null;
   const otherEthnicity = firstForm.otherEthnicity || null;
+  // Preferred Language (required) + Second Ethnicity (optional) demographics
+  const language = firstForm.language || null;                       // language.id (Preferred Language)
+  const otherLanguage = firstForm.otherLanguage || null;             // free text when language = Other
+  const secondEthnicity = firstForm.secondEthnicity || null;         // ethnicity.id (optional)
+  const otherSecondEthnicity = firstForm.otherSecondEthnicity || null; // free text when second ethnicity = Others
+  // UI language preference persisted from the selection (English/Spanish switch the system language; Other keeps the last/default)
+  const uiLanguage = firstForm.uiLanguage === 'es' ? 'es' : 'en';
   const legalConsentAccepted = firstForm.legalConsentAccepted === true ? 1 : 0;
   const legalConsentAcceptedAt = legalConsentAccepted ? new Date() : null;
   const legalConsentVersion = '2026-03-02';
@@ -569,11 +576,16 @@ router.post('/signup', async (req, res) => {
                                                           gender_id, \
                                                           ethnicity_id, \
                                                           other_ethnicity, \
+                                                          second_ethnicity_id, \
+                                                          other_second_ethnicity, \
+                                                          language_id, \
+                                                          other_language, \
+                                                          language, \
                                                           legal_consent_accepted, \
                                                           legal_consent_accepted_at, \
                                                           legal_consent_version) \
-                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, location_id, householdSize, gender, ethnicity, otherEthnicity, legalConsentAccepted, legalConsentAcceptedAt, legalConsentVersion]);
+                                                          values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [username, passwordHash, email, role_id, client_id, firstname, lastname, dateOfBirth, phone, zipcode, location_id, location_id, householdSize, gender, ethnicity, otherEthnicity, secondEthnicity, otherSecondEthnicity, language, otherLanguage, uiLanguage, legalConsentAccepted, legalConsentAcceptedAt, legalConsentVersion]);
 
     if (rows.affectedRows === 0) {
       throw new Error('No se pudo crear el usuario');
@@ -9464,6 +9476,24 @@ router.get('/ethnicity', async (req, res) => {
   }
 });
 
+router.get('/language', async (req, res) => {
+  const id = req.query.id || null;
+  const language = req.query.language || 'en';
+  try {
+    const query = `SELECT id, ${language === 'en' ? 'name' : 'name_es'} AS name, code
+                  FROM language
+                  WHERE enabled = 'Y'
+                  ${id ? ' AND id = ?' : ''}
+                  ORDER BY id`;
+    const params = id ? [id] : [];
+    const [rows] = await mysqlConnection.promise().query(query, params);
+    res.json(rows);
+  } catch (error) {
+    console.log(error);
+    res.status(500).json('Internal server error');
+  }
+});
+
 router.get('/pounds-delivered', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'director') {
@@ -12156,6 +12186,14 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
+      var query_second_ethnicities = '';
+      if (Array.isArray(filters.second_ethnicities) && filters.second_ethnicities.length > 0) {
+        query_second_ethnicities = 'AND u.second_ethnicity_id IN (' + filters.second_ethnicities.map(Number).join() + ')';
+      }
+      var query_languages = '';
+      if (Array.isArray(filters.languages) && filters.languages.length > 0) {
+        query_languages = 'AND u.language_id IN (' + filters.languages.map(Number).join() + ')';
+      }
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id,
@@ -12170,6 +12208,10 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
                 g.name as gender,
                 e.name as ethnicity,
                 u.other_ethnicity,
+                se.name as second_ethnicity,
+                u.other_second_ethnicity,
+                lang.name as preferred_language,
+                u.other_language,
                 u.household_size,
                 c.short_name as last_client_name,
                 l.community_city as last_location_visited,
@@ -12183,6 +12225,8 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         FROM user as u
         INNER JOIN ethnicity as e ON u.ethnicity_id = e.id
         INNER JOIN gender as g ON u.gender_id = g.id
+        LEFT JOIN ethnicity as se ON u.second_ethnicity_id = se.id
+        LEFT JOIN language as lang ON u.language_id = lang.id
         LEFT JOIN client as c ON u.client_id = c.id
         LEFT JOIN client_user as cu ON u.id = cu.user_id
         LEFT JOIN location as l ON u.location_id = l.id
@@ -12190,6 +12234,8 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
+        ${query_second_ethnicities}
+        ${query_languages}
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
@@ -12212,6 +12258,10 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         { id: 'gender', title: 'Gender' },
         { id: 'ethnicity', title: 'Ethnicity' },
         { id: 'other_ethnicity', title: 'Other ethnicity' },
+        { id: 'second_ethnicity', title: 'Second ethnicity' },
+        { id: 'other_second_ethnicity', title: 'Other second ethnicity' },
+        { id: 'preferred_language', title: 'Preferred language' },
+        { id: 'other_language', title: 'Other language' },
         { id: 'household_size', title: 'Household size' },
         { id: 'last_client_name', title: 'Last client name' },
         { id: 'last_location_visited', title: 'Last location visited' },
@@ -18315,6 +18365,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
     const locations = filters.locations || [];
     const genders = filters.genders || [];
     const ethnicities = filters.ethnicities || [];
+    const second_ethnicities = filters.second_ethnicities || [];
+    const languages = filters.languages || [];
     const min_age = filters.min_age || 0;
     const max_age = filters.max_age || 150;
     const zipcode = filters.zipcode || null;
@@ -18345,6 +18397,14 @@ router.post('/table/user', verifyToken, async (req, res) => {
     var query_ethnicities = '';
     if (ethnicities.length > 0) {
       query_ethnicities = 'AND u.ethnicity_id IN (' + ethnicities.join() + ')';
+    }
+    var query_second_ethnicities = '';
+    if (second_ethnicities.length > 0) {
+      query_second_ethnicities = 'AND u.second_ethnicity_id IN (' + second_ethnicities.map(Number).join() + ')';
+    }
+    var query_languages = '';
+    if (languages.length > 0) {
+      query_languages = 'AND u.language_id IN (' + languages.map(Number).join() + ')';
     }
     var query_min_age = '';
     if (filters.min_age) {
@@ -18474,6 +18534,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
       ${query_locations}
       ${query_genders}
       ${query_ethnicities}
+      ${query_second_ethnicities}
+      ${query_languages}
       ${query_min_age}
       ${query_max_age}
       ${query_zipcode}
@@ -18500,6 +18562,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
           ${query_locations}
           ${query_genders}
           ${query_ethnicities}
+          ${query_second_ethnicities}
+          ${query_languages}
           ${query_min_age}
           ${query_max_age}
           ${query_zipcode}
@@ -20237,6 +20301,7 @@ router.post('/table/article', verifyToken, async (req, res) => {
     const locations = filters.locations || [];
     const genders = filters.genders || [];
     const ethnicities = filters.ethnicities || [];
+    const second_ethnicities = filters.second_ethnicities || [];
     const min_age = filters.min_age || null;
     const max_age = filters.max_age || null;
 
@@ -20287,6 +20352,11 @@ router.post('/table/article', verifyToken, async (req, res) => {
     var query_ethnicities = '';
     if (ethnicities.length > 0) {
       query_ethnicities = 'AND EXISTS (SELECT 1 FROM article_ethnicity ae WHERE ae.article_id = a.id AND ae.ethnicity_id IN (' + ethnicities.join(',') + '))';
+    }
+
+    var query_second_ethnicities = '';
+    if (second_ethnicities.length > 0) {
+      query_second_ethnicities = 'AND EXISTS (SELECT 1 FROM article_ethnicity ae2 WHERE ae2.article_id = a.id AND ae2.ethnicity_id IN (' + second_ethnicities.map(Number).join(',') + '))';
     }
 
     var query_age_range = '';
@@ -20362,6 +20432,7 @@ router.post('/table/article', verifyToken, async (req, res) => {
         ${query_locations}
         ${query_genders}
         ${query_ethnicities}
+        ${query_second_ethnicities}
         ${query_age_range}
         ${havingClause}
         ORDER BY ${queryOrderBy}
@@ -20396,6 +20467,7 @@ router.post('/table/article', verifyToken, async (req, res) => {
           ${query_locations}
           ${query_genders}
           ${query_ethnicities}
+          ${query_second_ethnicities}
           ${query_age_range}
           ${havingClause}
         ) as subquery
@@ -20553,6 +20625,10 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
             DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date,
             ${language === 'en' ? 'e.name' : 'e.name_es'} as ethnicity_name,
             u.other_ethnicity,
+            ${language === 'en' ? 'se.name' : 'se.name_es'} as second_ethnicity_name,
+            u.other_second_ethnicity,
+            ${language === 'en' ? 'lang.name' : 'lang.name_es'} as preferred_language_name,
+            u.other_language,
             ${language === 'en' ? 'g.name' : 'g.name_es'} as gender_name,
             u.phone,
             u.zipcode,
@@ -20566,6 +20642,8 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
           LEFT JOIN client as c ON u.client_id = c.id
           LEFT JOIN location as l ON u.location_id = l.id
           LEFT JOIN ethnicity as e ON u.ethnicity_id = e.id
+          LEFT JOIN ethnicity as se ON u.second_ethnicity_id = se.id
+          LEFT JOIN language as lang ON u.language_id = lang.id
           LEFT JOIN gender as g ON u.gender_id = g.id
           WHERE u.id = ?
           ${cabecera.role === 'client' ? ' AND (cu.client_id = ? or u.client_id = ?)' : ''}`,
@@ -20598,6 +20676,10 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
         user["role_name"] = rows[0].role_name;
         user["ethnicity_name"] = rows[0].ethnicity_name;
         user["other_ethnicity"] = rows[0].other_ethnicity;
+        user["second_ethnicity_name"] = rows[0].second_ethnicity_name;
+        user["other_second_ethnicity"] = rows[0].other_second_ethnicity;
+        user["preferred_language_name"] = rows[0].preferred_language_name;
+        user["other_language"] = rows[0].other_language;
         user["gender_name"] = rows[0].gender_name;
         user["phone"] = rows[0].phone;
         user["zipcode"] = rows[0].zipcode;

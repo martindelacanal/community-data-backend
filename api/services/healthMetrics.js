@@ -173,6 +173,8 @@ function normalizeHealthMetricFilters(rawFilters = {}) {
     locations: normalizeHealthMetricIntList(rawFilters.locations),
     genders: normalizeHealthMetricIntList(rawFilters.genders),
     ethnicities: normalizeHealthMetricIntList(rawFilters.ethnicities),
+    secondEthnicities: normalizeHealthMetricIntList(rawFilters.second_ethnicities),
+    languages: normalizeHealthMetricIntList(rawFilters.languages),
     minAge: normalizeHealthMetricAge(rawFilters.min_age),
     maxAge: normalizeHealthMetricAge(rawFilters.max_age),
     zipcode: zipcode || null,
@@ -286,6 +288,16 @@ function buildHealthMetricUserScope(cabecera, filters) {
   if (filters.ethnicities.length > 0) {
     whereClauses.push('u.ethnicity_id IN (?)');
     params.push(filters.ethnicities);
+  }
+
+  if (filters.secondEthnicities.length > 0) {
+    whereClauses.push('u.second_ethnicity_id IN (?)');
+    params.push(filters.secondEthnicities);
+  }
+
+  if (filters.languages.length > 0) {
+    whereClauses.push('u.language_id IN (?)');
+    params.push(filters.languages);
   }
 
   const birthDateRange = getHealthMetricBirthDateRange(filters.minAge, filters.maxAge);
@@ -435,6 +447,10 @@ async function getHealthMetricUsers(cabecera, filters) {
       g.name AS gender,
       eth.name AS ethnicity,
       u.other_ethnicity,
+      eth2.name AS second_ethnicity,
+      u.other_second_ethnicity,
+      lang.name AS preferred_language,
+      u.other_language,
       first_loc.community_city AS first_location_visited,
       loc.community_city AS last_location_visited,
       DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
@@ -443,6 +459,8 @@ async function getHealthMetricUsers(cabecera, filters) {
       ${joinSql}
       LEFT JOIN gender g ON g.id = u.gender_id
       LEFT JOIN ethnicity eth ON eth.id = u.ethnicity_id
+      LEFT JOIN ethnicity eth2 ON eth2.id = u.second_ethnicity_id
+      LEFT JOIN language lang ON lang.id = u.language_id
       LEFT JOIN location first_loc ON first_loc.id = u.first_location_id
       LEFT JOIN location loc ON loc.id = u.location_id
     WHERE ${whereSql}
@@ -760,6 +778,10 @@ function baseHeaders() {
     { id: 'gender', title: 'Gender' },
     { id: 'ethnicity', title: 'Ethnicity' },
     { id: 'other_ethnicity', title: 'Other ethnicity' },
+    { id: 'second_ethnicity', title: 'Second ethnicity' },
+    { id: 'other_second_ethnicity', title: 'Other second ethnicity' },
+    { id: 'preferred_language', title: 'Preferred language' },
+    { id: 'other_language', title: 'Other language' },
     { id: 'first_location_visited', title: 'First location visited' },
     { id: 'last_location_visited', title: 'Last location visited' },
     { id: 'locations_visited', title: 'Locations visited' },
@@ -861,6 +883,10 @@ function streamHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
         gender: user.gender,
         ethnicity: user.ethnicity,
         other_ethnicity: user.other_ethnicity,
+        second_ethnicity: user.second_ethnicity,
+        other_second_ethnicity: user.other_second_ethnicity,
+        preferred_language: user.preferred_language,
+        other_language: user.other_language,
         first_location_visited: user.first_location_visited,
         last_location_visited: user.last_location_visited,
         locations_visited: deliverySummary.locations_visited,
