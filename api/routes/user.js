@@ -9,6 +9,7 @@ const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const JSZip = require('jszip');
 const { sendTicketEmail } = require('../email/email');
 const { sendVolunteerConfirmation } = require('../email/email');
+const { sendVolunteerRegistrationNotification } = require('../email/email');
 const multer = require('multer');
 const sharp = require('sharp');
 const {
@@ -1617,6 +1618,70 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
         if (locationRows.length > 0) {
           await sendVolunteerConfirmation(email, locationRows[0].community_city, language);
         }
+
+        // Notify admin-configured recipients about the new volunteer registration.
+        // Non-blocking and defensive: must never break the registration flow.
+        try {
+          const [recipientRows] = await mysqlConnection.promise().query(
+            "SELECT email, language FROM volunteer_notification_recipient WHERE enabled = 'Y'"
+          );
+
+          if (recipientRows.length > 0) {
+            const [genderRows] = await mysqlConnection.promise().query(
+              'SELECT name, name_es FROM gender WHERE id = ?', [gender]
+            );
+            const [ethnicityRows] = await mysqlConnection.promise().query(
+              'SELECT name, name_es FROM ethnicity WHERE id = ?', [ethnicity]
+            );
+            const [nowRows] = await mysqlConnection.promise().query(
+              "SELECT DATE_FORMAT(CONVERT_TZ(NOW(), '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS submitted_on"
+            );
+
+            // Format date of birth (stored as YYYY-MM-DD) for display as MM/DD/YYYY
+            let dobDisplay = dateOfBirth;
+            if (typeof dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
+              const [y, m, d] = dateOfBirth.split('-');
+              dobDisplay = `${m}/${d}/${y}`;
+            }
+
+            const submittedOn = nowRows.length > 0 ? nowRows[0].submitted_on : null;
+
+            // Copy the buffers defensively: the email is sent after the HTTP
+            // response, so we don't want to depend on req.files staying intact.
+            const signatureAttachments = (req.files || [])
+              .filter((file) => file && file.buffer)
+              .map((file) => ({
+                filename: 'signature.jpg',
+                content: Buffer.from(file.buffer),
+                contentType: file.mimetype || 'image/jpeg'
+              }));
+
+            const volunteerData = {
+              id: volunteer_id,
+              firstname,
+              lastname,
+              email,
+              phone,
+              zipcode,
+              dateOfBirth: dobDisplay,
+              locationCity: locationRows.length > 0 ? locationRows[0].community_city : null,
+              gender: genderRows.length > 0 ? { en: genderRows[0].name, es: genderRows[0].name_es } : null,
+              ethnicity: ethnicityRows.length > 0 ? { en: ethnicityRows[0].name, es: ethnicityRows[0].name_es } : null,
+              otherEthnicity,
+              registeredLanguage: language,
+              legalConsentVersion,
+              legalConsentAcceptedAt: submittedOn,
+              submittedOn
+            };
+
+            const notifyResult = await sendVolunteerRegistrationNotification(volunteerData, recipientRows, signatureAttachments);
+            if (notifyResult && notifyResult.sent === 0) {
+              console.warn('Volunteer registration notification: no emails were sent despite configured recipients.');
+            }
+          }
+        } catch (notifyErr) {
+          console.log('Error notifying volunteer registration recipients:', notifyErr);
+        }
       } else {
         throw new Error('Could not create volunteer');
       }
@@ -1636,6 +1701,92 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
     } else {
       res.status(500).json('Internal server error');
     }
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Volunteer registration notification recipients (admin only)
+// These emails receive a copy of every new volunteer registration form.
+// ---------------------------------------------------------------------------
+router.get('/volunteer/notification-recipients', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('No autorizado');
+  }
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      "SELECT id, email, language FROM volunteer_notification_recipient WHERE enabled = 'Y' ORDER BY id ASC"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.put('/volunteer/notification-recipients', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin') {
+    return res.status(401).json('No autorizado');
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const incoming = Array.isArray(req.body?.recipients) ? req.body.recipients : [];
+
+  if (incoming.length > 100) {
+    return res.status(400).json('Too many recipients (max 100)');
+  }
+
+  // Validate, normalize and de-duplicate by lowercased email
+  const seen = new Set();
+  const recipients = [];
+  for (const item of incoming) {
+    const email = (item && typeof item.email === 'string') ? item.email.trim() : '';
+    if (!emailRegex.test(email) || email.length > 255) {
+      return res.status(400).json({ code: 'INVALID_EMAIL', email: email });
+    }
+    const key = email.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    const language = item.language === 'es' ? 'es' : 'en';
+    recipients.push({ email, language });
+  }
+
+  let connection;
+  try {
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+
+    // Replace the full set in a single transaction
+    await connection.query('DELETE FROM volunteer_notification_recipient');
+
+    if (recipients.length > 0) {
+      const values = recipients.map((r) => [r.email, r.language, 'Y']);
+      await connection.query(
+        'INSERT INTO volunteer_notification_recipient(email, language, enabled) VALUES ?',
+        [values]
+      );
+    }
+
+    await connection.commit();
+
+    const [rows] = await connection.query(
+      "SELECT id, email, language FROM volunteer_notification_recipient WHERE enabled = 'Y' ORDER BY id ASC"
+    );
+    res.json(rows);
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    res.status(500).json('Internal server error');
   } finally {
     if (connection) {
       connection.release();

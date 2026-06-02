@@ -359,6 +359,317 @@ async function sendVolunteerConfirmation(volunteerEmail, locationCity, language)
   }
 }
 
+// ---------------------------------------------------------------------------
+// New volunteer registration notification (sent to admin-configured recipients)
+// ---------------------------------------------------------------------------
+
+const VOLUNTEER_NOTIFICATION_BRAND = {
+  rose: '#df3d7a',
+  roseDark: '#c72f69',
+  sky: '#11b3d1',
+  textDark: '#434543',
+  border: '#c5e1e1',
+  lightCyan: '#d1f8f8',
+  pageBg: '#f4fbfb'
+};
+
+const VOLUNTEER_NOTIFICATION_I18N = {
+  en: {
+    subject: (name) => `New volunteer registration: ${name}`,
+    preheader: 'A new volunteer just completed the registration form.',
+    brand: 'Bienestar Community',
+    title: 'New Volunteer Registration',
+    intro: 'A new volunteer has just completed the registration form. These are all the details they submitted:',
+    sectionPersonal: 'Personal information',
+    sectionDemographics: 'Demographics',
+    sectionConsent: 'Consent & submission',
+    labels: {
+      firstname: 'First name',
+      lastname: 'Last name',
+      dateOfBirth: 'Date of birth',
+      email: 'Email',
+      phone: 'Phone',
+      zipcode: 'ZIP code',
+      location: 'Volunteer location',
+      gender: 'Gender',
+      ethnicity: 'Ethnicity',
+      otherEthnicity: 'Other ethnicity',
+      registeredLanguage: 'Registration language',
+      consent: 'Legal consent',
+      submittedOn: 'Submitted on'
+    },
+    consentAccepted: 'Accepted',
+    consentVersion: (v) => `version ${v}`,
+    signatureHeading: 'Signature',
+    signatureUnavailable: 'Signature image not available.',
+    notProvided: 'Not provided',
+    footer: 'You are receiving this email because you are configured as a recipient of new volunteer registrations in Bienestar Community.',
+    languageName: { en: 'English', es: 'Spanish' }
+  },
+  es: {
+    subject: (name) => `Nuevo registro de voluntario: ${name}`,
+    preheader: 'Una nueva persona voluntaria acaba de completar el formulario de registro.',
+    brand: 'Bienestar Community',
+    title: 'Nuevo registro de voluntario',
+    intro: 'Una nueva persona voluntaria acaba de completar el formulario de registro. Estos son todos los datos que envió:',
+    sectionPersonal: 'Información personal',
+    sectionDemographics: 'Datos demográficos',
+    sectionConsent: 'Consentimiento y envío',
+    labels: {
+      firstname: 'Nombre',
+      lastname: 'Apellido',
+      dateOfBirth: 'Fecha de nacimiento',
+      email: 'Correo electrónico',
+      phone: 'Teléfono',
+      zipcode: 'Código postal',
+      location: 'Locación de voluntariado',
+      gender: 'Género',
+      ethnicity: 'Etnia',
+      otherEthnicity: 'Otra etnia',
+      registeredLanguage: 'Idioma de registro',
+      consent: 'Consentimiento legal',
+      submittedOn: 'Enviado el'
+    },
+    consentAccepted: 'Aceptado',
+    consentVersion: (v) => `versión ${v}`,
+    signatureHeading: 'Firma',
+    signatureUnavailable: 'Imagen de la firma no disponible.',
+    notProvided: 'No proporcionado',
+    footer: 'Estás recibiendo este correo porque estás configurado como destinatario de los nuevos registros de voluntarios en Bienestar Community.',
+    languageName: { en: 'Inglés', es: 'Español' }
+  }
+};
+
+function escapeHtmlValue(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function normalizeVolunteerLanguage(language) {
+  return language === 'es' ? 'es' : 'en';
+}
+
+function pickLocalizedName(field, language) {
+  if (field === null || field === undefined) {
+    return '';
+  }
+  if (typeof field === 'object') {
+    return (language === 'es' ? field.es : field.en) || field.en || field.es || '';
+  }
+  return field;
+}
+
+function buildVolunteerNotificationContent(volunteerData, language, signatureCid) {
+  const t = VOLUNTEER_NOTIFICATION_I18N[language] || VOLUNTEER_NOTIFICATION_I18N.en;
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+
+  const fullName = `${volunteerData.firstname || ''} ${volunteerData.lastname || ''}`.trim() || volunteerData.email || '-';
+  const genderName = pickLocalizedName(volunteerData.gender, language);
+  const ethnicityName = pickLocalizedName(volunteerData.ethnicity, language);
+  const registeredLanguageName = t.languageName[normalizeVolunteerLanguage(volunteerData.registeredLanguage)];
+
+  let consentValue = t.consentAccepted;
+  if (volunteerData.legalConsentVersion) {
+    consentValue += ` (${t.consentVersion(volunteerData.legalConsentVersion)})`;
+  }
+  if (volunteerData.legalConsentAcceptedAt) {
+    consentValue += ` · ${volunteerData.legalConsentAcceptedAt}`;
+  }
+
+  const rows = [
+    { section: t.sectionPersonal },
+    { label: t.labels.firstname, value: volunteerData.firstname },
+    { label: t.labels.lastname, value: volunteerData.lastname },
+    { label: t.labels.dateOfBirth, value: volunteerData.dateOfBirth },
+    { label: t.labels.email, value: volunteerData.email },
+    { label: t.labels.phone, value: volunteerData.phone },
+    { label: t.labels.zipcode, value: volunteerData.zipcode },
+    { label: t.labels.location, value: volunteerData.locationCity },
+    { section: t.sectionDemographics },
+    { label: t.labels.gender, value: genderName },
+    { label: t.labels.ethnicity, value: ethnicityName }
+  ];
+
+  if (volunteerData.otherEthnicity) {
+    rows.push({ label: t.labels.otherEthnicity, value: volunteerData.otherEthnicity });
+  }
+
+  rows.push({ label: t.labels.registeredLanguage, value: registeredLanguageName });
+  rows.push({ section: t.sectionConsent });
+  rows.push({ label: t.labels.consent, value: consentValue });
+  rows.push({ label: t.labels.submittedOn, value: volunteerData.submittedOn });
+
+  // Plain-text version
+  let text = `${t.title}\n\n${t.intro}\n\n`;
+  rows.forEach((row) => {
+    if (row.section) {
+      text += `\n${row.section.toUpperCase()}\n`;
+    } else {
+      const value = (row.value === null || row.value === undefined || row.value === '') ? t.notProvided : row.value;
+      text += `${row.label}: ${value}\n`;
+    }
+  });
+  text += `\n${t.footer}\n`;
+
+  // HTML rows
+  const rowsHtml = rows.map((row) => {
+    if (row.section) {
+      return `<tr><td colspan="2" style="padding:22px 28px 8px 28px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${B.sky};">${escapeHtmlValue(row.section)}</td></tr>`;
+    }
+    const displayValue = (row.value === null || row.value === undefined || String(row.value).trim() === '')
+      ? `<span style="color:#9aa6a6;font-style:italic;">${escapeHtmlValue(t.notProvided)}</span>`
+      : escapeHtmlValue(row.value);
+    return `<tr>
+      <td style="padding:10px 28px;border-top:1px solid ${B.border};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:#7c8a8a;width:42%;vertical-align:top;">${escapeHtmlValue(row.label)}</td>
+      <td style="padding:10px 28px;border-top:1px solid ${B.border};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;color:${B.textDark};vertical-align:top;">${displayValue}</td>
+    </tr>`;
+  }).join('');
+
+  const signatureBlock = signatureCid
+    ? `<tr><td colspan="2" style="padding:22px 28px 8px 28px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${B.sky};">${escapeHtmlValue(t.signatureHeading)}</td></tr>
+       <tr><td colspan="2" style="padding:6px 28px 24px 28px;border-top:1px solid ${B.border};">
+         <img src="cid:${signatureCid}" alt="${escapeHtmlValue(t.signatureHeading)}" style="display:block;max-width:320px;width:100%;height:auto;border:1px solid ${B.border};border-radius:8px;background:#ffffff;">
+       </td></tr>`
+    : `<tr><td colspan="2" style="padding:22px 28px 8px 28px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${B.sky};">${escapeHtmlValue(t.signatureHeading)}</td></tr>
+       <tr><td colspan="2" style="padding:6px 28px 24px 28px;border-top:1px solid ${B.border};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:#9aa6a6;font-style:italic;">${escapeHtmlValue(t.signatureUnavailable)}</td></tr>`;
+
+  const html = `<!DOCTYPE html>
+<html lang="${language}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtmlValue(t.title)}</title>
+</head>
+<body style="margin:0;padding:0;background:${B.pageBg};">
+  <span style="display:none!important;visibility:hidden;opacity:0;height:0;width:0;overflow:hidden;mso-hide:all;">${escapeHtmlValue(t.preheader)}</span>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.pageBg};padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(67,69,67,0.08);">
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,${B.rose} 0%,${B.roseDark} 100%);padding:32px 28px;">
+              <p style="margin:0 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.85);">${escapeHtmlValue(t.brand)}</p>
+              <h1 style="margin:0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:24px;font-weight:700;color:#ffffff;">${escapeHtmlValue(t.title)}</h1>
+              <p style="margin:10px 0 0 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;color:#ffffff;font-weight:600;">${escapeHtmlValue(fullName)}</p>
+            </td>
+          </tr>
+          <!-- Intro -->
+          <tr>
+            <td style="padding:24px 28px 4px 28px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:${B.textDark};">${escapeHtmlValue(t.intro)}</td>
+          </tr>
+          <!-- Details -->
+          <tr>
+            <td style="padding:8px 0 0 0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                ${rowsHtml}
+                ${signatureBlock}
+              </table>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="padding:20px 28px 28px 28px;">
+              <div style="border-top:2px solid ${B.lightCyan};padding-top:16px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#9aa6a6;">${escapeHtmlValue(t.footer)}</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  // Sanitize the name used in the subject (an SMTP header) to prevent header
+  // injection via CR/LF and to keep the subject a sensible length.
+  const safeSubjectName = fullName.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+
+  return { subject: t.subject(safeSubjectName), html, text };
+}
+
+/**
+ * Sends the "new volunteer registration" notification to the admin-configured
+ * recipients. Recipients are grouped by their preferred language so each one
+ * receives the form rendered in their language. Never throws.
+ *
+ * @param {Object} volunteerData    Resolved volunteer info (names, not ids).
+ * @param {Array}  recipients       [{ email, language }]
+ * @param {Array}  signatureAttachments [{ filename, content(Buffer), contentType }]
+ */
+async function sendVolunteerRegistrationNotification(volunteerData, recipients, signatureAttachments = []) {
+  try {
+    const validRecipients = (recipients || []).filter(
+      (r) => r && typeof r.email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.email.trim())
+    );
+
+    if (validRecipients.length === 0) {
+      return { sent: 0, status: 200 };
+    }
+
+    // Group recipient emails by language (en | es), de-duplicating globally and
+    // case-insensitively so an address never gets more than one notification.
+    const groups = {};
+    const seenEmails = new Set();
+    validRecipients.forEach((r) => {
+      const normalizedEmail = r.email.trim();
+      const key = normalizedEmail.toLowerCase();
+      if (seenEmails.has(key)) {
+        return;
+      }
+      seenEmails.add(key);
+      const lang = normalizeVolunteerLanguage(r.language);
+      if (!groups[lang]) {
+        groups[lang] = [];
+      }
+      groups[lang].push(normalizedEmail);
+    });
+
+    const hasSignature = Array.isArray(signatureAttachments) && signatureAttachments.length > 0;
+    const signatureCid = hasSignature ? 'volunteer-signature' : null;
+    const attachments = hasSignature
+      ? [{
+          filename: signatureAttachments[0].filename || 'signature.jpg',
+          content: signatureAttachments[0].content,
+          contentType: signatureAttachments[0].contentType || 'image/jpeg',
+          cid: signatureCid
+        }]
+      : [];
+
+    let sent = 0;
+    for (const lang of Object.keys(groups)) {
+      const content = buildVolunteerNotificationContent(volunteerData, lang, signatureCid);
+      const mailOptions = {
+        from: 'bienestarcommunity@gmail.com',
+        bcc: groups[lang].join(', '),
+        subject: content.subject,
+        text: content.text,
+        html: content.html,
+        attachments
+      };
+
+      try {
+        const info = await transporter.sendMail(mailOptions);
+        sent += groups[lang].length;
+        console.log(`Volunteer registration notification (${lang}) sent to ${groups[lang].join(', ')}: ` + info.response);
+      } catch (err) {
+        console.log(`error sending volunteer registration notification (${lang}) to ${groups[lang].join(', ')}: `, err);
+      }
+    }
+
+    return { sent, status: 200 };
+  } catch (error) {
+    console.log('Error in sendVolunteerRegistrationNotification: ', error);
+    return { sent: 0, status: 500, error };
+  }
+}
+
 async function sendAlertEmail(subject, body, emails) {
   const mailOptions = {
     from: 'bienestarcommunity@gmail.com',
@@ -375,6 +686,8 @@ async function sendAlertEmail(subject, body, emails) {
 }
 
 module.exports.sendVolunteerConfirmation = sendVolunteerConfirmation;
+
+module.exports.sendVolunteerRegistrationNotification = sendVolunteerRegistrationNotification;
 
 module.exports.sendTicketEmail = sendTicketEmail;
 
