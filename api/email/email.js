@@ -215,142 +215,178 @@ async function sendTicketEmail(formData, products, images, emails) {
   }
 }
 
+// Shared branded e-mail shell (rose/sky brand, Quicksand, email-safe table layout).
+function wrapBrandedEmail({ lang = 'en', eyebrow = 'Bienestar Community', title = '', subtitle = '', preheader = '', bodyHtml = '', footerHtml = '' }) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const subtitleHtml = subtitle
+    ? `<p style="margin:10px 0 0 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;color:#ffffff;font-weight:600;">${escapeHtmlValue(subtitle)}</p>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtmlValue(title)}</title>
+</head>
+<body style="margin:0;padding:0;background:${B.pageBg};">
+  <span style="display:none!important;visibility:hidden;opacity:0;height:0;width:0;overflow:hidden;mso-hide:all;">${escapeHtmlValue(preheader)}</span>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.pageBg};padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(67,69,67,0.08);">
+          <tr>
+            <td style="background:linear-gradient(135deg,${B.rose} 0%,${B.roseDark} 100%);padding:32px 28px;">
+              <p style="margin:0 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.85);">${escapeHtmlValue(eyebrow)}</p>
+              <h1 style="margin:0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:24px;font-weight:700;color:#ffffff;">${escapeHtmlValue(title)}</h1>
+              ${subtitleHtml}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 28px 8px 28px;">${bodyHtml}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 28px 28px;">
+              <div style="border-top:2px solid ${B.lightCyan};padding-top:16px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;line-height:1.7;color:#7c8a8a;">${footerHtml}</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+// Bilingual content for the volunteer confirmation (Terms & Conditions) email.
+// The legal wording is preserved verbatim from the original implementation.
+const VOLUNTEER_CONFIRMATION_I18N = {
+  en: {
+    subject: 'Terms and conditions signed',
+    eyebrow: 'Bienestar Community',
+    title: 'Thank you for volunteering!',
+    subtitle: 'Your registration is confirmed',
+    preheader: 'A copy of the Volunteer Liability Waiver, Terms and Conditions you signed.',
+    intro: 'Hi, and welcome! We are so glad you are joining the Bienestar is Well-being volunteer team. For your records, here is a copy of the Volunteer Liability Waiver, Terms and Conditions you reviewed and signed during your registration.',
+    locationLabel: 'Location chosen',
+    dateLabel: 'Date',
+    waiverTitle: '2026 Volunteer Liability Waiver, Terms and Conditions',
+    introClause: 'I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). I further understand that Bienestar is Well-being provides no compensation for my services and that I am not entitled to any benefits from the Organization, including but not limited to workers\' compensation benefits.',
+    sections: [
+      {
+        heading: 'Assumption of Risk',
+        paragraphs: [
+          'I understand that there are risks of injury, death and damage to property from performing the Volunteer Activity for the Organization. I attest and verify that I possess the physical fitness and ability to perform the Activity and that I have no physical limitations that would affect my performance of the Activity. If I do not feel that I am capable of performing the Activity, I assume the responsibility of informing whomever is designated as the on-site Supervisor or Team Lead. In consideration for being allowed to participate in the Activity, I hereby assume the risk of, and responsibility for, any such injury, death or damage which I may sustain arising out of or in any way connected with performance of the Activity, including injury, death or damage resulting from any acts or omissions, whether negligent or not, or any property or equipment owned or supplied by or on behalf of the Organization, its officials, officers, employees, agents, volunteers, and any other promoters, operators or co-sponsors of the Activity.'
+        ]
+      },
+      {
+        heading: 'Release and Indemnification',
+        paragraphs: [
+          'In consideration for being allowed to participate in the Activity, I hereby release, waive and discharge the Organization, its officials, officers, employees, agents, volunteers, and any other promoters, operators or co-sponsors of the Activity, from any and all liability, claims, or causes of action arising out of or in any way connected with my performance of the Activity, or upon its acts or omissions, whether negligent or not (“Waiver”). I agree to this Waiver on behalf of myself, my heirs, executors, administrators and assigns.',
+          'As further consideration for being allowed to participate in the Activity, I hereby agree, on behalf of myself, my heirs, executors, administrators and assigns, to indemnify and hold harmless the Organization, its officials, officers, employees, agents, volunteers, and any other promoters, operators or co-sponsors of the Activity, from any and all claims for compensation, personal injury, property damage or wrongful death caused by my negligence or willful misconduct, in the performance of the Activity.'
+        ]
+      },
+      {
+        heading: 'Knowing and Voluntary Execution',
+        paragraphs: [
+          'I have carefully read this Waiver and Release Form and fully understand its contents. I understand that I am giving up valuable legal rights. I knowingly and voluntarily give up these rights of my own free will.'
+        ]
+      }
+    ],
+    footer: 'Thank you for giving your time and energy to your community. If you have any questions, just reply to this email — we are here to help. With gratitude, the Bienestar Community team.'
+  },
+  es: {
+    subject: 'Términos y condiciones firmados',
+    eyebrow: 'Bienestar Community',
+    title: '¡Gracias por tu voluntariado!',
+    subtitle: 'Tu registro está confirmado',
+    preheader: 'Una copia de la Exención de responsabilidad voluntaria, Términos y condiciones que firmaste.',
+    intro: '¡Hola y bienvenido/a! Nos alegra muchísimo que te sumes al equipo de voluntariado de Bienestar is Well-being. Para tu registro, aquí tienes una copia de la Exención de responsabilidad voluntaria, Términos y condiciones que revisaste y firmaste durante tu inscripción.',
+    locationLabel: 'Locación elegida',
+    dateLabel: 'Fecha',
+    waiverTitle: '2026 Exención de responsabilidad voluntaria, términos y condiciones',
+    introClause: 'Acepto ofrecer mis servicios como voluntario (“Actividad”) para Bienestar is Well-being (“Organización”). Además, entiendo que Bienestar is Well-being no proporciona compensación por mis servicios y que no tengo derecho a ningún beneficio de la Organización, incluidos, entre otros, los beneficios de compensación laboral.',
+    sections: [
+      {
+        heading: 'Asunción de Riesgo',
+        paragraphs: [
+          'Entiendo que existen riesgos de lesiones, muerte y daños a la propiedad al realizar la actividad de voluntariado para la Organización. Doy fe y verifico que poseo la aptitud física y la capacidad para realizar la Actividad y que no tengo limitaciones físicas que puedan afectar mi desempeño de la Actividad. Si no me siento capaz de realizar la Actividad, asumo la responsabilidad de informar a quien esté designado como Supervisor en el sitio o Líder del equipo. En consideración a que se me permita participar en la Actividad, por la presente asumo el riesgo y la responsabilidad por cualquier lesión, muerte o daño que pueda sufrir como resultado de o de alguna manera relacionado con la realización de la Actividad, incluidas lesiones, muerte o daño resultante de cualquier acto u omisión, ya sea negligente o no, o cualquier propiedad o equipo de propiedad o suministrado por o en nombre de la Organización, sus funcionarios, funcionarios, empleados, agentes, voluntarios y cualquier otro promotor, operador o co -patrocinadores de la Actividad.'
+        ]
+      },
+      {
+        heading: 'Liberación e Indemnización',
+        paragraphs: [
+          'En consideración por permitirme participar en la Actividad, por la presente libero, renuncio y descargo a la Organización, sus funcionarios, funcionarios, empleados, agentes, voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad. de toda responsabilidad, reclamo o causa de acción que surja de o esté relacionado de alguna manera con mi desempeño de la Actividad, o por sus actos u omisiones, ya sean negligentes o no (“Renuncia”). Acepto esta Renuncia en mi nombre, el de mis herederos, albaceas, administradores y cesionarios.',
+          'Como consideración adicional para poder participar en la Actividad, por la presente acepto, en mi nombre y el de mis herederos, ejecutores, administradores y cesionarios, indemnizar y eximir de responsabilidad a la Organización, sus funcionarios, funcionarios, empleados, agentes, voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad, de todos y cada uno de los reclamos de compensación, lesiones personales, daños a la propiedad o muerte por negligencia causados por mi negligencia o mala conducta intencional, en el desempeño de la Actividad.'
+        ]
+      },
+      {
+        heading: 'Conocimiento y ejecución voluntaria',
+        paragraphs: [
+          'He leído atentamente este Formulario de exención y liberación y comprendo plenamente su contenido. Entiendo que estoy renunciando a valiosos derechos legales. Renuncio consciente y voluntariamente a estos derechos por mi propia voluntad.'
+        ]
+      }
+    ],
+    footer: 'Gracias por dedicar tu tiempo y energía a tu comunidad. Si tienes alguna pregunta, simplemente responde a este correo: estamos para ayudarte. Con gratitud, el equipo de Bienestar Community.'
+  }
+};
+
+function buildVolunteerConfirmationContent(locationCity, date, language) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const t = VOLUNTEER_CONFIRMATION_I18N[language === 'es' ? 'es' : 'en'];
+
+  const sectionsHtml = t.sections.map((section) => {
+    const paragraphsHtml = section.paragraphs.map((paragraph) =>
+      `<p style="margin:0 0 12px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;">${escapeHtmlValue(paragraph)}</p>`
+    ).join('');
+    return `<h3 style="margin:22px 0 8px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;font-weight:700;color:${B.rose};">${escapeHtmlValue(section.heading)}</h3>${paragraphsHtml}`;
+  }).join('');
+
+  const bodyHtml = `
+    <p style="margin:0 0 18px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.7;color:${B.textDark};">${escapeHtmlValue(t.intro)}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.lightCyan};border-radius:12px;margin:0 0 22px 0;">
+      <tr>
+        <td style="padding:16px 20px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.8;color:${B.textDark};">
+          <strong style="color:${B.sky};">${escapeHtmlValue(t.locationLabel)}:</strong> ${escapeHtmlValue(locationCity)}<br>
+          <strong style="color:${B.sky};">${escapeHtmlValue(t.dateLabel)}:</strong> ${escapeHtmlValue(date)}
+        </td>
+      </tr>
+    </table>
+    <h2 style="margin:0 0 10px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:17px;font-weight:700;color:${B.textDark};">${escapeHtmlValue(t.waiverTitle)}</h2>
+    <p style="margin:0 0 12px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;">${escapeHtmlValue(t.introClause)}</p>
+    ${sectionsHtml}
+  `;
+
+  const html = wrapBrandedEmail({
+    lang: language === 'es' ? 'es' : 'en',
+    eyebrow: t.eyebrow,
+    title: t.title,
+    subtitle: t.subtitle,
+    preheader: t.preheader,
+    bodyHtml,
+    footerHtml: escapeHtmlValue(t.footer)
+  });
+
+  let text = `${t.title}\n\n${t.intro}\n\n${t.locationLabel}: ${locationCity}\n${t.dateLabel}: ${date}\n\n${t.waiverTitle}\n${t.introClause}\n`;
+  t.sections.forEach((section) => {
+    text += `\n${section.heading}\n${section.paragraphs.join('\n')}\n`;
+  });
+  text += `\n${t.footer}\n`;
+
+  return { subject: t.subject, html, text };
+}
+
 async function sendVolunteerConfirmation(volunteerEmail, locationCity, language) {
   try {
-    let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
-    let htmlMessage = '';
-    let textMessage = '';
-    let subjectMessage = '';
-    if (language === 'en') {
-      subjectMessage = 'Terms and conditions signed';
-      htmlMessage = `<b>Location chosen:</b> ${locationCity}<br>
-                        <b>Date:</b> ${date}<br><br>
-                        <b>2026 Volunteer Liability Waiver, Terms and conditions:</b><br>
-                        I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
-                        I further understand that Bienestar is Well-being provides no compensation for my services and 
-                        that I am not entitled to any benefits from the Organization, including but not limited to 
-                        workers' compensation benefits.<br>
-                        <b>Assumption of Risk:</b><br>
-                        I understand that there are risks of injury, death and damage to property from performing the Volunteer Activity for the Organization. 
-                        I attest and verify that I possess the physical fitness and ability to perform the Activity and that I have no physical limitations 
-                        that would affect my performance of the Activity. If I do not feel that I am capable of performing the Activity, I assume the responsibility 
-                        of informing whomever is designated as the on-site Supervisor or Team Lead. In consideration for being allowed to participate in the Activity, 
-                        I hereby assume the risk of, and responsibility for, any such injury, death or damage which I may sustain arising out of or in any way 
-                        connected with performance of the Activity, including injury, death or damage resulting from any acts or omissions, whether negligent or not, 
-                        or any property or equipment owned or supplied by or on behalf of the Organization, its officials, officers, employees, agents, volunteers, 
-                        and any other promoters, operators or co-sponsors of the Activity.<br>
-                        <b>Release and Indemnification:</b><br>
-                        In consideration for being allowed to participate in the Activity, I hereby release, waive and discharge the Organization, its officials, 
-                        officers, employees, agents, volunteers, and any other promoters, operators or co-sponsors of the Activity, from any and all liability, claims, 
-                        or causes of action arising out of or in any way connected with my performance of the Activity, or upon its acts or omissions, whether 
-                        negligent or not (“Waiver”). I agree to this Waiver on behalf of myself, my heirs, executors, administrators and assigns.<br>
-                        As further consideration for being allowed to participate in the Activity, I hereby agree, on behalf of myself, my heirs, executors, 
-                        administrators and assigns, to indemnify and hold harmless the Organization, its officials, officers, employees, agents, volunteers, 
-                        and any other promoters, operators or co-sponsors of the Activity, from any and all claims for compensation, personal injury, property 
-                        damage or wrongful death caused by my negligence or willful misconduct, in the performance of the Activity.<br>
-                        <b>Knowing and Voluntary Execution:</b><br>
-                        I have carefully read this Waiver and Release Form and fully understand its contents. I understand that I am giving up valuable legal rights. 
-                        I knowingly and voluntarily give up these rights of my own free will.<br>
-                        `;
-
-      textMessage = `Location chosen: ${locationCity}\n
-                        Date: ${date}\n\n
-                        2026 Volunteer Liability Waiver, Terms and conditions:\n
-                        I have agreed to volunteer my services ("Activity") for Bienestar is Well-being ("Organization"). 
-                        I further understand that Bienestar is Well-being provides no compensation for my services and 
-                        that I am not entitled to any benefits from the Organization, including but not limited to 
-                        workers' compensation benefits.\n
-                        Assumption of Risk:\n
-                        I understand that there are risks of injury, death and damage to property from performing the Volunteer Activity for the Organization.
-                        I attest and verify that I possess the physical fitness and ability to perform the Activity and that I have no physical limitations
-                        that would affect my performance of the Activity. If I do not feel that I am capable of performing the Activity, I assume the responsibility
-                        of informing whomever is designated as the on-site Supervisor or Team Lead. In consideration for being allowed to participate in the Activity,
-                        I hereby assume the risk of, and responsibility for, any such injury, death or damage which I may sustain arising out of or in any way
-                        connected with performance of the Activity, including injury, death or damage resulting from any acts or omissions, whether negligent or not,
-                        or any property or equipment owned or supplied by or on behalf of the Organization, its officials, officers, employees, agents, volunteers,
-                        and any other promoters, operators or co-sponsors of the Activity.\n
-                        Release and Indemnification:\n
-                        In consideration for being allowed to participate in the Activity, I hereby release, waive and discharge the Organization, its officials,
-                        officers, employees, agents, volunteers, and any other promoters, operators or co-sponsors of the Activity, from any and all liability, claims,
-                        or causes of action arising out of or in any way connected with my performance of the Activity, or upon its acts or omissions, whether
-                        negligent or not (“Waiver”). I agree to this Waiver on behalf of myself, my heirs, executors, administrators and assigns.\n
-                        As further consideration for being allowed to participate in the Activity, I hereby agree, on behalf of myself, my heirs, executors,
-                        administrators and assigns, to indemnify and hold harmless the Organization, its officials, officers, employees, agents, volunteers,
-                        and any other promoters, operators or co-sponsors of the Activity, from any and all claims for compensation, personal injury, property
-                        damage or wrongful death caused by my negligence or willful misconduct, in the performance of the Activity.\n
-                        Knowing and Voluntary Execution:\n
-                        I have carefully read this Waiver and Release Form and fully understand its contents. I understand that I am giving up valuable legal rights.
-                        I knowingly and voluntarily give up these rights of my own free will.\n
-                        `;
-    } else {
-      subjectMessage = 'Términos y condiciones firmados';
-      htmlMessage = `<b>Locación elegida:</b> ${locationCity}<br>
-                        <b>Fecha:</b> ${date}<br><br>
-                        <b>2026 Exención de responsabilidad voluntaria, términos y condiciones:</b><br>
-                        Acepto ofrecer mis servicios como voluntario (“Actividad”) para Bienestar is Well-being (“Organización”). 
-                        Además, entiendo que Bienestar is Well-being no proporciona compensación por mis servicios y que no tengo derecho 
-                        a ningún beneficio de la Organización, incluidos, entre otros, los beneficios de compensación laboral.<br>
-                        <b>Asunción de Riesgo:</b><br>
-                        Entiendo que existen riesgos de lesiones, muerte y daños a la propiedad al realizar la actividad de voluntariado para la Organización. 
-                        Doy fe y verifico que poseo la aptitud física y la capacidad para realizar la Actividad y que no tengo limitaciones físicas que puedan 
-                        afectar mi desempeño de la Actividad. Si no me siento capaz de realizar la Actividad, asumo la responsabilidad de informar a quien esté 
-                        designado como Supervisor en el sitio o Líder del equipo. En consideración a que se me permita participar en la Actividad, por la presente 
-                        asumo el riesgo y la responsabilidad por cualquier lesión, muerte o daño que pueda sufrir como resultado de o de alguna manera relacionado 
-                        con la realización de la Actividad, incluidas lesiones, muerte o daño resultante de cualquier acto u omisión, ya sea negligente o no, o 
-                        cualquier propiedad o equipo de propiedad o suministrado por o en nombre de la Organización, sus funcionarios, funcionarios, empleados, 
-                        agentes, voluntarios y cualquier otro promotor, operador o co -patrocinadores de la Actividad.<br>
-                        <b>Liberación e Indemnización:</b><br>
-                        En consideración por permitirme participar en la Actividad, por la presente libero, renuncio y descargo a la Organización, sus funcionarios, 
-                        funcionarios, empleados, agentes, voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad. de toda responsabilidad, 
-                        reclamo o causa de acción que surja de o esté relacionado de alguna manera con mi desempeño de la Actividad, o por sus actos u omisiones, 
-                        ya sean negligentes o no (“Renuncia”). Acepto esta Renuncia en mi nombre, el de mis herederos, albaceas, administradores y cesionarios.<br>
-                        Como consideración adicional para poder participar en la Actividad, por la presente acepto, en mi nombre y el de mis herederos, ejecutores, 
-                        administradores y cesionarios, indemnizar y eximir de responsabilidad a la Organización, sus funcionarios, funcionarios, empleados, agentes, 
-                        voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad, de todos y cada uno de los reclamos de compensación, 
-                        lesiones personales, daños a la propiedad o muerte por negligencia causados por mi negligencia o mala conducta intencional, en el desempeño 
-                        de la Actividad.<br>
-                        <b>Conocimiento y ejecución voluntaria:</b><br>
-                        He leído atentamente este Formulario de exención y liberación y comprendo plenamente su contenido. Entiendo que estoy renunciando a 
-                        valiosos derechos legales. Renuncio consciente y voluntariamente a estos derechos por mi propia voluntad.<br>
-                        `;
-
-      textMessage = `Locación elegida: ${locationCity}\n
-                        Fecha: ${date}\n\n
-                        2026 Exención de responsabilidad voluntaria, términos y condiciones:\n
-                        Acepto ofrecer mis servicios como voluntario (“Actividad”) para Bienestar is Well-being (“Organización”). 
-                        Además, entiendo que Bienestar is Well-being no proporciona compensación por mis servicios y que no tengo derecho 
-                        a ningún beneficio de la Organización, incluidos, entre otros, los beneficios de compensación laboral.\n
-                        Asunción de Riesgo:\n
-                        Entiendo que existen riesgos de lesiones, muerte y daños a la propiedad al realizar la actividad de voluntariado para la Organización. 
-                        Doy fe y verifico que poseo la aptitud física y la capacidad para realizar la Actividad y que no tengo limitaciones físicas que puedan 
-                        afectar mi desempeño de la Actividad. Si no me siento capaz de realizar la Actividad, asumo la responsabilidad de informar a quien esté 
-                        designado como Supervisor en el sitio o Líder del equipo. En consideración a que se me permita participar en la Actividad, por la presente 
-                        asumo el riesgo y la responsabilidad por cualquier lesión, muerte o daño que pueda sufrir como resultado de o de alguna manera relacionado 
-                        con la realización de la Actividad, incluidas lesiones, muerte o daño resultante de cualquier acto u omisión, ya sea negligente o no, o 
-                        cualquier propiedad o equipo de propiedad o suministrado por o en nombre de la Organización, sus funcionarios, funcionarios, empleados, 
-                        agentes, voluntarios y cualquier otro promotor, operador o co -patrocinadores de la Actividad.\n
-                        Liberación e Indemnización:\n
-                        En consideración por permitirme participar en la Actividad, por la presente libero, renuncio y descargo a la Organización, sus funcionarios, 
-                        funcionarios, empleados, agentes, voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad. de toda responsabilidad, 
-                        reclamo o causa de acción que surja de o esté relacionado de alguna manera con mi desempeño de la Actividad, o por sus actos u omisiones, 
-                        ya sean negligentes o no (“Renuncia”). Acepto esta Renuncia en mi nombre, el de mis herederos, albaceas, administradores y cesionarios.\n
-                        Como consideración adicional para poder participar en la Actividad, por la presente acepto, en mi nombre y el de mis herederos, ejecutores, 
-                        administradores y cesionarios, indemnizar y eximir de responsabilidad a la Organización, sus funcionarios, funcionarios, empleados, agentes, 
-                        voluntarios y cualquier otro promotor, operador o copatrocinador de la Actividad, de todos y cada uno de los reclamos de compensación, 
-                        lesiones personales, daños a la propiedad o muerte por negligencia causados por mi negligencia o mala conducta intencional, en el desempeño 
-                        de la Actividad.\n
-                        Conocimiento y ejecución voluntaria:\n
-                        He leído atentamente este Formulario de exención y liberación y comprendo plenamente su contenido. Entiendo que estoy renunciando a 
-                        valiosos derechos legales. Renuncio consciente y voluntariamente a estos derechos por mi propia voluntad.\n
-                        `;
-    }
+    const date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
+    const { subject, html, text } = buildVolunteerConfirmationContent(locationCity, date, language);
 
     const mailOptions = {
       from: 'bienestarcommunity@gmail.com',
       to: volunteerEmail,
-      subject: subjectMessage,
-      text: textMessage,
-      html: htmlMessage
+      subject: subject,
+      text: text,
+      html: html
     };
 
     await transporter.sendMail(mailOptions);
