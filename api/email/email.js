@@ -42,23 +42,22 @@ async function sendEmailWithExcelAttachment(subject, message, excelRawData, exce
   return new Promise(async (resolve) => {
     try {
       const zipContent = await createPasswordProtectedZipExcel(excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password);
-      let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
+      const date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
+      const zipFilename = `community-data-${date}.zip`;
+      const reportData = summaryObject ? summaryObject.emailReportData : null;
 
-      const summaryHtmlReport = generateSummaryHtmlReport(summaryObject.emailReportData);
-      let fullHtmlMessage = message.replace(/\n/g, '<br>');
-      if (summaryHtmlReport) {
-        fullHtmlMessage += '<br><br><b>Summary Report:</b><br>' + summaryHtmlReport;
-      }
+      const fullHtmlMessage = buildReportEmailHtml(subject, message, reportData, zipFilename);
+      const fullTextMessage = buildReportEmailText(message, reportData);
 
       let mailOptions = {
         from: 'bienestarcommunity@gmail.com',
         to: emails.join(', '),
         subject: subject,
-        text: message, 
+        text: fullTextMessage,
         html: fullHtmlMessage,
         attachments: [
           {
-            filename: `community-data-${date}.zip`,
+            filename: zipFilename,
             content: zipContent
           }
         ]
@@ -81,94 +80,230 @@ async function sendEmailWithExcelAttachment(subject, message, excelRawData, exce
   });
 }
 
-// Optional: Function to generate an HTML table from csvSummary
+// ---------------------------------------------------------------------------
+// Scheduled report emails (weekly & monthly, for both clients and the admin).
+// Branded, friendly layout that mirrors the volunteer notification emails: the
+// same rose/sky palette, Quicksand typography and email-safe table shell.
+// Entry point: buildReportEmailHtml(subject, message, reportData, zipFilename).
+// ---------------------------------------------------------------------------
+
+// Small uppercase, sky-coloured section label (matches the volunteer email).
+function reportSectionLabel(text) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  return `<p style="margin:26px 0 12px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${B.sky};">${escapeHtmlValue(text)}</p>`;
+}
+
+// A row of headline "stat" cards (e.g. New / Recurring / Total).
+// Each card: { label, value, bg, numberColor, labelColor }.
+function buildReportStatCards(cards) {
+  const width = Math.floor(100 / cards.length);
+  const cells = cards.map((c) => `
+        <td width="${width}%" valign="top" style="padding:6px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-radius:14px;background:${c.bg};">
+            <tr><td align="center" style="padding:18px 8px;">
+              <div style="font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:28px;line-height:1;font-weight:700;color:${c.numberColor};">${escapeHtmlValue(c.value)}</div>
+              <div style="margin-top:7px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${c.labelColor};">${escapeHtmlValue(c.label)}</div>
+            </td></tr>
+          </table>
+        </td>`).join('');
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 2px 0;"><tr>${cells}</tr></table>`;
+}
+
+// A branded data table. `headers`/`totalRow` are arrays of { text, align };
+// `rows` is an array of cell-arrays of { text, align, muted }.
+function buildReportTable(headers, rows, totalRow) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const headCells = headers.map((h) =>
+    `<th style="padding:11px 14px;background:${B.sky};color:#ffffff;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;text-align:${h.align || 'left'};">${escapeHtmlValue(h.text)}</th>`
+  ).join('');
+
+  const bodyRows = rows.map((cells, i) => {
+    const bg = (i % 2 === 1) ? B.pageBg : '#ffffff';
+    const tds = cells.map((c) =>
+      `<td style="padding:10px 14px;border-top:1px solid ${B.border};background:${bg};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;text-align:${c.align || 'left'};color:${c.muted ? '#9aa6a6' : B.textDark};">${escapeHtmlValue(c.text)}</td>`
+    ).join('');
+    return `<tr>${tds}</tr>`;
+  }).join('');
+
+  let totalHtml = '';
+  if (totalRow) {
+    const tds = totalRow.map((c) =>
+      `<td style="padding:12px 14px;border-top:2px solid ${B.sky};background:${B.lightCyan};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;font-weight:700;text-align:${c.align || 'left'};color:${B.textDark};">${escapeHtmlValue(c.text)}</td>`
+    ).join('');
+    totalHtml = `<tr>${tds}</tr>`;
+  }
+
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:separate;border-spacing:0;border:1px solid ${B.border};border-radius:12px;overflow:hidden;margin:0 0 6px 0;">
+    <thead><tr>${headCells}</tr></thead>
+    <tbody>${bodyRows}${totalHtml}</tbody>
+  </table>`;
+}
+
+// Highlighted note about the password-protected attachment.
+function buildAttachmentCallout(zipFilename) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.lightCyan};border:1px solid ${B.border};border-radius:12px;margin:4px 0 6px 0;">
+    <tr><td style="padding:16px 20px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:${B.textDark};">
+      <strong style="color:${B.sky};">&#128206; Attached file</strong><br>
+      <span style="font-weight:700;">${escapeHtmlValue(zipFilename)}</span>&nbsp;&middot;&nbsp;<span style="color:#7c8a8a;">password-protected</span><br>
+      <span style="font-size:13px;color:#7c8a8a;">Includes the raw data, the new registrations (with and without a health plan) and the summary workbook.</span>
+    </td></tr>
+  </table>`;
+}
+
+// Inner report block: headline stat cards + health-plan + per-location tables.
 function generateSummaryHtmlReport(reportData) {
-    if (!reportData) {
-        return '<p>No summary data available for this period.</p>';
-    }
+  if (!reportData) {
+    return `<p style="margin:8px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:#9aa6a6;font-style:italic;">No summary data is available for this period.</p>`;
+  }
 
-    const {
-        clientName, dateRangeDisplay,
-        newCount, recurringCount, totalNewRecurring,
-        newHealthPlanYes, newHealthPlanNo, newHealthPlanUnanswered = 0, totalNewHealthPlan,
-        locations, newPerLocationMap, recurringPerLocationMap,
-        totalNewByLocation, totalRecurringByLocation, grandTotalByLocation,
-        clientId
-    } = reportData;
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const {
+    newCount = 0, recurringCount = 0, totalNewRecurring = 0,
+    newHealthPlanYes = 0, newHealthPlanNo = 0, newHealthPlanUnanswered = 0, totalNewHealthPlan = 0,
+    locations = [], newPerLocationMap = {}, recurringPerLocationMap = {},
+    totalNewByLocation = 0, totalRecurringByLocation = 0, grandTotalByLocation = 0,
+    clientId
+  } = reportData;
 
-    let html = '';
-    const tableStyle = 'border="1" cellspacing="0" cellpadding="5" style="border-collapse: collapse; width: auto; margin-bottom: 15px;"';
-    const thStyle = 'style="background-color: #f2f2f2; text-align: left; padding: 8px; border: 1px solid #ddd;"';
-    const tdStyle = 'style="padding: 8px; border: 1px solid #ddd;"';
-    const tdRightStyle = 'style="padding: 8px; border: 1px solid #ddd; text-align: right;"';
+  const isClientOne = parseInt(clientId, 10) === 1;
 
-    // Client and Date Info
-    html += `<p><b>Client Name:</b> ${clientName}<br>`;
-    html += `<b>Date Range:</b> ${dateRangeDisplay}</p>`;
+  // 1) Headline numbers
+  const cards = isClientOne
+    ? [{ label: 'New participants', value: newCount, bg: B.rose, numberColor: '#ffffff', labelColor: 'rgba(255,255,255,0.85)' }]
+    : [
+        { label: 'New', value: newCount, bg: B.lightCyan, numberColor: B.rose, labelColor: '#7c8a8a' },
+        { label: 'Recurring', value: recurringCount, bg: B.lightCyan, numberColor: B.sky, labelColor: '#7c8a8a' },
+        { label: 'Total', value: totalNewRecurring, bg: B.rose, numberColor: '#ffffff', labelColor: 'rgba(255,255,255,0.85)' }
+      ];
 
-    // Table 1: Overall Summary (New, Recurring, Total)
-    html += `<table ${tableStyle}>`;
-    html += '<tbody>';
-    html += `<tr><td ${tdStyle}>New</td><td ${tdRightStyle}>${newCount}</td></tr>`;
-    html += `<tr><td ${tdStyle}>Recurring</td><td ${tdRightStyle}>${recurringCount}</td></tr>`;
-    html += `<tr><td ${tdStyle}><b>Total</b></td><td ${tdRightStyle}><b>${totalNewRecurring}</b></td></tr>`;
-    html += '</tbody></table>';
+  let html = reportSectionLabel(isClientOne ? 'Participants' : 'Participants overview');
+  html += buildReportStatCards(cards);
 
-    // Table 2: (New) Health Plan Summary
-    html += `<table ${tableStyle}>`;
-    html += `<thead><tr><th ${thStyle} colspan="2">(New) Health Plan</th></tr></thead>`;
-    html += '<tbody>';
-    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;YES</td><td ${tdRightStyle}>${newHealthPlanYes}</td></tr>`;
-    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;NO</td><td ${tdRightStyle}>${newHealthPlanNo}</td></tr>`;
-    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;Unanswered</td><td ${tdRightStyle}>${newHealthPlanUnanswered}</td></tr>`;
-    html += `<tr><td ${tdStyle}>&nbsp;&nbsp;<b>Total</b></td><td ${tdRightStyle}><b>${totalNewHealthPlan}</b></td></tr>`;
-    html += '</tbody></table>';
+  // 2) Health plan (new participants)
+  html += reportSectionLabel('Health plan (new participants)');
+  html += buildReportTable(
+    [{ text: 'Coverage' }, { text: 'Participants', align: 'right' }],
+    [
+      [{ text: 'Has a health plan' }, { text: newHealthPlanYes, align: 'right' }],
+      [{ text: 'No health plan' }, { text: newHealthPlanNo, align: 'right' }],
+      [{ text: 'Unanswered', muted: true }, { text: newHealthPlanUnanswered, align: 'right' }]
+    ],
+    [{ text: 'Total' }, { text: totalNewHealthPlan, align: 'right' }]
+  );
 
-    // Table 3: Location Breakdown
-    if (locations && locations.length > 0) {
-        html += `<table ${tableStyle}>`;
-        html += '<thead><tr>';
-        html += `<th ${thStyle}>Id</th>`;
-        html += `<th ${thStyle}>Location</th>`;
-        html += `<th ${thStyle.replace('text-align: left;', 'text-align: right;')}>New</th>`; // Align right for numbers
-        if (parseInt(clientId) !== 1) {
-            html += `<th ${thStyle.replace('text-align: left;', 'text-align: right;')}>Recurring</th>`;
-            html += `<th ${thStyle.replace('text-align: left;', 'text-align: right;')}>Totals</th>`;
-        }
-        html += '</tr></thead>';
-        html += '<tbody>';
+  // 3) Per-location breakdown
+  html += reportSectionLabel('By location');
+  if (locations && locations.length > 0) {
+    const headers = isClientOne
+      ? [{ text: 'ID' }, { text: 'Location' }, { text: 'New', align: 'right' }]
+      : [{ text: 'ID' }, { text: 'Location' }, { text: 'New', align: 'right' }, { text: 'Recurring', align: 'right' }, { text: 'Total', align: 'right' }];
 
-        locations.forEach(loc => {
-            const newAtLoc = newPerLocationMap[loc.id] || 0;
-            const recurringAtLoc = recurringPerLocationMap[loc.id] || 0;
-            const totalAtLoc = newAtLoc + recurringAtLoc;
-            html += '<tr>';
-            html += `<td ${tdStyle}>${loc.id}</td>`;
-            html += `<td ${tdStyle}>${loc.name}</td>`;
-            html += `<td ${tdRightStyle}>${newAtLoc}</td>`;
-            if (parseInt(clientId) !== 1) {
-                html += `<td ${tdRightStyle}>${recurringAtLoc}</td>`;
-                html += `<td ${tdRightStyle}>${totalAtLoc}</td>`;
-            }
-            html += '</tr>';
-        });
+    const rows = locations.map((loc) => {
+      const newAtLoc = Number(newPerLocationMap[loc.id] || 0);
+      const recurringAtLoc = Number(recurringPerLocationMap[loc.id] || 0);
+      const totalAtLoc = newAtLoc + recurringAtLoc;
+      return isClientOne
+        ? [{ text: loc.id, muted: true }, { text: loc.name }, { text: newAtLoc, align: 'right' }]
+        : [{ text: loc.id, muted: true }, { text: loc.name }, { text: newAtLoc, align: 'right' }, { text: recurringAtLoc, align: 'right' }, { text: totalAtLoc, align: 'right' }];
+    });
 
-        // Total row for locations
-        html += '<tr>';
-        html += `<td ${tdStyle}></td>`;
-        html += `<td ${tdStyle}><b>TOTAL</b></td>`;
-        html += `<td ${tdRightStyle}><b>${totalNewByLocation}</b></td>`;
-        if (parseInt(clientId) !== 1) {
-            html += `<td ${tdRightStyle}><b>${totalRecurringByLocation}</b></td>`;
-            html += `<td ${tdRightStyle}><b>${grandTotalByLocation}</b></td>`;
-        }
-        html += '</tr>';
-        html += '</tbody></table>';
+    const totalRow = isClientOne
+      ? [{ text: '' }, { text: 'TOTAL' }, { text: totalNewByLocation, align: 'right' }]
+      : [{ text: '' }, { text: 'TOTAL' }, { text: totalNewByLocation, align: 'right' }, { text: totalRecurringByLocation, align: 'right' }, { text: grandTotalByLocation, align: 'right' }];
+
+    html += buildReportTable(headers, rows, totalRow);
+  } else {
+    html += `<p style="margin:8px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:#9aa6a6;font-style:italic;">No location-specific data is available for this period.</p>`;
+  }
+
+  return html;
+}
+
+// Full branded HTML email for a scheduled report (wraps the summary in the
+// shared rose/sky shell with header, intro, attachment note and footer).
+function buildReportEmailHtml(subject, message, reportData, zipFilename) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const isMonthly = /monthly/i.test(subject || '');
+  const periodWord = isMonthly ? 'monthly' : 'weekly';
+  const clientName = (reportData && reportData.clientName) ? reportData.clientName : 'Bienestar Community';
+  const dateRangeDisplay = (reportData && reportData.dateRangeDisplay) ? reportData.dateRangeDisplay : '';
+
+  const title = isMonthly ? 'Monthly Activity Report' : 'Weekly Activity Report';
+  const subtitle = dateRangeDisplay ? `${clientName} · ${dateRangeDisplay}` : clientName;
+
+  const intro = `Here is the ${periodWord} Bienestar Community activity summary for ${clientName}${dateRangeDisplay ? `, covering ${dateRangeDisplay}` : ''}. A quick overview is below, and the complete data set is attached as a password-protected file.`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 18px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.7;color:${B.textDark};">${escapeHtmlValue(intro)}</p>
+    ${buildAttachmentCallout(zipFilename)}
+    ${generateSummaryHtmlReport(reportData)}
+  `;
+
+  const footerHtml = 'You are receiving this automated report because your address is configured as a recipient in Bienestar Community. If you have any questions, just reply to this email &mdash; we are happy to help.<br><br>With gratitude, the Bienestar Community team.';
+
+  return wrapBrandedEmail({
+    lang: 'en',
+    eyebrow: 'Bienestar Community',
+    title,
+    subtitle,
+    preheader: dateRangeDisplay ? `${title} for ${clientName} (${dateRangeDisplay})` : `${title} for ${clientName}`,
+    bodyHtml,
+    footerHtml
+  });
+}
+
+// Plain-text counterpart: keep the original message and append a text summary.
+function buildReportEmailText(message, reportData) {
+  let text = String(message || '');
+  const summaryText = generateSummaryTextReport(reportData);
+  if (summaryText) {
+    text += `\n\n----------------------------------------\nSUMMARY\n----------------------------------------\n${summaryText}`;
+  }
+  return text;
+}
+
+function generateSummaryTextReport(reportData) {
+  if (!reportData) { return 'No summary data is available for this period.'; }
+  const {
+    newCount = 0, recurringCount = 0, totalNewRecurring = 0,
+    newHealthPlanYes = 0, newHealthPlanNo = 0, newHealthPlanUnanswered = 0, totalNewHealthPlan = 0,
+    locations = [], newPerLocationMap = {}, recurringPerLocationMap = {},
+    totalNewByLocation = 0, totalRecurringByLocation = 0, grandTotalByLocation = 0,
+    clientId
+  } = reportData;
+  const isClientOne = parseInt(clientId, 10) === 1;
+
+  let t = '';
+  if (isClientOne) {
+    t += `Participants\n  New participants: ${newCount}\n`;
+  } else {
+    t += `Participants overview\n  New: ${newCount}\n  Recurring: ${recurringCount}\n  Total: ${totalNewRecurring}\n`;
+  }
+
+  t += `\nHealth plan (new participants)\n  Has a health plan: ${newHealthPlanYes}\n  No health plan: ${newHealthPlanNo}\n  Unanswered: ${newHealthPlanUnanswered}\n  Total: ${totalNewHealthPlan}\n`;
+
+  t += `\nBy location\n`;
+  if (locations && locations.length > 0) {
+    locations.forEach((loc) => {
+      const newAtLoc = Number(newPerLocationMap[loc.id] || 0);
+      const recurringAtLoc = Number(recurringPerLocationMap[loc.id] || 0);
+      if (isClientOne) {
+        t += `  [${loc.id}] ${loc.name}: ${newAtLoc}\n`;
+      } else {
+        t += `  [${loc.id}] ${loc.name}: New ${newAtLoc}, Recurring ${recurringAtLoc}, Total ${newAtLoc + recurringAtLoc}\n`;
+      }
+    });
+    if (isClientOne) {
+      t += `  TOTAL: ${totalNewByLocation}\n`;
     } else {
-        html += '<p>No location-specific data available for this period.</p>';
+      t += `  TOTAL: New ${totalNewByLocation}, Recurring ${totalRecurringByLocation}, Total ${grandTotalByLocation}\n`;
     }
+  } else {
+    t += `  No location-specific data is available for this period.\n`;
+  }
 
-    return html;
+  return t;
 }
 
 async function sendTicketEmail(formData, products, images, emails) {
@@ -236,7 +371,7 @@ function wrapBrandedEmail({ lang = 'en', eyebrow = 'Bienestar Community', title 
       <td align="center">
         <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(67,69,67,0.08);">
           <tr>
-            <td style="background:linear-gradient(135deg,${B.rose} 0%,${B.roseDark} 100%);padding:32px 28px;">
+            <td style="background:${B.rose};background:linear-gradient(135deg,${B.rose} 0%,${B.roseDark} 100%);padding:32px 28px;">
               <p style="margin:0 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.85);">${escapeHtmlValue(eyebrow)}</p>
               <h1 style="margin:0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:24px;font-weight:700;color:#ffffff;">${escapeHtmlValue(title)}</h1>
               ${subtitleHtml}
@@ -728,5 +863,9 @@ module.exports.sendVolunteerRegistrationNotification = sendVolunteerRegistration
 module.exports.sendTicketEmail = sendTicketEmail;
 
 module.exports.sendEmailWithExcelAttachment = sendEmailWithExcelAttachment;
+
+// Exposed for previewing/testing the report email rendering without sending.
+module.exports.buildReportEmailHtml = buildReportEmailHtml;
+module.exports.buildReportEmailText = buildReportEmailText;
 
 module.exports.sendAlertEmail = sendAlertEmail;
