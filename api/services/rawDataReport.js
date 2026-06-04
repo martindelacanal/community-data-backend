@@ -5,6 +5,9 @@ const XLSX = require('xlsx-js-style');
 const REPORT_TIMEZONE = 'America/Los_Angeles';
 const EVENT_TIME_UNMATCHED_THRESHOLD_HOURS = 1;
 const EXCLUDED_REPORT_USER_IDS = [5, 23, 24, 35, 43125];
+const ACTIVE_MEDICAL_COVERAGE_QUESTION_ID = 2;
+const ACTIVE_MEDICAL_COVERAGE_ROOT_REQUIRED_FROM_UTC = '2026-05-13 01:42:11';
+const NOT_COLLECTED_REPORT_VALUE = 'Not collected';
 
 function chunkArray(items, size = 1000) {
   const chunks = [];
@@ -36,6 +39,7 @@ function buildUserBaseRow(row) {
     locations_visited: row.locations_visited,
     registration_date: row.registration_date,
     registration_time: row.registration_time,
+    registration_datetime_utc: row.registration_datetime_utc,
     registered_at_client_location: row.registered_at_client_location_flag ? '1' : '0'
   };
 }
@@ -74,6 +78,24 @@ function parseLaDate(dateValue) {
 
 function toUtcDateTime(localDateTime) {
   return moment.tz(localDateTime, 'YYYY-MM-DD HH:mm:ss', REPORT_TIMEZONE).utc().format('YYYY-MM-DD HH:mm:ss');
+}
+
+function getReportAnswerValue({ answersByUserQuestion, userId, question, baseRow }) {
+  const answerValue = answersByUserQuestion.get(`${userId}:${question.question_id}`);
+  if (answerValue !== undefined && answerValue !== null && String(answerValue).trim() !== '') {
+    return answerValue;
+  }
+
+  if (
+    question.question_id === ACTIVE_MEDICAL_COVERAGE_QUESTION_ID &&
+    baseRow.registration_datetime_utc &&
+    moment.utc(baseRow.registration_datetime_utc, 'YYYY-MM-DD HH:mm:ss', true)
+      .isBefore(moment.utc(ACTIVE_MEDICAL_COVERAGE_ROOT_REQUIRED_FROM_UTC, 'YYYY-MM-DD HH:mm:ss', true))
+  ) {
+    return NOT_COLLECTED_REPORT_VALUE;
+  }
+
+  return '';
 }
 
 function computeEventTimeValue(eventRow, scannedWindow) {
@@ -181,6 +203,7 @@ async function fetchParticipantBaseRows(fromDate, toDate, clientId) {
         ) AS locations_visited,
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', ?), '%m/%d/%Y') AS registration_date,
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', ?), '%T') AS registration_time,
+        DATE_FORMAT(u.creation_date, '%Y-%m-%d %H:%i:%s') AS registration_datetime_utc,
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', ?), '%Y-%m-%d %H:%i:%s') AS registration_datetime_la,
         EXISTS (
           SELECT 1
@@ -418,8 +441,12 @@ async function buildRawDataReport({ from_date, to_date, client_id }) {
       ];
 
       questionCatalog.forEach(question => {
-        const answerValue = answersByUserQuestion.get(`${baseRow.user_id}:${question.question_id}`);
-        excelRow.push(answerValue ?? '');
+        excelRow.push(getReportAnswerValue({
+          answersByUserQuestion,
+          userId: baseRow.user_id,
+          question,
+          baseRow
+        }));
       });
 
       rowEntries.push({
@@ -468,8 +495,12 @@ async function buildRawDataReport({ from_date, to_date, client_id }) {
       ];
 
       questionCatalog.forEach(question => {
-        const answerValue = answersByUserQuestion.get(`${baseRow.user_id}:${question.question_id}`);
-        excelRow.push(answerValue ?? '');
+        excelRow.push(getReportAnswerValue({
+          answersByUserQuestion,
+          userId: baseRow.user_id,
+          question,
+          baseRow
+        }));
       });
 
       rowEntries.push({

@@ -90,8 +90,45 @@ function filterNewRegistrationRecords(uniqueJsonData, from_date, to_date, option
     });
 }
 
+const ACTIVE_MEDICAL_COVERAGE_HEADER = 'Do you currently have active Medi-Cal coverage?';
+const OTHER_HEALTH_INSURANCE_HEADER = 'Do you have any other health insurance?';
+const LEGACY_HEALTH_INSURANCE_HEADER = 'Health Insurance?';
+const HEALTH_COVERAGE_TYPE_HEADER = 'If you have health coverage, what type is it?';
+const NO_HEALTH_COVERAGE_VALUE = 'i do not have any health coverage';
+
+function normalizeReportAnswer(value) {
+    return (value ?? '').toString().trim().toLowerCase();
+}
+
 function getHealthInsuranceValue(record) {
-    return (record?.['Health Insurance?'] || '').toString().trim().toLowerCase();
+    const healthCoverageType = normalizeReportAnswer(record?.[HEALTH_COVERAGE_TYPE_HEADER]);
+    if (healthCoverageType) {
+        if (healthCoverageType === NO_HEALTH_COVERAGE_VALUE) {
+            return 'no';
+        }
+
+        if (healthCoverageType !== 'not sure') {
+            return 'yes';
+        }
+    }
+
+    const legacyHealthInsurance = normalizeReportAnswer(record?.[LEGACY_HEALTH_INSURANCE_HEADER]);
+    if (legacyHealthInsurance === 'yes' || legacyHealthInsurance === 'no') {
+        return legacyHealthInsurance;
+    }
+
+    const activeMediCalCoverage = normalizeReportAnswer(record?.[ACTIVE_MEDICAL_COVERAGE_HEADER]);
+    const otherHealthInsurance = normalizeReportAnswer(record?.[OTHER_HEALTH_INSURANCE_HEADER]);
+
+    if (activeMediCalCoverage === 'yes' || otherHealthInsurance === 'yes') {
+        return 'yes';
+    }
+
+    if (activeMediCalCoverage === 'no' && otherHealthInsurance === 'no') {
+        return 'no';
+    }
+
+    return '';
 }
 
 function isHealthInsuranceYes(record) {
