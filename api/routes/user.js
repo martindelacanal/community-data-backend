@@ -1535,6 +1535,54 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
 });
 
 const upload_signature = multer({ storage: storage }).array('signature[]');
+
+async function fetchVolunteerNotificationRecipients(connection = mysqlConnection.promise()) {
+  const [rows] = await connection.query(
+    `SELECT
+       recipient.id,
+       recipient.email,
+       recipient.language,
+       GROUP_CONCAT(recipient_location.location_id ORDER BY location.community_city, recipient_location.location_id) AS location_ids
+     FROM volunteer_notification_recipient AS recipient
+     LEFT JOIN volunteer_notification_recipient_location AS recipient_location
+       ON recipient.id = recipient_location.recipient_id
+     LEFT JOIN location
+       ON recipient_location.location_id = location.id
+     WHERE recipient.enabled = 'Y'
+     GROUP BY recipient.id, recipient.email, recipient.language
+     ORDER BY recipient.id ASC`
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    email: row.email,
+    language: row.language === 'es' ? 'es' : 'en',
+    location_ids: row.location_ids
+      ? row.location_ids.split(',').map((locationId) => Number(locationId)).filter((locationId) => Number.isInteger(locationId))
+      : []
+  }));
+}
+
+function normalizeVolunteerNotificationLocationIds(locationIds) {
+  if (!Array.isArray(locationIds)) {
+    return [];
+  }
+
+  const normalizedLocationIds = [];
+  const seenLocationIds = new Set();
+
+  locationIds.forEach((locationId) => {
+    const parsedLocationId = Number(locationId);
+
+    if (Number.isInteger(parsedLocationId) && parsedLocationId > 0 && !seenLocationIds.has(parsedLocationId)) {
+      seenLocationIds.add(parsedLocationId);
+      normalizedLocationIds.push(parsedLocationId);
+    }
+  });
+
+  return normalizedLocationIds;
+}
+
 router.post('/signup/volunteer', upload_signature, async (req, res) => {
   let connection;
   try {
@@ -1623,7 +1671,14 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
         // Non-blocking and defensive: must never break the registration flow.
         try {
           const [recipientRows] = await mysqlConnection.promise().query(
-            "SELECT email, language FROM volunteer_notification_recipient WHERE enabled = 'Y'"
+            `SELECT DISTINCT recipient.email, recipient.language
+             FROM volunteer_notification_recipient AS recipient
+             INNER JOIN volunteer_notification_recipient_location AS recipient_location
+               ON recipient.id = recipient_location.recipient_id
+             WHERE recipient.enabled = 'Y'
+               AND recipient_location.location_id = ?
+             ORDER BY recipient.id ASC`,
+            [location_id]
           );
 
           if (recipientRows.length > 0) {
@@ -1719,9 +1774,7 @@ router.get('/volunteer/notification-recipients', verifyToken, async (req, res) =
   }
 
   try {
-    const [rows] = await mysqlConnection.promise().query(
-      "SELECT id, email, language FROM volunteer_notification_recipient WHERE enabled = 'Y' ORDER BY id ASC"
-    );
+    const rows = await fetchVolunteerNotificationRecipients();
     res.json(rows);
   } catch (err) {
     console.log(err);
@@ -1756,7 +1809,11 @@ router.put('/volunteer/notification-recipients', verifyToken, async (req, res) =
     }
     seen.add(key);
     const language = item.language === 'es' ? 'es' : 'en';
-    recipients.push({ email, language });
+    const locationIds = normalizeVolunteerNotificationLocationIds(item.location_ids || item.locations);
+    if (locationIds.length === 0) {
+      return res.status(400).json({ code: 'INVALID_LOCATIONS', email: email });
+    }
+    recipients.push({ email, language, location_ids: locationIds });
   }
 
   let connection;
@@ -1764,22 +1821,47 @@ router.put('/volunteer/notification-recipients', verifyToken, async (req, res) =
     connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
 
+    const [locationRows] = await connection.query('SELECT id FROM location');
+    const validLocationIds = new Set(locationRows.map((location) => Number(location.id)));
+    const invalidLocationIds = [];
+    recipients.forEach((recipient) => {
+      recipient.location_ids.forEach((locationId) => {
+        if (!validLocationIds.has(locationId)) {
+          invalidLocationIds.push(locationId);
+        }
+      });
+    });
+
+    if (invalidLocationIds.length > 0) {
+      await connection.rollback();
+      return res.status(400).json({
+        code: 'INVALID_LOCATIONS',
+        location_ids: Array.from(new Set(invalidLocationIds))
+      });
+    }
+
     // Replace the full set in a single transaction
+    await connection.query('DELETE FROM volunteer_notification_recipient_location');
     await connection.query('DELETE FROM volunteer_notification_recipient');
 
     if (recipients.length > 0) {
-      const values = recipients.map((r) => [r.email, r.language, 'Y']);
-      await connection.query(
-        'INSERT INTO volunteer_notification_recipient(email, language, enabled) VALUES ?',
-        [values]
-      );
+      for (const recipient of recipients) {
+        const [insertResult] = await connection.query(
+          'INSERT INTO volunteer_notification_recipient(email, language, enabled) VALUES (?,?,?)',
+          [recipient.email, recipient.language, 'Y']
+        );
+
+        const locationValues = recipient.location_ids.map((locationId) => [insertResult.insertId, locationId]);
+        await connection.query(
+          'INSERT INTO volunteer_notification_recipient_location(recipient_id, location_id) VALUES ?',
+          [locationValues]
+        );
+      }
     }
 
     await connection.commit();
 
-    const [rows] = await connection.query(
-      "SELECT id, email, language FROM volunteer_notification_recipient WHERE enabled = 'Y' ORDER BY id ASC"
-    );
+    const rows = await fetchVolunteerNotificationRecipients(connection);
     res.json(rows);
   } catch (err) {
     if (connection) {
