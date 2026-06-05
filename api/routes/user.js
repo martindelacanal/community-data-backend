@@ -30121,6 +30121,215 @@ router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
   }
 });
 
+function mapKeyFigureRow(row) {
+  return {
+    id: row.id,
+    metricValue: row.metric_value,
+    labelEn: row.label_en,
+    labelEs: row.label_es,
+    sortOrder: Number(row.sort_order)
+  };
+}
+
+function validateKeyFiguresPayload(body) {
+  const rawFigures = Array.isArray(body) ? body : body?.figures;
+
+  if (!Array.isArray(rawFigures) || rawFigures.length === 0) {
+    return { error: { status: 400, message: 'At least one key figure is required' } };
+  }
+
+  const seenIds = new Set();
+  const figures = [];
+
+  for (let index = 0; index < rawFigures.length; index++) {
+    const raw = rawFigures[index] || {};
+    const idRaw = raw.id;
+    let id = null;
+
+    if (idRaw !== undefined && idRaw !== null && String(idRaw).trim() !== '') {
+      id = Number.parseInt(String(idRaw), 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return { error: { status: 400, message: `Invalid id at position ${index + 1}` } };
+      }
+
+      if (seenIds.has(id)) {
+        return { error: { status: 400, message: `Duplicated id at position ${index + 1}` } };
+      }
+      seenIds.add(id);
+    }
+
+    const metricValue = String(raw.metricValue ?? raw.metric_value ?? '').trim();
+    const labelEn = String(raw.labelEn ?? raw.label_en ?? '').trim();
+    const labelEs = String(raw.labelEs ?? raw.label_es ?? '').trim();
+
+    if (!metricValue || !labelEn || !labelEs) {
+      return { error: { status: 400, message: `metricValue, labelEn and labelEs are required at position ${index + 1}` } };
+    }
+
+    if (metricValue.length > 32) {
+      return { error: { status: 400, message: `metricValue must not exceed 32 characters at position ${index + 1}` } };
+    }
+
+    if (labelEn.length > 255 || labelEs.length > 255) {
+      return { error: { status: 400, message: `Labels must not exceed 255 characters at position ${index + 1}` } };
+    }
+
+    figures.push({
+      id,
+      metricValue,
+      labelEn,
+      labelEs,
+      sortOrder: index + 1
+    });
+  }
+
+  return { figures };
+}
+
+function getRequestUser(req) {
+  return req?.data?.data ? JSON.parse(req.data.data) : null;
+}
+
+function ensureAdmin(req, res) {
+  const cabecera = getRequestUser(req);
+  if (!cabecera || cabecera.role !== 'admin') {
+    res.status(401).json('Unauthorized');
+    return null;
+  }
+
+  return cabecera;
+}
+
+// Get active public key figures
+router.get('/key-figures/public', async (req, res) => {
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, metric_value, label_en, label_es, sort_order
+       FROM key_figures
+       WHERE enabled = 'Y'
+       ORDER BY sort_order ASC, id ASC`
+    );
+
+    res.json(rows.map(mapKeyFigureRow));
+  } catch (err) {
+    console.log(err);
+    logger.error('Error fetching public key figures:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// Get editable key figures (admin only)
+router.get('/key-figures', verifyToken, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, metric_value, label_en, label_es, sort_order
+       FROM key_figures
+       WHERE enabled = 'Y'
+       ORDER BY sort_order ASC, id ASC`
+    );
+
+    res.json(rows.map(mapKeyFigureRow));
+  } catch (err) {
+    console.log(err);
+    logger.error('Error fetching key figures:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// Replace editable key figures list (admin only)
+router.put('/key-figures', verifyToken, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  const validation = validateKeyFiguresPayload(req.body);
+  if (validation.error) {
+    return res.status(validation.error.status).json(validation.error.message);
+  }
+
+  const figures = validation.figures;
+  const requestedExistingIds = figures
+    .filter((figure) => figure.id)
+    .map((figure) => figure.id);
+
+  let connection;
+
+  try {
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+
+    if (requestedExistingIds.length > 0) {
+      const placeholders = requestedExistingIds.map(() => '?').join(',');
+      const [existingRows] = await connection.query(
+        `SELECT id FROM key_figures WHERE id IN (${placeholders})`,
+        requestedExistingIds
+      );
+      const existingIds = new Set(existingRows.map((row) => Number(row.id)));
+      const missingId = requestedExistingIds.find((id) => !existingIds.has(Number(id)));
+
+      if (missingId) {
+        await connection.rollback();
+        return res.status(404).json(`Key figure ${missingId} not found`);
+      }
+    }
+
+    const savedIds = [];
+
+    for (const figure of figures) {
+      if (figure.id) {
+        await connection.query(
+          `UPDATE key_figures
+           SET metric_value = ?, label_en = ?, label_es = ?, sort_order = ?, enabled = 'Y', modification_date = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [figure.metricValue, figure.labelEn, figure.labelEs, figure.sortOrder, figure.id]
+        );
+        savedIds.push(figure.id);
+      } else {
+        const [insertResult] = await connection.query(
+          `INSERT INTO key_figures (metric_value, label_en, label_es, sort_order, enabled)
+           VALUES (?, ?, ?, ?, 'Y')`,
+          [figure.metricValue, figure.labelEn, figure.labelEs, figure.sortOrder]
+        );
+        savedIds.push(insertResult.insertId);
+      }
+    }
+
+    const keepPlaceholders = savedIds.map(() => '?').join(',');
+    await connection.query(
+      `UPDATE key_figures
+       SET enabled = 'N', modification_date = CURRENT_TIMESTAMP
+       WHERE enabled = 'Y' AND id NOT IN (${keepPlaceholders})`,
+      savedIds
+    );
+
+    await connection.commit();
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, metric_value, label_en, label_es, sort_order
+       FROM key_figures
+       WHERE enabled = 'Y'
+       ORDER BY sort_order ASC, id ASC`
+    );
+
+    res.json(rows.map(mapKeyFigureRow));
+  } catch (err) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.log(err);
+    logger.error('Error saving key figures:', err);
+    res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
 // Get web images with optional filters (public endpoint)
 router.get('/web-images/public', async (req, res) => {
   try {
