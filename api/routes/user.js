@@ -27088,6 +27088,7 @@ router.get('/search', async (req, res) => {
       FROM calendar_event ce
       INNER JOIN location l ON ce.location_id = l.id
       WHERE ce.enabled = 'Y'
+        AND ce.date >= CURDATE()
         AND (
           l.organization LIKE ?
           OR l.community_city LIKE ?
