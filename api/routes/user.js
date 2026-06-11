@@ -23372,7 +23372,13 @@ router.get('/article/public', async (req, res) => {
         ai.s3_key as image_s3_key,
         ai.s3_key_small as image_s3_key_small,
         ai.s3_key_medium as image_s3_key_medium,
-        ${language === 'en' ? 'f.name_en' : 'f.name_es'} as filterName
+        ${language === 'en' ? 'f.name_en' : 'f.name_es'} as filterName,
+        (SELECT ${language === 'en' ? 'c.name_en' : 'c.name_es'}
+           FROM article_category ac_name
+           INNER JOIN category c ON ac_name.category_id = c.id
+          WHERE ac_name.article_id = a.id
+          ORDER BY ac_name.category_id ASC
+          LIMIT 1) as categoryName
       FROM article a
       LEFT JOIN article_images ai ON a.id = ai.article_id 
         AND ai.image_type = ${language === 'en' ? "'preview_en'" : "'preview_es'"}
@@ -23424,6 +23430,7 @@ router.get('/article/public', async (req, res) => {
         imageMediumUrl: mediumKey ? urlMap.get(mediumKey) || '' : '',
         imageOriginalUrl: originalKey ? urlMap.get(originalKey) || '' : '',
         filterName: article.filterName || '',
+        categoryName: article.categoryName || '',
         title: article.title || '',
         subtitle: article.subtitle || '',
         slug: article.slug || ''
@@ -25698,6 +25705,249 @@ router.put('/user-configuration', verifyToken, async (req, res) => {
   }
 });
 
+// ============ ACCOUNT INFORMATION (self-service profile editing) ============
+
+const ACCOUNT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// GET /account - Get the logged user's editable account information
+router.get('/account', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+    const userId = cabecera.id;
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        username,
+        firstname,
+        lastname,
+        DATE_FORMAT(date_of_birth, '%Y-%m-%d') as date_of_birth,
+        email,
+        phone,
+        zipcode,
+        household_size,
+        language
+      FROM user
+      WHERE id = ? AND enabled = 'Y' AND deleted = 'N'`,
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json('User not found');
+    }
+
+    const user = rows[0];
+
+    res.json({
+      id: user.id,
+      username: user.username || '',
+      firstname: user.firstname || '',
+      lastname: user.lastname || '',
+      dateOfBirth: user.date_of_birth || null,
+      email: user.email || '',
+      phone: user.phone || '',
+      zipcode: user.zipcode || '',
+      householdSize: user.household_size !== null ? Number(user.household_size) : null,
+      language: user.language || 'en'
+    });
+
+  } catch (error) {
+    console.error('Error getting account information:', error);
+    logger.error('Error getting account information:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// PUT /account - Update the logged user's account information
+router.put('/account', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+    const userId = cabecera.id;
+    const {
+      username,
+      firstname,
+      lastname,
+      dateOfBirth,
+      email,
+      phone,
+      zipcode,
+      householdSize
+    } = req.body;
+
+    const updates = [];
+    const params = [];
+
+    if (username !== undefined) {
+      const normalizedUsername = String(username).trim();
+      if (!normalizedUsername) {
+        return res.status(400).json('username cannot be empty');
+      }
+      if (normalizedUsername.length > 45) {
+        return res.status(400).json('username must not exceed 45 characters');
+      }
+
+      const [existingUsername] = await mysqlConnection.promise().query(
+        'SELECT id FROM user WHERE username = ? AND id != ? LIMIT 1',
+        [normalizedUsername, userId]
+      );
+      if (existingUsername.length > 0) {
+        return res.status(409).json('username already in use');
+      }
+
+      updates.push('username = ?');
+      params.push(normalizedUsername);
+    }
+
+    if (firstname !== undefined) {
+      const normalizedFirstname = String(firstname).trim();
+      if (!normalizedFirstname) {
+        return res.status(400).json('firstname cannot be empty');
+      }
+      if (normalizedFirstname.length > 45) {
+        return res.status(400).json('firstname must not exceed 45 characters');
+      }
+      updates.push('firstname = ?');
+      params.push(normalizedFirstname);
+    }
+
+    if (lastname !== undefined) {
+      const normalizedLastname = String(lastname).trim();
+      if (!normalizedLastname) {
+        return res.status(400).json('lastname cannot be empty');
+      }
+      if (normalizedLastname.length > 45) {
+        return res.status(400).json('lastname must not exceed 45 characters');
+      }
+      updates.push('lastname = ?');
+      params.push(normalizedLastname);
+    }
+
+    if (dateOfBirth !== undefined) {
+      if (dateOfBirth === null || String(dateOfBirth).trim() === '') {
+        updates.push('date_of_birth = NULL');
+      } else {
+        const normalizedDate = String(dateOfBirth).trim().slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+          return res.status(400).json('dateOfBirth must use YYYY-MM-DD format');
+        }
+        const parsedDate = new Date(`${normalizedDate}T00:00:00Z`);
+        if (isNaN(parsedDate.getTime())) {
+          return res.status(400).json('Invalid dateOfBirth');
+        }
+        const minimumAgeDate = new Date();
+        minimumAgeDate.setFullYear(minimumAgeDate.getFullYear() - 18);
+        if (parsedDate > minimumAgeDate) {
+          return res.status(400).json('User must be at least 18 years old');
+        }
+        updates.push('date_of_birth = ?');
+        params.push(normalizedDate);
+      }
+    }
+
+    if (email !== undefined) {
+      const normalizedEmail = String(email).trim();
+      if (normalizedEmail === '') {
+        updates.push('email = NULL');
+      } else {
+        if (!ACCOUNT_EMAIL_REGEX.test(normalizedEmail) || normalizedEmail.length > 45) {
+          return res.status(400).json('Invalid email format');
+        }
+
+        const [existingEmail] = await mysqlConnection.promise().query(
+          'SELECT id FROM user WHERE email = ? AND id != ? LIMIT 1',
+          [normalizedEmail, userId]
+        );
+        if (existingEmail.length > 0) {
+          return res.status(409).json('email already in use');
+        }
+
+        updates.push('email = ?');
+        params.push(normalizedEmail);
+      }
+    }
+
+    if (phone !== undefined) {
+      const normalizedPhone = String(phone).trim();
+      if (normalizedPhone.length > 20) {
+        return res.status(400).json('phone must not exceed 20 characters');
+      }
+      updates.push('phone = ?');
+      params.push(normalizedPhone || null);
+    }
+
+    if (zipcode !== undefined) {
+      const normalizedZipcode = String(zipcode).trim();
+      if (normalizedZipcode.length > 30) {
+        return res.status(400).json('zipcode must not exceed 30 characters');
+      }
+      updates.push('zipcode = ?');
+      params.push(normalizedZipcode || null);
+    }
+
+    if (householdSize !== undefined && householdSize !== null && String(householdSize).trim() !== '') {
+      const parsedHousehold = Number.parseInt(String(householdSize), 10);
+      if (!Number.isInteger(parsedHousehold) || parsedHousehold < 1 || parsedHousehold > 999) {
+        return res.status(400).json('householdSize must be between 1 and 999');
+      }
+      updates.push('household_size = ?');
+      params.push(parsedHousehold);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json('No fields to update');
+    }
+
+    updates.push('modification_date = CURRENT_TIMESTAMP');
+    params.push(userId);
+
+    const [result] = await mysqlConnection.promise().query(
+      `UPDATE user SET ${updates.join(', ')} WHERE id = ? AND enabled = 'Y' AND deleted = 'N'`,
+      params
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json('User not found');
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+        id,
+        username,
+        firstname,
+        lastname,
+        DATE_FORMAT(date_of_birth, '%Y-%m-%d') as date_of_birth,
+        email,
+        phone,
+        zipcode,
+        household_size,
+        language
+      FROM user
+      WHERE id = ?`,
+      [userId]
+    );
+
+    const user = rows[0];
+
+    res.json({
+      id: user.id,
+      username: user.username || '',
+      firstname: user.firstname || '',
+      lastname: user.lastname || '',
+      dateOfBirth: user.date_of_birth || null,
+      email: user.email || '',
+      phone: user.phone || '',
+      zipcode: user.zipcode || '',
+      householdSize: user.household_size !== null ? Number(user.household_size) : null,
+      language: user.language || 'en'
+    });
+
+  } catch (error) {
+    console.error('Error updating account information:', error);
+    logger.error('Error updating account information:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
 const INTERACTION_PAGE_TYPE_ROUTE_GROUPS = {
   articles_list: '/articles',
   article_detail: '/article/:slug',
@@ -27479,6 +27729,39 @@ async function getSchedulesForResources(resourceIds) {
   return schedulesMap;
 }
 
+// Helper function to get attribute filters (age / gender / language) for resources
+async function getAttributesForResources(resourceIds) {
+  if (!resourceIds || resourceIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = resourceIds.map(() => '?').join(',');
+  const [attributes] = await mysqlConnection.promise().query(
+    `SELECT rar.resource_id, ra.id, ra.attribute_group, ra.code, ra.name_english, ra.name_spanish
+     FROM resource_attribute_relations rar
+     INNER JOIN resource_attributes ra ON rar.attribute_id = ra.id
+     WHERE rar.resource_id IN (${placeholders})
+     ORDER BY ra.attribute_group, ra.sort_order`,
+    resourceIds
+  );
+
+  const attributesMap = new Map();
+  attributes.forEach(attribute => {
+    if (!attributesMap.has(attribute.resource_id)) {
+      attributesMap.set(attribute.resource_id, []);
+    }
+    attributesMap.get(attribute.resource_id).push({
+      id: attribute.id,
+      group: attribute.attribute_group,
+      code: attribute.code,
+      nameEnglish: attribute.name_english,
+      nameSpanish: attribute.name_spanish
+    });
+  });
+
+  return attributesMap;
+}
+
 const TRUSTED_RESOURCE_COORDINATES_REGEX = /^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/;
 const UNICODE_MINUS_REGEX = /[\u2212\u2013\u2014\uFE63\uFF0D]/g;
 
@@ -27932,6 +28215,31 @@ router.get('/trusted-resources/services', async (req, res) => {
   } catch (err) {
     console.log(err);
     logger.error('Error getting services:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /trusted-resources/attributes - Get all attribute filters grouped (age / gender / language) (PUBLIC)
+router.get('/trusted-resources/attributes', async (req, res) => {
+  try {
+    const [attributes] = await mysqlConnection.promise().query(
+      'SELECT id, attribute_group, code, name_english, name_spanish, sort_order FROM resource_attributes ORDER BY attribute_group, sort_order'
+    );
+
+    const formattedAttributes = attributes.map(attribute => ({
+      id: attribute.id,
+      group: attribute.attribute_group,
+      code: attribute.code,
+      nameEnglish: attribute.name_english,
+      nameSpanish: attribute.name_spanish,
+      sortOrder: attribute.sort_order
+    }));
+
+    res.json(formattedAttributes);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting resource attributes:', err);
     res.status(500).json('Internal server error');
   }
 });
@@ -29033,6 +29341,8 @@ router.get('/trusted-resources/public', async (req, res) => {
       page = 1,
       pageSize = 20,
       filterIds = '',
+      priceIds = '',
+      attributeIds = '',
       openNow,
       cityId
     } = req.query;
@@ -29082,6 +29392,48 @@ router.get('/trusted-resources/public', async (req, res) => {
       if (!isNaN(parsedCityId)) {
         whereConditions.push('tr.city_id = ?');
         queryParams.push(parsedCityId);
+      }
+    }
+
+    // Filter by price (cost) IDs: resource matches ANY of the selected prices
+    if (priceIds && priceIds.trim() !== '') {
+      const priceIdArray = priceIds.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+      if (priceIdArray.length > 0) {
+        const pricePlaceholders = priceIdArray.map(() => '?').join(',');
+        whereConditions.push(`EXISTS (
+          SELECT 1 FROM resource_price_relations rpr_f
+          WHERE rpr_f.resource_id = tr.id AND rpr_f.price_id IN (${pricePlaceholders})
+        )`);
+        queryParams.push(...priceIdArray);
+      }
+    }
+
+    // Filter by attribute IDs (age / gender / language): OR within a group, AND across groups
+    if (attributeIds && attributeIds.trim() !== '') {
+      const attributeIdArray = attributeIds.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+      if (attributeIdArray.length > 0) {
+        const attrPlaceholders = attributeIdArray.map(() => '?').join(',');
+        const [attributeGroups] = await mysqlConnection.promise().query(
+          `SELECT id, attribute_group FROM resource_attributes WHERE id IN (${attrPlaceholders})`,
+          attributeIdArray
+        );
+
+        const idsByGroup = new Map();
+        attributeGroups.forEach(row => {
+          if (!idsByGroup.has(row.attribute_group)) {
+            idsByGroup.set(row.attribute_group, []);
+          }
+          idsByGroup.get(row.attribute_group).push(row.id);
+        });
+
+        idsByGroup.forEach(groupIds => {
+          const groupPlaceholders = groupIds.map(() => '?').join(',');
+          whereConditions.push(`EXISTS (
+            SELECT 1 FROM resource_attribute_relations rar_f
+            WHERE rar_f.resource_id = tr.id AND rar_f.attribute_id IN (${groupPlaceholders})
+          )`);
+          queryParams.push(...groupIds);
+        });
       }
     }
 
@@ -29140,11 +29492,12 @@ router.get('/trusted-resources/public', async (req, res) => {
     const resourceIds = resources.map(r => r.id);
 
     // Get filters, prices, services, and schedules for all resources
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+    const [filtersMap, pricesMap, servicesMap, schedulesMap, attributesMap] = await Promise.all([
       getFiltersForResources(resourceIds),
       getPricesForResources(resourceIds),
       getServicesForResources(resourceIds),
-      getSchedulesForResources(resourceIds)
+      getSchedulesForResources(resourceIds),
+      getAttributesForResources(resourceIds)
     ]);
 
     // Collect all S3 keys for batch processing
@@ -29181,6 +29534,12 @@ router.get('/trusted-resources/public', async (req, res) => {
         filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
         prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
         services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
+        attributes: (attributesMap.get(resource.id) || []).map(a => ({
+          id: a.id,
+          group: a.group,
+          code: a.code,
+          name: lang === 'en' ? a.nameEnglish : a.nameSpanish
+        })),
         schedules: schedules,
         currentStatus: status.currentStatus,
         todayHours: status.todayHours
@@ -29238,12 +29597,13 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
 
     const resource = resources[0];
 
-    // Get filters, prices, services, and schedules
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+    // Get filters, prices, services, attributes and schedules
+    const [filtersMap, pricesMap, servicesMap, schedulesMap, attributesMap] = await Promise.all([
       getFiltersForResources([resource.id]),
       getPricesForResources([resource.id]),
       getServicesForResources([resource.id]),
-      getSchedulesForResources([resource.id])
+      getSchedulesForResources([resource.id]),
+      getAttributesForResources([resource.id])
     ]);
 
     const schedules = schedulesMap.get(resource.id) || [];
@@ -29273,6 +29633,12 @@ router.get('/trusted-resources/public/:id', async (req, res) => {
       filters: (filtersMap.get(resource.id) || []).map(f => lang === 'en' ? f.nameEnglish : f.nameSpanish),
       prices: (pricesMap.get(resource.id) || []).map(p => lang === 'en' ? p.nameEnglish : p.nameSpanish),
       services: (servicesMap.get(resource.id) || []).map(s => lang === 'en' ? s.nameEnglish : s.nameSpanish),
+      attributes: (attributesMap.get(resource.id) || []).map(a => ({
+        id: a.id,
+        group: a.group,
+        code: a.code,
+        name: lang === 'en' ? a.nameEnglish : a.nameSpanish
+      })),
       schedules: schedules,
       currentStatus: status.currentStatus,
       todayHours: status.todayHours
@@ -29407,11 +29773,12 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
     const resourceIds = resources.map(r => r.id);
 
     // Get filters, prices, services, and schedules for all resources
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+    const [filtersMap, pricesMap, servicesMap, schedulesMap, attributesMap] = await Promise.all([
       getFiltersForResources(resourceIds),
       getPricesForResources(resourceIds),
       getServicesForResources(resourceIds),
-      getSchedulesForResources(resourceIds)
+      getSchedulesForResources(resourceIds),
+      getAttributesForResources(resourceIds)
     ]);
 
     // Collect all S3 keys for batch processing
@@ -29456,6 +29823,7 @@ router.get('/trusted-resources', verifyToken, async (req, res) => {
         filters: filtersMap.get(resource.id) || [],
         prices: pricesMap.get(resource.id) || [],
         services: servicesMap.get(resource.id) || [],
+        attributes: attributesMap.get(resource.id) || [],
         schedules: resourceSchedules
       };
     });
@@ -29519,12 +29887,13 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
 
     const resource = resources[0];
 
-    // Get filters, prices, services, and schedules
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+    // Get filters, prices, services, attributes and schedules
+    const [filtersMap, pricesMap, servicesMap, schedulesMap, attributesMap] = await Promise.all([
       getFiltersForResources([resource.id]),
       getPricesForResources([resource.id]),
       getServicesForResources([resource.id]),
-      getSchedulesForResources([resource.id])
+      getSchedulesForResources([resource.id]),
+      getAttributesForResources([resource.id])
     ]);
 
     const resourceSchedules = schedulesMap.get(resource.id) || [];
@@ -29562,6 +29931,7 @@ router.get('/trusted-resources/:id', verifyToken, async (req, res) => {
       filters: filtersMap.get(resource.id) || [],
       prices: pricesMap.get(resource.id) || [],
       services: servicesMap.get(resource.id) || [],
+      attributes: attributesMap.get(resource.id) || [],
       schedules: resourceSchedules
     };
 
@@ -29601,6 +29971,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       filterIds = [],
       priceIds = [],
       serviceIds = [],
+      attributeIds = [],
       schedules = []
     } = req.body;
 
@@ -29665,6 +30036,15 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       );
     }
 
+    // Insert attribute relations (age / gender / language)
+    if (attributeIds && attributeIds.length > 0) {
+      const attributeValues = attributeIds.map(attributeId => [resourceId, attributeId]);
+      await connection.query(
+        'INSERT INTO resource_attribute_relations (resource_id, attribute_id) VALUES ?',
+        [attributeValues]
+      );
+    }
+
     // Insert schedules
     if (schedules && schedules.length > 0) {
       const scheduleValues = schedules.map(schedule => [
@@ -29701,11 +30081,12 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
 
     const resource = resources[0];
 
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+    const [filtersMap, pricesMap, servicesMap, schedulesMap, attributesMap] = await Promise.all([
       getFiltersForResources([resourceId]),
       getPricesForResources([resourceId]),
       getServicesForResources([resourceId]),
-      getSchedulesForResources([resourceId])
+      getSchedulesForResources([resourceId]),
+      getAttributesForResources([resourceId])
     ]);
 
     const imageKeys = getTrustedResourceImageKeys(resource);
@@ -29738,6 +30119,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       filters: filtersMap.get(resource.id) || [],
       prices: pricesMap.get(resource.id) || [],
       services: servicesMap.get(resource.id) || [],
+      attributes: attributesMap.get(resource.id) || [],
       schedules: schedulesMap.get(resource.id) || []
     };
 
@@ -29781,6 +30163,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       filterIds = [],
       priceIds = [],
       serviceIds = [],
+      attributeIds = [],
       schedules = []
     } = req.body;
 
@@ -29826,6 +30209,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
     await connection.query('DELETE FROM resource_filter_relations WHERE resource_id = ?', [id]);
     await connection.query('DELETE FROM resource_price_relations WHERE resource_id = ?', [id]);
     await connection.query('DELETE FROM resource_service_relations WHERE resource_id = ?', [id]);
+    await connection.query('DELETE FROM resource_attribute_relations WHERE resource_id = ?', [id]);
     await connection.query('DELETE FROM resource_schedules WHERE resource_id = ?', [id]);
 
     // Insert new filter relations
@@ -29852,6 +30236,15 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       await connection.query(
         'INSERT INTO resource_service_relations (resource_id, service_id) VALUES ?',
         [serviceValues]
+      );
+    }
+
+    // Insert new attribute relations (age / gender / language)
+    if (attributeIds && attributeIds.length > 0) {
+      const attributeValues = attributeIds.map(attributeId => [id, attributeId]);
+      await connection.query(
+        'INSERT INTO resource_attribute_relations (resource_id, attribute_id) VALUES ?',
+        [attributeValues]
       );
     }
 
@@ -29891,11 +30284,12 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
 
     const resource = resources[0];
 
-    const [filtersMap, pricesMap, servicesMap, schedulesMap] = await Promise.all([
+    const [filtersMap, pricesMap, servicesMap, schedulesMap, attributesMap] = await Promise.all([
       getFiltersForResources([id]),
       getPricesForResources([id]),
       getServicesForResources([id]),
-      getSchedulesForResources([id])
+      getSchedulesForResources([id]),
+      getAttributesForResources([id])
     ]);
 
     const resourceSchedules = schedulesMap.get(resource.id) || [];
@@ -29933,6 +30327,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       filters: filtersMap.get(resource.id) || [],
       prices: pricesMap.get(resource.id) || [],
       services: servicesMap.get(resource.id) || [],
+      attributes: attributesMap.get(resource.id) || [],
       schedules: resourceSchedules
     };
 
@@ -30118,6 +30513,373 @@ router.delete('/trusted-resources/:id/image', verifyToken, async (req, res) => {
   } catch (err) {
     console.log(err);
     logger.error('Error deleting image:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// ============ HOME CARDS (admin-managed promo slider on native public-home) ============
+
+const HOME_CARD_HEX_COLOR_REGEX = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8}|[0-9a-fA-F]{3})$/;
+
+function getHomeCardImageKeys(card = {}) {
+  return [
+    card.image_url,
+    card.image_url_small,
+    card.image_url_medium
+  ].filter(Boolean);
+}
+
+async function formatHomeCards(rows, language) {
+  const s3Keys = rows.flatMap(card => getHomeCardImageKeys(card));
+  const signedUrls = await getSignedUrlsForImages(s3Keys);
+  const urlMap = new Map();
+  s3Keys.forEach((key, index) => {
+    if (signedUrls[index]) {
+      urlMap.set(key, signedUrls[index]);
+    }
+  });
+
+  return rows.map(card => {
+    const formatted = {
+      id: card.id,
+      titleEn: card.title_en,
+      titleEs: card.title_es,
+      backgroundColor: card.background_color,
+      textColor: card.text_color,
+      linkUrl: card.link_url || null,
+      sortOrder: Number(card.sort_order),
+      enabled: card.enabled === 'Y',
+      ...buildTrustedResourceImageUrls(card, urlMap)
+    };
+
+    if (language) {
+      formatted.title = language === 'es' ? card.title_es : card.title_en;
+    }
+
+    return formatted;
+  });
+}
+
+function validateHomeCardPayload(body = {}) {
+  const titleEn = String(body.titleEn ?? body.title_en ?? '').trim();
+  const titleEs = String(body.titleEs ?? body.title_es ?? '').trim();
+  const backgroundColor = String(body.backgroundColor ?? body.background_color ?? '#D1F8F8').trim();
+  const textColor = String(body.textColor ?? body.text_color ?? '#434543').trim();
+  const linkUrlRaw = body.linkUrl ?? body.link_url ?? null;
+  const linkUrl = linkUrlRaw && String(linkUrlRaw).trim() !== '' ? String(linkUrlRaw).trim() : null;
+  const sortOrderRaw = body.sortOrder ?? body.sort_order ?? 0;
+  const sortOrder = Number.parseInt(String(sortOrderRaw), 10);
+  const enabled = body.enabled === false || body.enabled === 'N' ? 'N' : 'Y';
+
+  if (!titleEn || !titleEs) {
+    return { error: { status: 400, message: 'titleEn and titleEs are required' } };
+  }
+
+  if (titleEn.length > 255 || titleEs.length > 255) {
+    return { error: { status: 400, message: 'Titles must not exceed 255 characters' } };
+  }
+
+  if (!HOME_CARD_HEX_COLOR_REGEX.test(backgroundColor) || !HOME_CARD_HEX_COLOR_REGEX.test(textColor)) {
+    return { error: { status: 400, message: 'Colors must be hex values like #D1F8F8' } };
+  }
+
+  if (linkUrl && linkUrl.length > 500) {
+    return { error: { status: 400, message: 'linkUrl must not exceed 500 characters' } };
+  }
+
+  return {
+    card: {
+      titleEn,
+      titleEs,
+      backgroundColor,
+      textColor,
+      linkUrl,
+      sortOrder: Number.isInteger(sortOrder) ? sortOrder : 0,
+      enabled
+    }
+  };
+}
+
+// GET /home-cards/public - Enabled home cards for the native public-home slider (PUBLIC)
+router.get('/home-cards/public', async (req, res) => {
+  try {
+    const { language = 'en' } = req.query;
+    const lang = ['en', 'es'].includes(language) ? language : 'en';
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, title_en, title_es, background_color, text_color,
+              image_url, image_url_small, image_url_medium, link_url, sort_order, enabled
+       FROM home_cards
+       WHERE enabled = 'Y'
+       ORDER BY sort_order ASC, id ASC`
+    );
+
+    const cards = await formatHomeCards(rows, lang);
+    res.json({ cards });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting public home cards:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// GET /home-cards - All home cards (ADMIN)
+router.get('/home-cards', verifyToken, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, title_en, title_es, background_color, text_color,
+              image_url, image_url_small, image_url_medium, link_url, sort_order, enabled,
+              DATE_FORMAT(CONVERT_TZ(creation_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as created_at,
+              DATE_FORMAT(CONVERT_TZ(modification_date, "+00:00", "America/Los_Angeles"), "%m/%d/%Y %T") as updated_at
+       FROM home_cards
+       ORDER BY sort_order ASC, id ASC`
+    );
+
+    const cards = await formatHomeCards(rows);
+    rows.forEach((row, index) => {
+      cards[index].createdAt = row.created_at;
+      cards[index].updatedAt = row.updated_at;
+    });
+
+    res.json({ cards });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error getting home cards:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /home-cards - Create a home card (ADMIN)
+router.post('/home-cards', verifyToken, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const { card, error } = validateHomeCardPayload(req.body);
+    if (error) {
+      return res.status(error.status).json(error.message);
+    }
+
+    const [result] = await mysqlConnection.promise().query(
+      `INSERT INTO home_cards (title_en, title_es, background_color, text_color, link_url, sort_order, enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [card.titleEn, card.titleEs, card.backgroundColor, card.textColor, card.linkUrl, card.sortOrder, card.enabled]
+    );
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, title_en, title_es, background_color, text_color,
+              image_url, image_url_small, image_url_medium, link_url, sort_order, enabled
+       FROM home_cards WHERE id = ?`,
+      [result.insertId]
+    );
+
+    const cards = await formatHomeCards(rows);
+    res.status(201).json(cards[0]);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error creating home card:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// PUT /home-cards/:id - Update a home card (ADMIN)
+router.put('/home-cards/:id', verifyToken, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const { id } = req.params;
+    const { card, error } = validateHomeCardPayload(req.body);
+    if (error) {
+      return res.status(error.status).json(error.message);
+    }
+
+    const [updateResult] = await mysqlConnection.promise().query(
+      `UPDATE home_cards
+       SET title_en = ?, title_es = ?, background_color = ?, text_color = ?,
+           link_url = ?, sort_order = ?, enabled = ?
+       WHERE id = ?`,
+      [card.titleEn, card.titleEs, card.backgroundColor, card.textColor, card.linkUrl, card.sortOrder, card.enabled, id]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(404).json('Home card not found');
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT id, title_en, title_es, background_color, text_color,
+              image_url, image_url_small, image_url_medium, link_url, sort_order, enabled
+       FROM home_cards WHERE id = ?`,
+      [id]
+    );
+
+    const cards = await formatHomeCards(rows);
+    res.json(cards[0]);
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error updating home card:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// DELETE /home-cards/:id - Delete a home card (ADMIN)
+router.delete('/home-cards/:id', verifyToken, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [rows] = await mysqlConnection.promise().query(
+      'SELECT image_url, image_url_small, image_url_medium FROM home_cards WHERE id = ?',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json('Home card not found');
+    }
+
+    if (rows[0].image_url) {
+      try {
+        await deleteS3Objects(getHomeCardImageKeys(rows[0]));
+      } catch (s3Error) {
+        console.log('Error deleting home card image from S3:', s3Error);
+      }
+    }
+
+    await mysqlConnection.promise().query('DELETE FROM home_cards WHERE id = ?', [id]);
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting home card:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// POST /home-cards/:id/image - Upload/replace the image of a home card (ADMIN)
+router.post('/home-cards/:id/image', verifyToken, trustedResourceUpload, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json('No image file provided');
+    }
+
+    const [rows] = await mysqlConnection.promise().query(
+      'SELECT image_url, image_url_small, image_url_medium FROM home_cards WHERE id = ?',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json('Home card not found');
+    }
+
+    if (rows[0].image_url) {
+      try {
+        await deleteS3Objects(getHomeCardImageKeys(rows[0]));
+      } catch (s3Error) {
+        console.log('Error deleting old home card image from S3:', s3Error);
+      }
+    }
+
+    const imageName = randomImageName();
+    const uploadedImage = await uploadImageWithVariants({
+      originalKey: imageName,
+      buffer: req.file.buffer,
+      contentType: req.file.mimetype,
+      presetName: 'trustedResource'
+    });
+
+    await mysqlConnection.promise().query(
+      `UPDATE home_cards
+       SET image_url = ?, image_url_small = ?, image_url_medium = ?
+       WHERE id = ?`,
+      [uploadedImage.originalKey, uploadedImage.smallKey, uploadedImage.mediumKey, id]
+    );
+
+    const imageKeys = [
+      uploadedImage.originalKey,
+      uploadedImage.smallKey,
+      uploadedImage.mediumKey
+    ].filter(Boolean);
+    const signedUrls = await getSignedUrlsForImages(imageKeys);
+    const imageUrlMap = new Map();
+    imageKeys.forEach((key, index) => {
+      if (signedUrls[index]) {
+        imageUrlMap.set(key, signedUrls[index]);
+      }
+    });
+
+    res.json(buildTrustedResourceImageUrls({
+      image_url: uploadedImage.originalKey,
+      image_url_small: uploadedImage.smallKey,
+      image_url_medium: uploadedImage.mediumKey
+    }, imageUrlMap));
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error uploading home card image:', err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// DELETE /home-cards/:id/image - Remove the image of a home card (ADMIN)
+router.delete('/home-cards/:id/image', verifyToken, async (req, res) => {
+  if (!ensureAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const { id } = req.params;
+
+    const [rows] = await mysqlConnection.promise().query(
+      'SELECT image_url, image_url_small, image_url_medium FROM home_cards WHERE id = ?',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json('Home card not found');
+    }
+
+    if (!rows[0].image_url) {
+      return res.status(404).json('No image to delete');
+    }
+
+    try {
+      await deleteS3Objects(getHomeCardImageKeys(rows[0]));
+    } catch (s3Error) {
+      console.log('Error deleting home card image from S3:', s3Error);
+    }
+
+    await mysqlConnection.promise().query(
+      `UPDATE home_cards
+       SET image_url = NULL, image_url_small = NULL, image_url_medium = NULL
+       WHERE id = ?`,
+      [id]
+    );
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.log(err);
+    logger.error('Error deleting home card image:', err);
     res.status(500).json('Internal server error');
   }
 });
