@@ -23377,6 +23377,7 @@ router.get('/article/public', async (req, res) => {
            FROM article_category ac_name
            INNER JOIN category c ON ac_name.category_id = c.id
           WHERE ac_name.article_id = a.id
+            AND c.name_en <> 'All categories'
           ORDER BY ac_name.category_id ASC
           LIMIT 1) as categoryName
       FROM article a
@@ -23919,15 +23920,18 @@ router.get('/article/slug/:slug', async (req, res) => {
       return res.status(404).json({ message: 'Article not found' });
     }
 
-    // Get article categories
+    // Get article categories. Order by category id ASC so the detail page's kicker
+    // (first non-"All categories" entry) matches the public list kicker, which also
+    // selects the lowest category_id.
     const [categories] = await mysqlConnection.promise().query(
-      `SELECT 
+      `SELECT
         c.id,
         c.name_en as nameEnglish,
         c.name_es as nameSpanish
       FROM article_category ac
       INNER JOIN category c ON ac.category_id = c.id
-      WHERE ac.article_id = ?`,
+      WHERE ac.article_id = ?
+      ORDER BY c.id ASC`,
       [article.id]
     );
 
@@ -24508,13 +24512,16 @@ router.get('/categories', async (req, res) => {
       : withArticlesOnly === true;
 
     // Consulta SQL que incluye filtrado por idioma si tienes campos multiidioma
+    // Exclude the implicit "All categories" catch-all: it must never be shown as a
+    // kicker/tag, offered in the article editor, nor used as a public filter option.
     const query = `
-      SELECT 
+      SELECT
       id,
       ${lang === 'en' ? 'name_en' : 'name_es'} AS name,
       icon_s3_key
       FROM category
-      ${withArticlesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM article_category ac INNER JOIN article a ON a.id = ac.article_id WHERE ac.category_id = category.id AND a.article_status_id = 2)' : ''}
+      WHERE name_en <> 'All categories'
+      ${withArticlesOnlyBool ? 'AND EXISTS (SELECT 1 FROM article_category ac INNER JOIN article a ON a.id = ac.article_id WHERE ac.category_id = category.id AND a.article_status_id = 2)' : ''}
       ORDER BY name ASC
     `;
 
