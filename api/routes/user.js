@@ -25712,6 +25712,135 @@ router.put('/user-configuration', verifyToken, async (req, res) => {
   }
 });
 
+// ============ NOTIFICATION PREFERENCES (push opt-in + per-location selection) ============
+// Preferencias por usuario para las notificaciones push de la app nativa (Android/iOS):
+//  - notifications_enabled (columna en `user`): si el usuario quiere recibir notificaciones.
+//  - user_notification_location: locaciones de las que el usuario eligió recibir notificaciones.
+//    Sin filas => recibe TODAS las notificaciones masivas (comportamiento por defecto).
+
+// GET /notification-preferences - settings del usuario logueado
+router.get('/notification-preferences', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+    const userId = cabecera.id;
+
+    const [userRows] = await mysqlConnection.promise().query(
+      `SELECT notifications_enabled FROM user WHERE id = ? AND enabled = 'Y' AND deleted = 'N' LIMIT 1`,
+      [userId]
+    );
+
+    if (userRows.length === 0) {
+      return res.status(404).json('User not found');
+    }
+
+    const [locationRows] = await mysqlConnection.promise().query(
+      `SELECT location_id FROM user_notification_location WHERE user_id = ? ORDER BY location_id`,
+      [userId]
+    );
+
+    res.status(200).json({
+      // Default: habilitado salvo que esté explícitamente en 'N'.
+      notificationsEnabled: userRows[0].notifications_enabled !== 'N',
+      locationIds: locationRows.map((row) => Number(row.location_id))
+    });
+  } catch (error) {
+    console.error('Error getting notification preferences:', error);
+    logger.error('Error getting notification preferences:', error);
+    res.status(500).json('Internal server error');
+  }
+});
+
+// PUT /notification-preferences - actualiza el flag de habilitado y/o las locaciones elegidas.
+// Body: { notificationsEnabled?: boolean, locationIds?: number[] }  (ambos opcionales)
+router.put('/notification-preferences', verifyToken, async (req, res) => {
+  let connection;
+  try {
+    const cabecera = JSON.parse(req.data.data);
+    const userId = cabecera.id;
+    const { notificationsEnabled, locationIds } = req.body;
+
+    const hasEnabled = typeof notificationsEnabled === 'boolean';
+    const hasLocations = Array.isArray(locationIds);
+
+    if (!hasEnabled && !hasLocations) {
+      return res.status(400).json('Nothing to update');
+    }
+
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+
+    if (hasEnabled) {
+      const [result] = await connection.query(
+        `UPDATE user SET notifications_enabled = ?, modification_date = CURRENT_TIMESTAMP
+         WHERE id = ? AND enabled = 'Y' AND deleted = 'N'`,
+        [notificationsEnabled ? 'Y' : 'N', userId]
+      );
+
+      if (result.affectedRows === 0) {
+        await connection.rollback();
+        return res.status(404).json('User not found');
+      }
+    }
+
+    if (hasLocations) {
+      // Normalizar a enteros positivos únicos que correspondan a locaciones reales.
+      const requestedIds = [...new Set(
+        locationIds
+          .map((value) => Number.parseInt(value, 10))
+          .filter((value) => Number.isInteger(value) && value > 0)
+      )];
+
+      let validIds = [];
+      if (requestedIds.length > 0) {
+        const [validRows] = await connection.query(
+          `SELECT id FROM location WHERE id IN (${requestedIds.map(() => '?').join(',')})`,
+          requestedIds
+        );
+        validIds = validRows.map((row) => Number(row.id));
+      }
+
+      await connection.query('DELETE FROM user_notification_location WHERE user_id = ?', [userId]);
+
+      if (validIds.length > 0) {
+        const placeholders = validIds.map(() => '(?, ?)').join(',');
+        const params = [];
+        validIds.forEach((id) => { params.push(userId, id); });
+        await connection.query(
+          `INSERT INTO user_notification_location (user_id, location_id) VALUES ${placeholders}`,
+          params
+        );
+      }
+    }
+
+    await connection.commit();
+
+    const [userRows] = await connection.query(
+      `SELECT notifications_enabled FROM user WHERE id = ? LIMIT 1`,
+      [userId]
+    );
+    const [locationRows] = await connection.query(
+      `SELECT location_id FROM user_notification_location WHERE user_id = ? ORDER BY location_id`,
+      [userId]
+    );
+
+    res.status(200).json({
+      notificationsEnabled: userRows[0] ? userRows[0].notifications_enabled !== 'N' : true,
+      locationIds: locationRows.map((row) => Number(row.location_id))
+    });
+  } catch (error) {
+    if (connection) {
+      try { await connection.rollback(); } catch (rollbackError) { /* noop */ }
+    }
+    console.error('Error updating notification preferences:', error);
+    logger.error('Error updating notification preferences:', error);
+    res.status(500).json('Internal server error');
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
 // ============ ACCOUNT INFORMATION (self-service profile editing) ============
 
 const ACCOUNT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

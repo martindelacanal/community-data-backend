@@ -260,7 +260,10 @@ function normalizeAudienceFilters(rawFilters) {
     min_age: normalizePositiveInteger(filters.min_age),
     max_age: normalizePositiveInteger(filters.max_age),
     zipcode: normalizeZipcodes(filters.zipcodes ?? filters.zipcode),
-    register_form: normalizeRegisterForm(filters.register_form)
+    register_form: normalizeRegisterForm(filters.register_form),
+    // Locaciones objetivo (opcionales) de una notificación masiva (audience_type = 'all').
+    // Vacío => masiva genérica para todos los dispositivos.
+    mass_location_ids: normalizeNumberArray(filters.mass_location_ids)
   };
 }
 
@@ -337,8 +340,20 @@ function buildParticipantAudienceScope(filters) {
   }
 
   if (filters.locations.length > 0) {
-    whereClauses.push(`u.location_id IN (${filters.locations.map(() => '?').join(',')})`);
-    params.push(...filters.locations);
+    const locationPlaceholders = filters.locations.map(() => '?').join(',');
+    // "Filtered users" por locación = usuarios que se registraron en esa locación
+    // (user.first_location_id) O que alguna vez recibieron una entrega aprobada ahí
+    // (delivery_beneficiary con approved = 'Y').
+    whereClauses.push(`(
+      u.first_location_id IN (${locationPlaceholders})
+      OR EXISTS (
+        SELECT 1 FROM delivery_beneficiary db
+        WHERE db.receiving_user_id = u.id
+          AND db.approved = 'Y'
+          AND db.location_id IN (${locationPlaceholders})
+      )
+    )`);
+    params.push(...filters.locations, ...filters.locations);
   }
 
   if (filters.genders.length > 0) {
@@ -534,16 +549,43 @@ async function getTotalRegisteredDevices(connection) {
 
 async function getAudienceDevices(connection, audienceType, filters) {
   if (audienceType === 'all') {
+    const massLocationIds = Array.isArray(filters.mass_location_ids) ? filters.mass_location_ids : [];
+    const whereClauses = [
+      `d.deleted = 'N'`,
+      `d.token_status = 'ACTIVE'`,
+      `d.push_token IS NOT NULL`,
+      `d.push_token <> ''`,
+      `d.platform IN ('android', 'ios')`,
+      // Respetar el opt-out del usuario. Dispositivos sin usuario asociado igual reciben.
+      `(u.id IS NULL OR COALESCE(u.notifications_enabled, 'Y') <> 'N')`
+    ];
+    const params = [];
+
+    if (massLocationIds.length > 0) {
+      // La masiva fue apuntada a locaciones específicas. Le llega a:
+      //  - dispositivos sin usuario asociado (sin preferencia de locación),
+      //  - usuarios que NO eligieron locaciones (por defecto reciben todas las masivas),
+      //  - usuarios cuya elección intersecta las locaciones de la masiva.
+      // NO le llega a usuarios que eligieron recibir SOLO de otras locaciones.
+      const placeholders = massLocationIds.map(() => '?').join(',');
+      whereClauses.push(`(
+        u.id IS NULL
+        OR NOT EXISTS (SELECT 1 FROM user_notification_location unl WHERE unl.user_id = u.id)
+        OR EXISTS (
+          SELECT 1 FROM user_notification_location unl2
+          WHERE unl2.user_id = u.id AND unl2.location_id IN (${placeholders})
+        )
+      )`);
+      params.push(...massLocationIds);
+    }
+
     const [rows] = await connection.query(
       `SELECT d.id, d.installation_id, d.push_token, d.platform, d.language AS device_language,
               u.id AS audience_user_id, u.language AS user_language
        FROM push_device_tokens d
        LEFT JOIN user u ON u.id = COALESCE(d.user_id, d.last_user_id)
-       WHERE d.deleted = 'N'
-         AND d.token_status = 'ACTIVE'
-         AND d.push_token IS NOT NULL
-         AND d.push_token <> ''
-         AND d.platform IN ('android', 'ios')`
+       WHERE ${whereClauses.join(' AND ')}`,
+      params
     );
 
     return dedupeDeviceRows(rows);
@@ -560,6 +602,7 @@ async function getAudienceDevices(connection, audienceType, filters) {
        AND d.push_token IS NOT NULL
        AND d.push_token <> ''
        AND d.platform IN ('android', 'ios')
+       AND COALESCE(u.notifications_enabled, 'Y') <> 'N'
        AND ${scope.whereSql}`,
     scope.params
   );
