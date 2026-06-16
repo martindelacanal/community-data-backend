@@ -27376,7 +27376,7 @@ router.get('/search', async (req, res) => {
       LEFT JOIN filter f ON af.filter_id = f.id
       LEFT JOIN article_category ac ON a.id = ac.article_id
       LEFT JOIN category c ON ac.category_id = c.id
-      WHERE a.article_status_id = 2 AND ac.category_id = 16 -- POR AHORA SOLO MOSTRAMOS ARTÍCULOS DE LA CATEGORÍA "Stories"
+      WHERE a.article_status_id = 2
         AND (
           ${language === 'en' ? 'a.title_en' : 'a.title_es'} LIKE ?
           OR ${language === 'en' ? 'a.subtitle_en' : 'a.subtitle_es'} LIKE ?
