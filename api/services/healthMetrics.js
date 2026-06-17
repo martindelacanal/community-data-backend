@@ -9,6 +9,7 @@ const HEALTH_METRICS_TIMEZONE = 'America/Los_Angeles';
 const EVENT_TIME_UNMATCHED_THRESHOLD_HOURS = 1;
 const SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING = 'ascending';
 const SURVEY_TRAFFIC_LIGHT_DIRECTION_DESCENDING = 'descending';
+const NOT_COLLECTED_REPORT_VALUE = 'Not collected';
 
 function chunkArray(items, chunkSize = HEALTH_METRICS_CHUNK_SIZE) {
   if (!Array.isArray(items) || items.length === 0) {
@@ -82,6 +83,14 @@ function normalizeSurveyTrafficLightDirection(value) {
   }
 
   return normalized;
+}
+
+function normalizeSurveyRequired(value) {
+  return String(value || '').trim().toUpperCase() === 'Y' ? 'Y' : 'N';
+}
+
+function hasHealthMetricAnswerValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
 }
 
 function getSurveyTrafficLightConfig(answerTypeId, rawEnabled, rawDirection) {
@@ -346,6 +355,9 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
       ${localizedQuestionName} AS question,
       q.\`order\` AS question_order,
       q.answer_type_id,
+      q.\`required\`,
+      q.depends_on_question_id,
+      q.depends_on_answer_id,
       q.traffic_light_enabled,
       q.traffic_light_direction,
       a.id AS answer_id,
@@ -392,6 +404,9 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
       const question = {
         id: row.question_id,
         question: row.question,
+        required: normalizeSurveyRequired(row.required),
+        depends_on_question_id: row.depends_on_question_id,
+        depends_on_answer_id: row.depends_on_answer_id,
         traffic_light_enabled: trafficLightConfig.traffic_light_enabled,
         traffic_light_direction: trafficLightConfig.traffic_light_direction,
         answers: []
@@ -411,7 +426,14 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
 
   return {
     questions,
-    questionIds: questions.map(question => question.id)
+    questionIds: questions.map(question => question.id),
+    dependencyQuestionIds: [
+      ...new Set(
+        questions
+          .map(question => question.depends_on_question_id)
+          .filter(questionId => !!questionId)
+      )
+    ]
   };
 }
 
@@ -682,10 +704,10 @@ async function getHealthMetricDeliveryEventsByUserIds(userIds, filters) {
   return groupHealthMetricDeliveryEventsByUserId(eventRows);
 }
 
-async function getHealthMetricAnswerValueMap(userIds, questionIds, language) {
-  const answerValueByUserQuestion = new Map();
+async function getHealthMetricAnswerStateMap(userIds, questionIds, language) {
+  const answerStateByUserQuestion = new Map();
   if (!Array.isArray(userIds) || userIds.length === 0 || !Array.isArray(questionIds) || questionIds.length === 0) {
-    return answerValueByUserQuestion;
+    return answerStateByUserQuestion;
   }
 
   const localizedAnswerName = language === 'es'
@@ -699,7 +721,8 @@ async function getHealthMetricAnswerValueMap(userIds, questionIds, language) {
       `SELECT
          uq.user_id,
          uq.question_id,
-         GROUP_CONCAT(${localizedAnswerName} ORDER BY a.\`order\` ASC, a.id ASC SEPARATOR ', ') AS answer_value
+         GROUP_CONCAT(${localizedAnswerName} ORDER BY a.\`order\` ASC, a.id ASC SEPARATOR ', ') AS answer_value,
+         GROUP_CONCAT(uqa.answer_id ORDER BY a.\`order\` ASC, a.id ASC SEPARATOR ',') AS answer_ids
        FROM user_question uq
        INNER JOIN (
          SELECT user_id, question_id, MAX(id) AS latest_id
@@ -715,14 +738,48 @@ async function getHealthMetricAnswerValueMap(userIds, questionIds, language) {
 
     for (let j = 0; j < rows.length; j++) {
       const row = rows[j];
-      answerValueByUserQuestion.set(
+      answerStateByUserQuestion.set(
         `${row.user_id}:${row.question_id}`,
-        row.answer_value || ''
+        {
+          answer_value: row.answer_value || '',
+          answer_ids: row.answer_ids
+            ? String(row.answer_ids).split(',').map(answerId => Number(answerId)).filter(answerId => Number.isInteger(answerId))
+            : []
+        }
       );
     }
   }
 
-  return answerValueByUserQuestion;
+  return answerStateByUserQuestion;
+}
+
+function isHealthMetricQuestionApplicable(question, userId, answerStateByUserQuestion) {
+  if (!question.depends_on_question_id) {
+    return true;
+  }
+
+  const parentAnswerState = answerStateByUserQuestion.get(`${userId}:${question.depends_on_question_id}`);
+  if (!parentAnswerState || !Array.isArray(parentAnswerState.answer_ids)) {
+    return false;
+  }
+
+  return parentAnswerState.answer_ids.includes(Number(question.depends_on_answer_id));
+}
+
+function getHealthMetricReportAnswerValue({ answerStateByUserQuestion, userId, question }) {
+  const answerState = answerStateByUserQuestion.get(`${userId}:${question.id}`);
+  if (answerState && hasHealthMetricAnswerValue(answerState.answer_value)) {
+    return answerState.answer_value;
+  }
+
+  if (
+    question.required === 'Y' &&
+    isHealthMetricQuestionApplicable(question, userId, answerStateByUserQuestion)
+  ) {
+    return NOT_COLLECTED_REPORT_VALUE;
+  }
+
+  return '';
 }
 
 async function getHealthMetricAnswerCountMap(userIds, questionIds) {
@@ -844,14 +901,20 @@ function streamHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
     }
 
     const metricUserIds = metricUsers.map(user => user.user_id);
+    const reportAnswerQuestionIds = [
+      ...new Set([
+        ...questionIds,
+        ...questionCatalog.dependencyQuestionIds
+      ])
+    ];
     const [
       deliverySummaryByUserId,
       deliveryEventsByUserId,
-      answerValueByUserQuestion
+      answerStateByUserQuestion
     ] = await Promise.all([
       getHealthMetricDeliverySummaryByUserIds(metricUserIds, normalizedFilters),
       getHealthMetricDeliveryEventsByUserIds(metricUserIds, normalizedFilters),
-      getHealthMetricAnswerValueMap(metricUserIds, questionIds, language)
+      getHealthMetricAnswerStateMap(metricUserIds, reportAnswerQuestionIds, language)
     ]);
 
     let batch = [];
@@ -902,8 +965,11 @@ function streamHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
 
       for (let qIndex = 0; qIndex < questions.length; qIndex++) {
         const question = questions[qIndex];
-        baseRow[String(question.id)] =
-          answerValueByUserQuestion.get(`${user.user_id}:${question.id}`) || '';
+        baseRow[String(question.id)] = getHealthMetricReportAnswerValue({
+          answerStateByUserQuestion,
+          userId: user.user_id,
+          question
+        });
       }
 
       const userEvents = deliveryEventsByUserId.get(user.user_id) || [{
