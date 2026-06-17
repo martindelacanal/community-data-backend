@@ -534,6 +534,101 @@ async function getNotificationById(notificationId) {
   return mapNotificationRow(rows[0]);
 }
 
+// ----- Inbox por usuario (historial de notificaciones de la app nativa) -----
+const APP_NOTIFICATION_TITLE = process.env.PUSH_NOTIFICATION_TITLE || 'Bienestar Community';
+
+/** Id del usuario autenticado a partir del token (req.data.data es un JSON string). */
+function getAuthUserId(req) {
+  try {
+    const user = JSON.parse(req.data.data);
+    const id = Number(user.id);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/** Filas del inbox -> objeto para el cliente (con URL de imagen firmada y estado de lectura). */
+async function mapInboxNotificationRow(row, imageExpiry = 60 * 60 * 24) {
+  return {
+    id: row.id,
+    // El push usa un título fijo de la app; el cuerpo es message_en/message_es.
+    title: APP_NOTIFICATION_TITLE,
+    message_en: row.message_en,
+    message_es: row.message_es,
+    image_url: row.image_s3_key ? await getSignedImageUrl(row.image_s3_key, imageExpiry) : null,
+    delivered_at: row.delivered_at,
+    read: row.read_at !== null && row.read_at !== undefined,
+    read_at: row.read_at || null
+  };
+}
+
+async function getUnreadInboxCount(userId) {
+  const [rows] = await mysqlConnection.promise().query(
+    `SELECT COUNT(*) AS total
+       FROM push_notification_recipients
+      WHERE user_id = ? AND read_at IS NULL`,
+    [userId]
+  );
+  return rows[0]?.total || 0;
+}
+
+/**
+ * Resumen para los indicadores de la app: cantidad de no leídas + id de la notificación
+ * entregada más recientemente (latest_id). El cliente usa latest_id para el "puntito" de
+ * actividad nueva en el botón My Wellbeing (se compara contra el último id descartado).
+ */
+async function getInboxSummary(userId) {
+  const [rows] = await mysqlConnection.promise().query(
+    `SELECT
+       COALESCE(SUM(read_at IS NULL), 0) AS unread,
+       (SELECT push_notification_id
+          FROM push_notification_recipients
+         WHERE user_id = ?
+         ORDER BY delivered_at DESC, id DESC
+         LIMIT 1) AS latest_id
+     FROM push_notification_recipients
+     WHERE user_id = ?`,
+    [userId, userId]
+  );
+
+  return {
+    unread_count: Number(rows[0]?.unread || 0),
+    latest_id: rows[0]?.latest_id != null ? Number(rows[0].latest_id) : null
+  };
+}
+
+/**
+ * Registra/actualiza una fila de inbox por cada usuario distinto alcanzado por una ejecución.
+ * Idempotente por (push_notification_id, user_id): un re-envío vuelve a marcar como no leída
+ * y sube el item al tope (delivered_at = NOW()). No interrumpe el envío si falla.
+ */
+async function recordNotificationRecipients(connection, notificationId, executionId, audienceDevices) {
+  const targetedUserIds = [...new Set(
+    audienceDevices
+      .map((row) => row.audience_user_id)
+      .filter((value) => value !== null && value !== undefined)
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0)
+  )];
+
+  if (targetedUserIds.length === 0) {
+    return;
+  }
+
+  for (const chunk of chunkArray(targetedUserIds, 500)) {
+    const placeholders = chunk.map(() => '(?, ?, ?)').join(',');
+    const params = [];
+    chunk.forEach((userId) => params.push(notificationId, userId, executionId));
+    await connection.query(
+      `INSERT INTO push_notification_recipients (push_notification_id, user_id, execution_id)
+       VALUES ${placeholders}
+       ON DUPLICATE KEY UPDATE execution_id = VALUES(execution_id), delivered_at = NOW(), read_at = NULL`,
+      params
+    );
+  }
+}
+
 async function getTotalRegisteredDevices(connection) {
   const [rows] = await connection.query(
     `SELECT COUNT(DISTINCT push_token) AS total
@@ -776,6 +871,13 @@ async function executeNotification(connection, notification, executedByUserId) {
     ]
   );
 
+  // Historial por usuario (inbox de la app nativa). No debe tumbar el envío si falla.
+  try {
+    await recordNotificationRecipients(connection, notification.id, executionResult.insertId, audienceDevices);
+  } catch (recipientError) {
+    logger.error('Error recording push notification recipients:', recipientError);
+  }
+
   await connection.query(
     'UPDATE push_notifications SET last_executed_at = NOW() WHERE id = ?',
     [notification.id]
@@ -933,6 +1035,139 @@ router.post('/push-notifications/devices/sync', async (req, res) => {
     });
   } finally {
     connection?.release();
+  }
+});
+
+// ============ USER-FACING INBOX (historial de notificaciones por usuario) ============
+// Historial de notificaciones push del usuario logueado para la app nativa (Android/iOS).
+// IMPORTANTE: estas rutas '/push-notifications/inbox*' se declaran ANTES de
+// '/push-notifications/:id' (admin) para que 'inbox' no se interprete como un :id.
+
+// GET /push-notifications/inbox?page=&pageSize= - lista paginada (más reciente primero)
+router.get('/push-notifications/inbox', verifyToken, async (req, res) => {
+  const userId = getAuthUserId(req);
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized', message: 'Authentication required' });
+  }
+
+  try {
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 10, 1), 50);
+    const offset = (page - 1) * pageSize;
+
+    const [countRows] = await mysqlConnection.promise().query(
+      'SELECT COUNT(*) AS total FROM push_notification_recipients WHERE user_id = ?',
+      [userId]
+    );
+    const total = countRows[0]?.total || 0;
+    const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT pn.id, pn.message_en, pn.message_es, pn.image_s3_key,
+              r.delivered_at, r.read_at
+         FROM push_notification_recipients r
+         INNER JOIN push_notifications pn ON pn.id = r.push_notification_id
+        WHERE r.user_id = ?
+        ORDER BY r.delivered_at DESC, r.id DESC
+        LIMIT ? OFFSET ?`,
+      [userId, pageSize, offset]
+    );
+
+    const notifications = await Promise.all(rows.map((row) => mapInboxNotificationRow(row)));
+    const unreadCount = await getUnreadInboxCount(userId);
+
+    return res.status(200).json({
+      notifications,
+      total,
+      page,
+      pageSize,
+      totalPages,
+      unread_count: unreadCount
+    });
+  } catch (error) {
+    logger.error('Error retrieving notification inbox:', error);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Could not retrieve notifications'
+    });
+  }
+});
+
+// GET /push-notifications/inbox/unread-count - sólo el contador (para el badge)
+router.get('/push-notifications/inbox/unread-count', verifyToken, async (req, res) => {
+  const userId = getAuthUserId(req);
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized', message: 'Authentication required' });
+  }
+
+  try {
+    const summary = await getInboxSummary(userId);
+    return res.status(200).json({ unread_count: summary.unread_count, latest_id: summary.latest_id });
+  } catch (error) {
+    logger.error('Error retrieving inbox unread count:', error);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Could not retrieve unread count'
+    });
+  }
+});
+
+// POST /push-notifications/inbox/read-all - marca todas como leídas
+router.post('/push-notifications/inbox/read-all', verifyToken, async (req, res) => {
+  const userId = getAuthUserId(req);
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized', message: 'Authentication required' });
+  }
+
+  try {
+    await mysqlConnection.promise().query(
+      `UPDATE push_notification_recipients
+          SET read_at = NOW()
+        WHERE user_id = ? AND read_at IS NULL`,
+      [userId]
+    );
+    return res.status(200).json({ unread_count: 0 });
+  } catch (error) {
+    logger.error('Error marking all notifications as read:', error);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Could not update notifications'
+    });
+  }
+});
+
+// POST /push-notifications/inbox/:id/read - marca una notificación como leída (:id = push_notification_id)
+router.post('/push-notifications/inbox/:id/read', verifyToken, async (req, res) => {
+  const userId = getAuthUserId(req);
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized', message: 'Authentication required' });
+  }
+
+  const notificationId = normalizePositiveInteger(req.params.id);
+  if (!notificationId) {
+    return res.status(400).json({ error: 'Validation Error', message: 'Invalid notification id' });
+  }
+
+  try {
+    await mysqlConnection.promise().query(
+      `UPDATE push_notification_recipients
+          SET read_at = NOW()
+        WHERE user_id = ? AND push_notification_id = ? AND read_at IS NULL`,
+      [userId, notificationId]
+    );
+
+    const unreadCount = await getUnreadInboxCount(userId);
+    return res.status(200).json({
+      notification_id: notificationId,
+      read: true,
+      unread_count: unreadCount
+    });
+  } catch (error) {
+    logger.error('Error marking notification as read:', error);
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Could not update notification'
+    });
   }
 });
 
