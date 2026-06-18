@@ -10413,11 +10413,11 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
           [rows] = await mysqlConnection.promise().query(
             `SELECT
               SUM(total_weight) AS value,
-              DATE_FORMAT(date, '%m/%Y') AS name
+              DATE_FORMAT(COALESCE(date, creation_date), '%m/%Y') AS name
             FROM donation_ticket
-            WHERE enabled = 'Y'
-            GROUP BY DATE_FORMAT(date, '%m/%Y')
-            ORDER BY MIN(date)`
+            WHERE enabled = 'Y' AND COALESCE(date, creation_date) IS NOT NULL
+            GROUP BY DATE_FORMAT(COALESCE(date, creation_date), '%m/%Y')
+            ORDER BY MIN(COALESCE(date, creation_date))`
           );
           isTabSelectedCorrect = true;
           break;
