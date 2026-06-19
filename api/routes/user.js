@@ -22965,7 +22965,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       titleEnglish, titleSpanish, subtitleEnglish, subtitleSpanish,
       contentEnglish, contentSpanish, author, author_gender, date,
       categoryIds, filter, article_status_id, priority,
-      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id,
+      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id, priority_category_id,
       tags, genderIds, ethnicityIds, locationIds, ageRanges
     } = req.body;
 
@@ -23008,6 +23008,11 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     // Validate priority_filter_id if provided
     if (priority_filter_id && !filterIds.includes(parseInt(priority_filter_id))) {
       return res.status(400).json('priority_filter_id must be included in the filter array');
+    }
+
+    // Validate priority_category_id if provided (must be one of the selected categories)
+    if (priority_category_id && !parsedCategoryIds.map(id => parseInt(id)).includes(parseInt(priority_category_id))) {
+      return res.status(400).json('priority_category_id must be included in the category array');
     }
 
     // Parse and validate tags
@@ -23109,11 +23114,14 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       // Process tags (create new ones if needed)
       const processedTagIds = await processArticleTags(tagArray);
 
-      // Insert article categories
+      // Insert article categories (mark the admin-chosen primary category with priority='Y')
       if (parsedCategoryIds.length > 0) {
-        const categoryValues = parsedCategoryIds.map(categoryId => [articleId, parseInt(categoryId)]);
+        const categoryValues = parsedCategoryIds.map(categoryId => {
+          const isPriorityCategory = priority_category_id && parseInt(categoryId) === parseInt(priority_category_id);
+          return [articleId, parseInt(categoryId), isPriorityCategory ? 'Y' : 'N'];
+        });
         await connection.query(
-          'INSERT INTO article_category (article_id, category_id) VALUES ?',
+          'INSERT INTO article_category (article_id, category_id, priority) VALUES ?',
           [categoryValues]
         );
       }
@@ -23202,9 +23210,9 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
 
     // Get category, filter, tag, and audience information for response
     const [categories] = await mysqlConnection.promise().query(
-      `SELECT c.id, c.name_en, c.name_es 
-       FROM category c 
-       INNER JOIN article_category ac ON c.id = ac.category_id 
+      `SELECT c.id, c.name_en, c.name_es, ac.priority
+       FROM category c
+       INNER JOIN article_category ac ON c.id = ac.category_id
        WHERE ac.article_id = ?`,
       [articleId]
     );
@@ -23227,6 +23235,10 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterId = priorityFilter ? priorityFilter.id : null;
+
+    // Get priority_category_id from categories
+    const priorityCategory = categories.find(c => c.priority === 'Y');
+    const priorityCategoryId = priorityCategory ? priorityCategory.id : null;
 
     // Replace S3 key placeholders with signed URLs in content for response
     const contentEnglishWithUrls = await replaceS3KeysWithSignedUrls(processedContentEnglish);
@@ -23262,6 +23274,7 @@ router.post('/article', verifyToken, articleUpload, async (req, res) => {
       locationIds: audienceData.locationsMap.get(articleId) || [],
       ageRanges: audienceData.ageRangesMap.get(articleId) || [],
       priority_filter_id: priorityFilterId,
+      priority_category_id: priorityCategoryId,
       priority: managedPriority,
       article_status_id: parseInt(article_status_id) || 1,
       imageEnglishUrl,
@@ -23378,7 +23391,7 @@ router.get('/article/public', async (req, res) => {
            INNER JOIN category c ON ac_name.category_id = c.id
           WHERE ac_name.article_id = a.id
             AND c.name_en <> 'All categories'
-          ORDER BY ac_name.category_id ASC
+          ORDER BY ac_name.priority DESC, ac_name.category_id ASC
           LIMIT 1) as categoryName
       FROM article a
       LEFT JOIN article_images ai ON a.id = ai.article_id 
@@ -23740,15 +23753,18 @@ router.get('/article/:id', async (req, res) => {
 
     const article = articles[0];
 
-    // Get article categories
+    // Get article categories. Order by priority first (admin-chosen primary category),
+    // then by id, so consumers that take the first entry as the kicker get the primary one.
     const [categories] = await mysqlConnection.promise().query(
-      `SELECT 
+      `SELECT
         c.id,
         c.name_en as nameEnglish,
-        c.name_es as nameSpanish
+        c.name_es as nameSpanish,
+        ac.priority
       FROM article_category ac
       INNER JOIN category c ON ac.category_id = c.id
-      WHERE ac.article_id = ?`,
+      WHERE ac.article_id = ?
+      ORDER BY ac.priority DESC, c.id ASC`,
       [id]
     );
 
@@ -23775,6 +23791,9 @@ router.get('/article/:id', async (req, res) => {
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterId = priorityFilter ? priorityFilter.id : null;
+
+    // Get priority_category_id from categories (the admin-chosen primary; null if none)
+    const priorityCategoryId = categories.find(c => c.priority === 'Y')?.id ?? null;
 
     // Get article images
     const [images] = await mysqlConnection.promise().query(
@@ -23842,6 +23861,7 @@ router.get('/article/:id', async (req, res) => {
       ageRanges: audienceData.ageRangesMap.get(article.id) || [],
       filterIds: filters.map(filter => filter.id),
       priority_filter_id: priorityFilterId,
+      priority_category_id: priorityCategoryId,
       priority: article.priority,
       article_status_id: article.article_status_id,
       statusName: article.statusName,
@@ -23920,18 +23940,19 @@ router.get('/article/slug/:slug', async (req, res) => {
       return res.status(404).json({ message: 'Article not found' });
     }
 
-    // Get article categories. Order by category id ASC so the detail page's kicker
-    // (first non-"All categories" entry) matches the public list kicker, which also
-    // selects the lowest category_id.
+    // Get article categories. Order by priority first (admin-chosen primary category),
+    // then by id, so the detail page's kicker (first non-"All categories" entry) matches
+    // the public list kicker, which also prefers the priority category then the lowest id.
     const [categories] = await mysqlConnection.promise().query(
       `SELECT
         c.id,
         c.name_en as nameEnglish,
-        c.name_es as nameSpanish
+        c.name_es as nameSpanish,
+        ac.priority
       FROM article_category ac
       INNER JOIN category c ON ac.category_id = c.id
       WHERE ac.article_id = ?
-      ORDER BY c.id ASC`,
+      ORDER BY ac.priority DESC, c.id ASC`,
       [article.id]
     );
 
@@ -23958,6 +23979,9 @@ router.get('/article/slug/:slug', async (req, res) => {
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterId = priorityFilter ? priorityFilter.id : null;
+
+    // Get priority_category_id from categories (the admin-chosen primary; null if none)
+    const priorityCategoryId = categories.find(c => c.priority === 'Y')?.id ?? null;
 
     // Get article images
     const [images] = await mysqlConnection.promise().query(
@@ -24025,6 +24049,7 @@ router.get('/article/slug/:slug', async (req, res) => {
       ageRanges: audienceData.ageRangesMap.get(article.id) || [],
       filterIds: filters.map(filter => filter.id),
       priority_filter_id: priorityFilterId,
+      priority_category_id: priorityCategoryId,
       priority: article.priority,
       article_status_id: article.article_status_id,
       statusNameEnglish: article.statusNameEn,
@@ -24074,7 +24099,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       titleEnglish, titleSpanish, subtitleEnglish, subtitleSpanish,
       contentEnglish, contentSpanish, author, author_gender, date,
       categoryIds, filter, article_status_id, priority,
-      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id,
+      imageCaptionEnglish, imageCaptionSpanish, priority_filter_id, priority_category_id,
       tags, genderIds, ethnicityIds, locationIds, ageRanges
     } = req.body;
 
@@ -24127,6 +24152,12 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     if (priority_filter_id && !filterIds.includes(parseInt(priority_filter_id))) {
       await connection.rollback();
       return res.status(400).json('priority_filter_id must be included in the filter array');
+    }
+
+    // Validate priority_category_id if provided (must be one of the selected categories)
+    if (priority_category_id && !parsedCategoryIds.map(catId => parseInt(catId)).includes(parseInt(priority_category_id))) {
+      await connection.rollback();
+      return res.status(400).json('priority_category_id must be included in the category array');
     }
 
     // Parse and validate tags
@@ -24218,11 +24249,14 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     );
 
     // INSERT operations (in specific order)
-    // Insert new categories
+    // Insert new categories (mark the admin-chosen primary category with priority='Y')
     if (parsedCategoryIds.length > 0) {
-      const categoryValues = parsedCategoryIds.map(categoryId => [id, parseInt(categoryId)]);
+      const categoryValues = parsedCategoryIds.map(categoryId => {
+        const isPriorityCategory = priority_category_id && parseInt(categoryId) === parseInt(priority_category_id);
+        return [id, parseInt(categoryId), isPriorityCategory ? 'Y' : 'N'];
+      });
       await connection.query(
-        'INSERT INTO article_category (article_id, category_id) VALUES ?',
+        'INSERT INTO article_category (article_id, category_id, priority) VALUES ?',
         [categoryValues]
       );
     }
@@ -24320,9 +24354,9 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
 
     // Get updated category, filter, tag, and audience information for response
     const [categories] = await mysqlConnection.promise().query(
-      `SELECT c.id, c.name_en, c.name_es 
-       FROM category c 
-       INNER JOIN article_category ac ON c.id = ac.category_id 
+      `SELECT c.id, c.name_en, c.name_es, ac.priority
+       FROM category c
+       INNER JOIN article_category ac ON c.id = ac.category_id
        WHERE ac.article_id = ?`,
       [id]
     );
@@ -24345,6 +24379,10 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
     // Get priority_filter_id from filters
     const priorityFilter = filters.find(f => f.priority === 'Y');
     const priorityFilterIdResponse = priorityFilter ? priorityFilter.id : null;
+
+    // Get priority_category_id from categories
+    const priorityCategory = categories.find(c => c.priority === 'Y');
+    const priorityCategoryIdResponse = priorityCategory ? priorityCategory.id : null;
 
     // Replace S3 key placeholders with signed URLs in content for response
     const contentEnglishWithUrls = await replaceS3KeysWithSignedUrls(processedContentEnglish);
@@ -24379,6 +24417,7 @@ router.put('/article/:id', verifyToken, articleUpload, async (req, res) => {
       locationIds: audienceData.locationsMap.get(parseInt(id)) || [],
       ageRanges: audienceData.ageRangesMap.get(parseInt(id)) || [],
       priority_filter_id: priorityFilterIdResponse,
+      priority_category_id: priorityCategoryIdResponse,
       priority: managedPriority,
       article_status_id: parseInt(article_status_id) || 1,
       imageEnglishUrl,
@@ -27509,8 +27548,13 @@ router.get('/search', async (req, res) => {
         AND (
           ${language === 'en' ? 'a.title_en' : 'a.title_es'} LIKE ?
           OR ${language === 'en' ? 'a.subtitle_en' : 'a.subtitle_es'} LIKE ?
-          OR ${language === 'en' ? 'f.name_en' : 'f.name_es'} LIKE ?
           OR ${language === 'en' ? 'c.name_en' : 'c.name_es'} LIKE ?
+          OR EXISTS (
+            SELECT 1 FROM article_filter af2
+            INNER JOIN filter f2 ON af2.filter_id = f2.id
+            WHERE af2.article_id = a.id
+              AND ${language === 'en' ? 'f2.name_en' : 'f2.name_es'} LIKE ?
+          )
         )
       ORDER BY a.priority ASC, a.publication_date DESC
       LIMIT ?
@@ -27535,6 +27579,9 @@ router.get('/search', async (req, res) => {
       LEFT JOIN resource_services rs ON rsr.service_id = rs.id
       LEFT JOIN resource_price_relations rpr ON tr.id = rpr.resource_id
       LEFT JOIN resource_prices rp ON rpr.price_id = rp.id
+      LEFT JOIN resource_cities rc ON tr.city_id = rc.id
+      LEFT JOIN resource_attribute_relations rar ON tr.id = rar.resource_id
+      LEFT JOIN resource_attributes ra ON rar.attribute_id = ra.id
       WHERE tr.is_active = 1
         AND (
           ${language === 'en' ? 'tr.title_english' : 'tr.title_spanish'} LIKE ?
@@ -27547,22 +27594,26 @@ router.get('/search', async (req, res) => {
           OR ${language === 'en' ? 'rf.name_english' : 'rf.name_spanish'} LIKE ?
           OR ${language === 'en' ? 'rs.name_english' : 'rs.name_spanish'} LIKE ?
           OR ${language === 'en' ? 'rp.name_english' : 'rp.name_spanish'} LIKE ?
+          OR rc.name LIKE ?
+          OR ${language === 'en' ? 'ra.name_english' : 'ra.name_spanish'} LIKE ?
         )
       ORDER BY tr.created_at DESC
       LIMIT ?
     `;
 
     const trustedResourcesParams = [
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
+      searchTerm, // title
+      searchTerm, // description
+      searchTerm, // information
+      searchTerm, // address
+      searchTerm, // phone_number
+      searchTerm, // email
+      searchTerm, // website
+      searchTerm, // filter (category) name
+      searchTerm, // service name
+      searchTerm, // price name
+      searchTerm, // city / location name
+      searchTerm, // age / gender / language attribute name
       maxTrustedResources
     ];
 
@@ -27748,11 +27799,11 @@ async function getFiltersForResources(resourceIds) {
 
   const placeholders = resourceIds.map(() => '?').join(',');
   const [filters] = await mysqlConnection.promise().query(
-    `SELECT rfr.resource_id, rf.id, rf.name_english, rf.name_spanish
+    `SELECT rfr.resource_id, rf.id, rf.name_english, rf.name_spanish, rfr.priority
      FROM resource_filter_relations rfr
      INNER JOIN resource_filters rf ON rfr.filter_id = rf.id
      WHERE rfr.resource_id IN (${placeholders})
-     ORDER BY rf.name_english`,
+     ORDER BY rfr.priority DESC, rf.name_english`,
     resourceIds
   );
 
@@ -27764,7 +27815,8 @@ async function getFiltersForResources(resourceIds) {
     filtersMap.get(filter.resource_id).push({
       id: filter.id,
       nameEnglish: filter.name_english,
-      nameSpanish: filter.name_spanish
+      nameSpanish: filter.name_spanish,
+      priority: filter.priority
     });
   });
 
@@ -28289,7 +28341,7 @@ router.get('/trusted-resources/filters', async (req, res) => {
     const [filters] = await mysqlConnection.promise().query(
       `SELECT id, name_english, name_spanish, icon_s3_key
        FROM resource_filters
-       ${withResourcesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM resource_filter_relations rfr WHERE rfr.filter_id = resource_filters.id)' : ''}
+       ${withResourcesOnlyBool ? 'WHERE EXISTS (SELECT 1 FROM resource_filter_relations rfr INNER JOIN trusted_resources tr ON tr.id = rfr.resource_id WHERE rfr.filter_id = resource_filters.id AND tr.is_active = 1)' : ''}
        ORDER BY name_english`
     );
 
@@ -30105,6 +30157,7 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
       cityId = null,
       isActive = true,
       filterIds = [],
+      priorityFilterId = null,
       priceIds = [],
       serviceIds = [],
       attributeIds = [],
@@ -30145,11 +30198,14 @@ router.post('/trusted-resources', verifyToken, async (req, res) => {
 
     const resourceId = result.insertId;
 
-    // Insert filter relations
+    // Insert filter relations (mark the admin-chosen primary category with priority='Y')
     if (filterIds && filterIds.length > 0) {
-      const filterValues = filterIds.map(filterId => [resourceId, filterId]);
+      const filterValues = filterIds.map(filterId => {
+        const isPrimary = priorityFilterId && parseInt(filterId) === parseInt(priorityFilterId);
+        return [resourceId, filterId, isPrimary ? 'Y' : 'N'];
+      });
       await connection.query(
-        'INSERT INTO resource_filter_relations (resource_id, filter_id) VALUES ?',
+        'INSERT INTO resource_filter_relations (resource_id, filter_id, priority) VALUES ?',
         [filterValues]
       );
     }
@@ -30297,6 +30353,7 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
       cityId = null,
       isActive = true,
       filterIds = [],
+      priorityFilterId = null,
       priceIds = [],
       serviceIds = [],
       attributeIds = [],
@@ -30348,11 +30405,14 @@ router.put('/trusted-resources/:id', verifyToken, async (req, res) => {
     await connection.query('DELETE FROM resource_attribute_relations WHERE resource_id = ?', [id]);
     await connection.query('DELETE FROM resource_schedules WHERE resource_id = ?', [id]);
 
-    // Insert new filter relations
+    // Insert new filter relations (mark the admin-chosen primary category with priority='Y')
     if (filterIds && filterIds.length > 0) {
-      const filterValues = filterIds.map(filterId => [id, filterId]);
+      const filterValues = filterIds.map(filterId => {
+        const isPrimary = priorityFilterId && parseInt(filterId) === parseInt(priorityFilterId);
+        return [id, filterId, isPrimary ? 'Y' : 'N'];
+      });
       await connection.query(
-        'INSERT INTO resource_filter_relations (resource_id, filter_id) VALUES ?',
+        'INSERT INTO resource_filter_relations (resource_id, filter_id, priority) VALUES ?',
         [filterValues]
       );
     }
