@@ -18897,9 +18897,23 @@ router.post('/table/volunteer', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
+    const requestedOrderBy = req.query.orderBy ? String(req.query.orderBy) : 'id';
     var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const volunteerOrderColumns = {
+      id: 'v.id',
+      email: 'v.email',
+      firstname: 'v.firstname',
+      lastname: 'v.lastname',
+      location: 'l.community_city',
+      gender: language === 'en' ? 'g.name' : 'g.name_es',
+      ethnicity: language === 'en' ? 'e.name' : 'e.name_es',
+      creation_date: 'v.creation_date'
+    };
+    var orderBy = Object.prototype.hasOwnProperty.call(volunteerOrderColumns, requestedOrderBy) ? requestedOrderBy : 'id';
+    var queryOrderBy = `${volunteerOrderColumns[orderBy]} ${orderType}`;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, v.id ${orderType}`;
+    }
 
     if (buscar) {
       buscar = '%' + buscar + '%';
