@@ -28823,7 +28823,10 @@ router.delete('/trusted-resources/filters/:id', verifyToken, async (req, res) =>
     );
 
     if (relations[0].count > 0) {
-      return res.status(409).json('Cannot delete filter: it has associated trusted resources. Remove the associations first.');
+      return res.status(409).json({
+        success: false,
+        message: 'Cannot delete category: it has associated trusted resources. Update those resources first.'
+      });
     }
 
     const [filterRows] = await mysqlConnection.promise().query(
@@ -28844,7 +28847,7 @@ router.delete('/trusted-resources/filters/:id', verifyToken, async (req, res) =>
       await deleteCatalogIconFromS3(filterRows[0].icon_s3_key, 'trusted resource filter icon');
     }
 
-    res.json({ message: 'Filter deleted successfully' });
+    res.json({ success: true, message: 'Filter deleted successfully' });
 
   } catch (err) {
     console.log(err);
