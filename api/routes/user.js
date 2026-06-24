@@ -106,6 +106,24 @@ const jwtSignAsync = (data, secret, options) => {
   });
 };
 
+function buildTableOrder(req, orderColumns, defaultOrderBy = 'id') {
+  const requestedOrderBy = req.query.orderBy ? String(req.query.orderBy) : defaultOrderBy;
+  const requestedOrderType = typeof req.query.orderType === 'string' ? req.query.orderType.toLowerCase() : '';
+  const orderType = ['asc', 'desc'].includes(requestedOrderType) ? requestedOrderType : 'desc';
+  const fallbackOrderBy = Object.prototype.hasOwnProperty.call(orderColumns, defaultOrderBy)
+    ? defaultOrderBy
+    : Object.keys(orderColumns)[0];
+  const orderBy = Object.prototype.hasOwnProperty.call(orderColumns, requestedOrderBy)
+    ? requestedOrderBy
+    : fallbackOrderBy;
+
+  return {
+    orderBy,
+    orderType,
+    queryOrderBy: `${orderColumns[orderBy]} ${orderType}`
+  };
+}
+
 const MOBILE_APP_VERSION_REGEX = /^\d+(\.\d+){1,2}$/;
 const MOBILE_APP_PLATFORMS = new Set(['android', 'ios']);
 
@@ -18546,9 +18564,19 @@ router.get('/table/notification', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const notificationOrder = buildTableOrder(req, {
+      id: 'message.id',
+      user_id: 'message.user_id',
+      user_name: 'user.username',
+      message: 'message.name',
+      creation_date: 'message.creation_date'
+    });
+    var orderBy = notificationOrder.orderBy;
+    var orderType = notificationOrder.orderType;
+    var queryOrderBy = notificationOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, message.id ${orderType}`;
+    }
 
     if (buscar) {
       buscar = '%' + buscar + '%';
@@ -18674,9 +18702,23 @@ router.post('/table/user', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const userOrder = buildTableOrder(req, {
+      id: 'u.id',
+      username: 'u.username',
+      email: 'u.email',
+      firstname: 'u.firstname',
+      lastname: 'u.lastname',
+      role: 'role.name',
+      enabled: 'u.enabled',
+      mailchimp_error: 'u.mailchimp_error',
+      creation_date: 'u.creation_date'
+    });
+    var orderBy = userOrder.orderBy;
+    var orderType = userOrder.orderType;
+    var queryOrderBy = userOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, u.id ${orderType}`;
+    }
 
     if (buscar) {
       buscar = '%' + buscar + '%';
@@ -18897,8 +18939,6 @@ router.post('/table/volunteer', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    const requestedOrderBy = req.query.orderBy ? String(req.query.orderBy) : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
     const volunteerOrderColumns = {
       id: 'v.id',
       email: 'v.email',
@@ -18909,8 +18949,10 @@ router.post('/table/volunteer', verifyToken, async (req, res) => {
       ethnicity: language === 'en' ? 'e.name' : 'e.name_es',
       creation_date: 'v.creation_date'
     };
-    var orderBy = Object.prototype.hasOwnProperty.call(volunteerOrderColumns, requestedOrderBy) ? requestedOrderBy : 'id';
-    var queryOrderBy = `${volunteerOrderColumns[orderBy]} ${orderType}`;
+    const volunteerOrder = buildTableOrder(req, volunteerOrderColumns);
+    var orderBy = volunteerOrder.orderBy;
+    var orderType = volunteerOrder.orderType;
+    var queryOrderBy = volunteerOrder.queryOrderBy;
     if (orderBy !== 'id') {
       queryOrderBy += `, v.id ${orderType}`;
     }
@@ -19149,9 +19191,23 @@ router.post('/table/delivered', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const deliveredOrder = buildTableOrder(req, {
+      id: 'db.id',
+      delivering_user_id: 'db.delivering_user_id',
+      delivery_username: 'user_delivery.username',
+      receiving_user_id: 'db.receiving_user_id',
+      beneficiary_username: 'user_beneficiary.username',
+      location_id: 'db.location_id',
+      community_city: 'location.community_city',
+      approved: 'db.approved',
+      creation_date: 'db.creation_date'
+    });
+    var orderBy = deliveredOrder.orderBy;
+    var orderType = deliveredOrder.orderType;
+    var queryOrderBy = deliveredOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, db.id ${orderType}`;
+    }
 
     if (buscar) {
       buscar = '%' + buscar + '%';
@@ -19278,14 +19334,23 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'date';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-
-    var queryOrderBy = `${orderBy} ${orderType}`;
-
-    if (orderBy === 'date') {
-      queryOrderBy = `dt.date ${orderType}, dt.id desc`;
-    }
+    const ticketOrder = buildTableOrder(req, {
+      id: 'dt.id',
+      donation_id: 'dt.donation_id',
+      total_weight: 'dt.total_weight',
+      provider: 'provider.name',
+      location: 'location.community_city',
+      date: 'dt.date',
+      transported_by: 'tb.name',
+      delivered_by: 'db.name',
+      audit_status: language === 'en' ? 'as1.name' : 'as1.name_es',
+      products: 'COUNT(DISTINCT pdt.product_id)',
+      creation_date: 'dt.creation_date'
+    }, 'date');
+    var orderBy = ticketOrder.orderBy;
+    var orderType = ticketOrder.orderType;
+    var queryOrderBy = ticketOrder.queryOrderBy;
+    queryOrderBy += orderBy === 'date' ? ', dt.id desc' : `, dt.id ${orderType}`;
 
     if (buscar) {
       buscar = '%' + buscar + '%';
@@ -19560,9 +19625,20 @@ router.post('/table/product', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const productOrder = buildTableOrder(req, {
+      id: 'id',
+      name: 'name',
+      product_type: 'product_type',
+      total_quantity: 'total_quantity',
+      value_usd: 'value_usd',
+      creation_date: 'creation_date_sort'
+    });
+    var orderBy = productOrder.orderBy;
+    var orderType = productOrder.orderType;
+    var queryOrderBy = productOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -19573,13 +19649,21 @@ router.post('/table/product', verifyToken, async (req, res) => {
 
     try {
       const query = `
-      SELECT * FROM (
+      SELECT
+        id,
+        name,
+        product_type,
+        value_usd,
+        creation_date,
+        total_quantity
+      FROM (
         SELECT
           p.id,
           p.name,
           ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS product_type,
           p.value_usd,
           DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date,
+          p.creation_date as creation_date_sort,
           IFNULL(SUM(pdt.quantity), 0) as total_quantity
         FROM product as p
         INNER JOIN product_type as pt ON p.product_type_id = pt.id
@@ -19692,9 +19776,18 @@ router.post('/table/product-type', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const productTypeOrder = buildTableOrder(req, {
+      id: 'pt.id',
+      name: language === 'en' ? 'pt.name' : 'pt.name_es',
+      creation_date: 'pt.creation_date',
+      modification_date: 'pt.modification_date'
+    });
+    var orderBy = productTypeOrder.orderBy;
+    var orderType = productTypeOrder.orderType;
+    var queryOrderBy = productTypeOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, pt.id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -19884,14 +19977,23 @@ router.post('/table/worker', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-
-    if (orderBy === 'id') {
-      orderBy = 'first_onboarding_id';
+    const workerOrder = buildTableOrder(req, {
+      id: 'first_onboarding_id',
+      first_onboarding_id: 'first_onboarding_id',
+      user_id: 'user_id',
+      username: 'username',
+      firstname: 'firstname',
+      lastname: 'lastname',
+      community_city: 'community_city',
+      onboarding_date: 'onboarding_date_sort',
+      offboarding_date: 'offboarding_date_sort'
+    }, 'first_onboarding_id');
+    var orderBy = workerOrder.orderBy === 'id' ? 'first_onboarding_id' : workerOrder.orderBy;
+    var orderType = workerOrder.orderType;
+    var queryOrderBy = workerOrder.queryOrderBy;
+    if (orderBy !== 'first_onboarding_id') {
+      queryOrderBy += `, first_onboarding_id ${orderType}`;
     }
-
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
 
     if (buscar) {
       buscar = '%' + buscar + '%';
@@ -19900,7 +20002,16 @@ router.post('/table/worker', verifyToken, async (req, res) => {
 
     try {
       const query = `
-      SELECT * FROM (
+      SELECT
+        first_onboarding_id,
+        user_id,
+        username,
+        firstname,
+        lastname,
+        community_city,
+        onboarding_date,
+        offboarding_date
+      FROM (
         SELECT
           dl.user_id,
           u.username,
@@ -19909,6 +20020,8 @@ router.post('/table/worker', verifyToken, async (req, res) => {
           l.community_city,
           DATE_FORMAT(MIN(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')), '%m/%d/%Y %T') as onboarding_date,
           DATE_FORMAT(MAX(CONVERT_TZ(dl.offboarding_date, '+00:00', 'America/Los_Angeles')), '%m/%d/%Y %T') as offboarding_date,
+          MIN(dl.creation_date) as onboarding_date_sort,
+          MAX(dl.offboarding_date) as offboarding_date_sort,
           (SELECT id FROM delivery_log WHERE user_id = dl.user_id AND DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) ORDER BY creation_date ASC LIMIT 1) as first_onboarding_id
         FROM delivery_log as dl
         INNER JOIN user as u ON dl.user_id = u.id
@@ -20006,9 +20119,19 @@ router.post('/table/delivered-by', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const deliveredByOrder = buildTableOrder(req, {
+      id: 'db.id',
+      name: 'db.name',
+      enabled: 'db.enabled',
+      creation_date: 'db.creation_date',
+      modification_date: 'db.modification_date'
+    });
+    var orderBy = deliveredByOrder.orderBy;
+    var orderType = deliveredByOrder.orderType;
+    var queryOrderBy = deliveredByOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, db.id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -20097,9 +20220,19 @@ router.post('/table/transported-by', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const transportedByOrder = buildTableOrder(req, {
+      id: 'tb.id',
+      name: 'tb.name',
+      enabled: 'tb.enabled',
+      creation_date: 'tb.creation_date',
+      modification_date: 'tb.modification_date'
+    });
+    var orderBy = transportedByOrder.orderBy;
+    var orderType = transportedByOrder.orderType;
+    var queryOrderBy = transportedByOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, tb.id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -20189,9 +20322,19 @@ router.post('/table/gender', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const genderOrder = buildTableOrder(req, {
+      id: 'g.id',
+      name: language === 'en' ? 'g.name' : 'g.name_es',
+      enabled: 'g.enabled',
+      creation_date: 'g.creation_date',
+      modification_date: 'g.modification_date'
+    });
+    var orderBy = genderOrder.orderBy;
+    var orderType = genderOrder.orderType;
+    var queryOrderBy = genderOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, g.id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -20288,9 +20431,19 @@ router.post('/table/ethnicity', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const ethnicityOrder = buildTableOrder(req, {
+      id: 'e.id',
+      name: language === 'en' ? 'e.name' : 'e.name_es',
+      enabled: 'e.enabled',
+      creation_date: 'e.creation_date',
+      modification_date: 'e.modification_date'
+    });
+    var orderBy = ethnicityOrder.orderBy;
+    var orderType = ethnicityOrder.orderType;
+    var queryOrderBy = ethnicityOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, e.id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -20383,9 +20536,18 @@ router.post('/table/provider', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const providerOrder = buildTableOrder(req, {
+      id: 'p.id',
+      name: 'p.name',
+      creation_date: 'p.creation_date',
+      modification_date: 'p.modification_date'
+    });
+    var orderBy = providerOrder.orderBy;
+    var orderType = providerOrder.orderType;
+    var queryOrderBy = providerOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, p.id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -20482,9 +20644,20 @@ router.post('/table/client', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const clientOrder = buildTableOrder(req, {
+      id: 'c.id',
+      name: 'c.name',
+      short_name: 'c.short_name',
+      enabled: 'c.enabled',
+      creation_date: 'c.creation_date',
+      modification_date: 'c.modification_date'
+    });
+    var orderBy = clientOrder.orderBy;
+    var orderType = clientOrder.orderType;
+    var queryOrderBy = clientOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, c.id ${orderType}`;
+    }
 
 
     if (buscar) {
@@ -20656,9 +20829,21 @@ router.post('/table/article', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const articleOrder = buildTableOrder(req, {
+      id: 'a.id',
+      title: language === 'en' ? 'a.title_en' : 'a.title_es',
+      author: 'a.author',
+      publication_date: 'a.publication_date',
+      status: language === 'en' ? 'ast.name_en' : 'ast.name_es',
+      priority: 'a.priority',
+      creation_date: 'a.creation_date'
+    });
+    var orderBy = articleOrder.orderBy;
+    var orderType = articleOrder.orderType;
+    var queryOrderBy = articleOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, a.id ${orderType}`;
+    }
 
     let havingClause = '';
     if (buscar) {
@@ -20781,9 +20966,21 @@ router.post('/table/location', verifyToken, async (req, res) => {
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
 
-    var orderBy = req.query.orderBy ? req.query.orderBy : 'id';
-    var orderType = ['asc', 'desc'].includes(req.query.orderType) ? req.query.orderType : 'desc';
-    var queryOrderBy = `${orderBy} ${orderType}`;
+    const locationOrder = buildTableOrder(req, {
+      id: 'l.id',
+      organization: 'l.organization',
+      community_city: 'l.community_city',
+      partner: 'partner',
+      address: 'l.address',
+      enabled: 'l.enabled',
+      creation_date: 'l.creation_date'
+    });
+    var orderBy = locationOrder.orderBy;
+    var orderType = locationOrder.orderType;
+    var queryOrderBy = locationOrder.queryOrderBy;
+    if (orderBy !== 'id') {
+      queryOrderBy += `, l.id ${orderType}`;
+    }
     let havingClause = '';
     if (buscar) {
       buscar = '%' + buscar + '%';
@@ -28102,11 +28299,16 @@ router.get('/trusted-resources/cities/paginated', verifyToken, async (req, res) 
     const pageSizeNum = parseInt(pageSize);
     const offset = (pageNum - 1) * pageSizeNum;
 
-    // Validate orderBy to prevent SQL injection
-    const allowedOrderBy = ['id', 'name', 'created_at'];
-    const safeOrderBy = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
-
-    const safeOrderType = orderType.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const cityOrderColumns = {
+      id: 'id',
+      name: 'name',
+      createdAt: 'created_at',
+      created_at: 'created_at'
+    };
+    const requestedOrderBy = String(orderBy);
+    const responseOrderBy = Object.prototype.hasOwnProperty.call(cityOrderColumns, requestedOrderBy) ? requestedOrderBy : 'id';
+    const safeOrderBy = cityOrderColumns[responseOrderBy];
+    const safeOrderType = typeof orderType === 'string' && orderType.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
     let whereClause = '';
     let queryParams = [];
@@ -28142,7 +28344,7 @@ router.get('/trusted-resources/cities/paginated', verifyToken, async (req, res) 
       numOfPages,
       totalItems,
       page: pageNum,
-      orderBy: safeOrderBy,
+      orderBy: responseOrderBy,
       orderType: orderType
     });
   } catch (error) {
@@ -28511,10 +28713,20 @@ router.get('/trusted-resources/filters/paginated', verifyToken, async (req, res)
     const pageSizeNum = parseInt(pageSize);
     const offset = (pageNum - 1) * pageSizeNum;
 
-    // Sanitize orderBy to prevent SQL injection
-    const allowedOrderBy = ['id', 'name_english', 'name_spanish', 'created_at'];
-    const orderByColumn = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
-    const orderDirection = orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const filterOrderColumns = {
+      id: 'rf.id',
+      nameEnglish: 'rf.name_english',
+      nameSpanish: 'rf.name_spanish',
+      name_english: 'rf.name_english',
+      name_spanish: 'rf.name_spanish',
+      resourceCount: 'resource_count',
+      createdAt: 'rf.created_at',
+      created_at: 'rf.created_at'
+    };
+    const requestedOrderBy = String(orderBy);
+    const responseOrderBy = Object.prototype.hasOwnProperty.call(filterOrderColumns, requestedOrderBy) ? requestedOrderBy : 'id';
+    const orderByColumn = filterOrderColumns[responseOrderBy];
+    const orderDirection = typeof orderType === 'string' && orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
     let whereConditions = [];
     let queryParams = [];
@@ -28562,7 +28774,7 @@ router.get('/trusted-resources/filters/paginated', verifyToken, async (req, res)
       numOfPages: Math.ceil(totalItems / pageSizeNum),
       totalItems,
       page: pageNum,
-      orderBy,
+      orderBy: responseOrderBy,
       orderType: orderDirection
     });
 
@@ -28933,9 +29145,21 @@ router.get('/trusted-resources/prices/paginated', verifyToken, async (req, res) 
     const pageSizeNum = parseInt(pageSize);
     const offset = (pageNum - 1) * pageSizeNum;
 
-    const allowedOrderBy = ['id', 'name_english', 'name_spanish', 'created_at'];
-    const orderByColumn = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
-    const orderDirection = orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const priceOrderColumns = {
+      id: 'rp.id',
+      nameEnglish: 'rp.name_english',
+      nameSpanish: 'rp.name_spanish',
+      name_english: 'rp.name_english',
+      name_spanish: 'rp.name_spanish',
+      description: 'rp.description',
+      resourceCount: 'resource_count',
+      createdAt: 'rp.created_at',
+      created_at: 'rp.created_at'
+    };
+    const requestedOrderBy = String(orderBy);
+    const responseOrderBy = Object.prototype.hasOwnProperty.call(priceOrderColumns, requestedOrderBy) ? requestedOrderBy : 'id';
+    const orderByColumn = priceOrderColumns[responseOrderBy];
+    const orderDirection = typeof orderType === 'string' && orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
     let whereConditions = [];
     let queryParams = [];
@@ -28979,7 +29203,7 @@ router.get('/trusted-resources/prices/paginated', verifyToken, async (req, res) 
       numOfPages: Math.ceil(totalItems / pageSizeNum),
       totalItems,
       page: pageNum,
-      orderBy,
+      orderBy: responseOrderBy,
       orderType: orderDirection
     });
 
@@ -29266,9 +29490,21 @@ router.get('/trusted-resources/services/paginated', verifyToken, async (req, res
     const pageSizeNum = parseInt(pageSize);
     const offset = (pageNum - 1) * pageSizeNum;
 
-    const allowedOrderBy = ['id', 'name_english', 'name_spanish', 'created_at'];
-    const orderByColumn = allowedOrderBy.includes(orderBy) ? orderBy : 'id';
-    const orderDirection = orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const serviceOrderColumns = {
+      id: 'rs.id',
+      nameEnglish: 'rs.name_english',
+      nameSpanish: 'rs.name_spanish',
+      name_english: 'rs.name_english',
+      name_spanish: 'rs.name_spanish',
+      description: 'rs.description',
+      resourceCount: 'resource_count',
+      createdAt: 'rs.created_at',
+      created_at: 'rs.created_at'
+    };
+    const requestedOrderBy = String(orderBy);
+    const responseOrderBy = Object.prototype.hasOwnProperty.call(serviceOrderColumns, requestedOrderBy) ? requestedOrderBy : 'id';
+    const orderByColumn = serviceOrderColumns[responseOrderBy];
+    const orderDirection = typeof orderType === 'string' && orderType.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
     let whereConditions = [];
     let queryParams = [];
@@ -29312,7 +29548,7 @@ router.get('/trusted-resources/services/paginated', verifyToken, async (req, res
       numOfPages: Math.ceil(totalItems / pageSizeNum),
       totalItems,
       page: pageNum,
-      orderBy,
+      orderBy: responseOrderBy,
       orderType: orderDirection
     });
 
