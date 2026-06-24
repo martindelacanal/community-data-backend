@@ -814,11 +814,12 @@ async function sendVolunteerRegistrationNotification(volunteerData, recipients, 
       : [];
 
     let sent = 0;
+    const deliveryResults = [];
     for (const lang of Object.keys(groups)) {
       const content = buildVolunteerNotificationContent(volunteerData, lang, signatureCid);
       const mailOptions = {
         from: 'bienestarcommunity@gmail.com',
-        bcc: groups[lang].join(', '),
+        to: groups[lang].join(', '),
         subject: content.subject,
         text: content.text,
         html: content.html,
@@ -827,14 +828,28 @@ async function sendVolunteerRegistrationNotification(volunteerData, recipients, 
 
       try {
         const info = await transporter.sendMail(mailOptions);
-        sent += groups[lang].length;
+        const acceptedCount = Array.isArray(info.accepted) ? info.accepted.length : groups[lang].length;
+        sent += acceptedCount;
+        deliveryResults.push({
+          language: lang,
+          recipients: groups[lang].length,
+          accepted: info.accepted || [],
+          rejected: info.rejected || []
+        });
         console.log(`Volunteer registration notification (${lang}) sent to ${groups[lang].join(', ')}: ` + info.response);
       } catch (err) {
+        deliveryResults.push({
+          language: lang,
+          recipients: groups[lang].length,
+          accepted: [],
+          rejected: groups[lang],
+          error: err && err.message ? err.message : err
+        });
         console.log(`error sending volunteer registration notification (${lang}) to ${groups[lang].join(', ')}: `, err);
       }
     }
 
-    return { sent, status: 200 };
+    return { sent, status: 200, results: deliveryResults };
   } catch (error) {
     console.log('Error in sendVolunteerRegistrationNotification: ', error);
     return { sent: 0, status: 500, error };

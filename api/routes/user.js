@@ -1662,26 +1662,33 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
         await connection.commit();
         res.status(200).json('Data inserted successfully');
 
-        // Send confirmation email
-        if (locationRows.length > 0) {
-          await sendVolunteerConfirmation(email, locationRows[0].community_city, language);
+        const postRegistrationEmailTasks = [];
+
+        // Send confirmation email to the volunteer.
+        if (email && locationRows.length > 0) {
+          postRegistrationEmailTasks.push(sendVolunteerConfirmation(email, locationRows[0].community_city, language));
         }
 
         // Notify admin-configured recipients about the new volunteer registration.
         // Non-blocking and defensive: must never break the registration flow.
-        try {
-          const [recipientRows] = await mysqlConnection.promise().query(
-            `SELECT DISTINCT recipient.email, recipient.language
-             FROM volunteer_notification_recipient AS recipient
-             INNER JOIN volunteer_notification_recipient_location AS recipient_location
-               ON recipient.id = recipient_location.recipient_id
-             WHERE recipient.enabled = 'Y'
-               AND recipient_location.location_id = ?
-             ORDER BY recipient.id ASC`,
-            [location_id]
-          );
+        postRegistrationEmailTasks.push((async () => {
+          try {
+            const [recipientRows] = await mysqlConnection.promise().query(
+              `SELECT DISTINCT recipient.email, recipient.language
+               FROM volunteer_notification_recipient AS recipient
+               INNER JOIN volunteer_notification_recipient_location AS recipient_location
+                 ON recipient.id = recipient_location.recipient_id
+               WHERE recipient.enabled = 'Y'
+                 AND recipient_location.location_id = ?
+               ORDER BY recipient.id ASC`,
+              [location_id]
+            );
 
-          if (recipientRows.length > 0) {
+            if (recipientRows.length === 0) {
+              console.warn(`Volunteer registration notification: no enabled recipients configured for volunteer_id=${volunteer_id}, location_id=${location_id}.`);
+              return;
+            }
+
             const [genderRows] = await mysqlConnection.promise().query(
               'SELECT name, name_es FROM gender WHERE id = ?', [gender]
             );
@@ -1731,12 +1738,14 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
 
             const notifyResult = await sendVolunteerRegistrationNotification(volunteerData, recipientRows, signatureAttachments);
             if (notifyResult && notifyResult.sent === 0) {
-              console.warn('Volunteer registration notification: no emails were sent despite configured recipients.');
+              console.warn('Volunteer registration notification: no emails were sent despite configured recipients.', notifyResult.results || '');
             }
+          } catch (notifyErr) {
+            console.log('Error notifying volunteer registration recipients:', notifyErr);
           }
-        } catch (notifyErr) {
-          console.log('Error notifying volunteer registration recipients:', notifyErr);
-        }
+        })());
+
+        await Promise.allSettled(postRegistrationEmailTasks);
       } else {
         throw new Error('Could not create volunteer');
       }
