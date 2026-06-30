@@ -19,6 +19,9 @@ const {
     getRawDataExcel
 } = require('./api/services/rawDataReport');
 const {
+    buildSpecificReportsForClient
+} = require('./api/services/specificHealthReports');
+const {
     getParticipantRegisterSummary
 } = require('./api/services/participantRegistrationMetrics');
 
@@ -39,6 +42,32 @@ schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
           AND dl.creation_date < DATE_SUB(NOW(), INTERVAL 5 HOUR)
     `);
 });
+
+// Build the "specific" health report CSVs (Eligibility + Members Exclusive)
+// for the scheduled report emails. Only IEHP (client 1) and Molina (client 2)
+// receive them; every other client (and any failure) yields an empty list so
+// the rest of the email is unaffected. `fromDate`/`toDate` are YYYY-MM-DD.
+async function buildSpecificReportZipFiles(clientId, fromDate, toDate) {
+    const numericClientId = Number(clientId);
+    if (numericClientId !== 1 && numericClientId !== 2) {
+        return [];
+    }
+
+    try {
+        const reports = await buildSpecificReportsForClient({
+            clientId: numericClientId,
+            filters: { from_date: fromDate, to_date: toDate },
+            language: 'en'
+        });
+        return reports.map(report => ({
+            name: report.fileName,
+            content: Buffer.from(report.csvData, 'utf8')
+        }));
+    } catch (error) {
+        logger.error(`Failed to build specific reports for client ${clientId}: ${error.message}`);
+        return [];
+    }
+}
 
 function getUniqueRawDataRecordsByUserId(records) {
     const uniqueRecordsByUserId = new Map();
@@ -522,8 +551,9 @@ schedule.scheduleJob(adminRule, async () => {
                     const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
                     const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
                     const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
+                    const specificReportFiles = await buildSpecificReportZipFiles(client.client_id, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
-                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail]);
+                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail], specificReportFiles);
                 } else {
                     logger.warn(`No summary data generated for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
@@ -592,8 +622,9 @@ schedule.scheduleJob(rule, async () => {
                     const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
                     const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
                     const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
+                    const specificReportFiles = await buildSpecificReportZipFiles(clientId, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
-                    await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails);
+                    await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails, specificReportFiles);
                 } else {
                     logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
@@ -683,8 +714,9 @@ schedule.scheduleJob(monthlyClientRule, async () => {
                         const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
                         const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
                         const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
+                        const specificReportFiles = await buildSpecificReportZipFiles(clientId, summaryFromDate, summaryToDate);
 
-                        await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails);
+                        await email.sendEmailWithExcelAttachment(subject, messageBody, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, clientData.emails, specificReportFiles);
                     } else {
                         logger.warn(`No summary data generated for client ${clientData.name} (${clientId}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly). Skipping email.`);
                     }
@@ -763,8 +795,9 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
                     const newRegistrationOptions = { newUserIds: summaryObject.newUserIds };
                     const excelNewRegistrations = await getNewRegistrationsWithoutHealthInsuranceExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
                     const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
+                    const specificReportFiles = await buildSpecificReportZipFiles(client.client_id, summaryFromDate, summaryToDate);
 
-                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail]);
+                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail], specificReportFiles);
                 } else {
                     logger.warn(`No summary data generated for admin client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly Admin). Skipping email.`);
                 }

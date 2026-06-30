@@ -870,11 +870,18 @@ function assertHealthMetricsScope(cabecera) {
   }
 }
 
-function streamHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
+function streamHealthMetricsCsv({
+  cabecera,
+  filters = {},
+  language = 'en',
+  userFilter = null,
+  extraAnswerQuestionIds = [],
+  fileName: fileNameOverride = null
+}) {
   assertHealthMetricsScope(cabecera);
 
   const normalizedFilters = normalizeHealthMetricFilters(filters);
-  const fileName = 'health-metrics.csv';
+  const fileName = fileNameOverride || 'health-metrics.csv';
   let rowCount = 0;
 
   async function* generator() {
@@ -904,7 +911,10 @@ function streamHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
     const reportAnswerQuestionIds = [
       ...new Set([
         ...questionIds,
-        ...questionCatalog.dependencyQuestionIds
+        ...questionCatalog.dependencyQuestionIds,
+        ...(Array.isArray(extraAnswerQuestionIds) ? extraAnswerQuestionIds : [])
+          .map(questionId => Number(questionId))
+          .filter(questionId => Number.isInteger(questionId) && questionId > 0)
       ])
     ];
     const [
@@ -921,6 +931,11 @@ function streamHealthMetricsCsv({ cabecera, filters = {}, language = 'en' }) {
 
     for (let userIndex = 0; userIndex < metricUsers.length; userIndex++) {
       const user = metricUsers[userIndex];
+
+      if (typeof userFilter === 'function' && !userFilter(user, answerStateByUserQuestion)) {
+        continue;
+      }
+
       const deliverySummary = deliverySummaryByUserId.get(user.user_id) || {
         locations_visited: '',
         delivery_count: 0,

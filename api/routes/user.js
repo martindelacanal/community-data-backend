@@ -25,6 +25,9 @@ const {
   normalizeHealthMetricFilters: normalizeHealthMetricFiltersService
 } = require('../services/healthMetrics');
 const {
+  buildAllSpecificReports: buildAllSpecificReportsService
+} = require('../services/specificHealthReports');
+const {
   fetchInteractionSummary,
   fetchInteractionRoutes,
   fetchInteractionContent,
@@ -12093,6 +12096,46 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
 
   } catch (err) {
     console.error(err);
+    return res.status(500).json('Internal server error');
+  }
+});
+
+// Admin-only: download the "specific" health reports (Eligibility + Members
+// Exclusive) for IEHP and Molina, bundled as a single ZIP of 4 CSV files.
+// The same dialog filters as the regular health CSV download are honored.
+router.post('/metrics/health/download-specific-csv', verifyToken, async (req, res) => {
+  let cabecera = {};
+  try {
+    cabecera = JSON.parse(req?.data?.data || '{}');
+  } catch {
+    return res.status(401).json({ error: 'Invalid auth payload' });
+  }
+  if (cabecera.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  try {
+    const language = req.query.language || 'en';
+    const reports = await buildAllSpecificReportsService({
+      filters: req.body || {},
+      language
+    });
+
+    const zip = new JSZip();
+    reports.forEach(report => {
+      zip.file(report.fileName, report.csvData);
+    });
+
+    const zipBuffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE'
+    });
+
+    res.setHeader('Content-Disposition', 'attachment; filename=specific-reports.zip');
+    res.setHeader('Content-Type', 'application/zip');
+    return res.send(zipBuffer);
+  } catch (err) {
+    console.error('Error in /metrics/health/download-specific-csv:', err);
     return res.status(500).json('Internal server error');
   }
 });

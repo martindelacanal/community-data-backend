@@ -17,7 +17,7 @@ let transporter = nodemailer.createTransport({
   }
 });
 
-async function createPasswordProtectedZipExcel(excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password) {
+async function createPasswordProtectedZipExcel(excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, extraZipFiles = []) {
   return new Promise((resolve, reject) => {
     const archive = archiver.create('zip-encrypted', {
       zlib: { level: 9 },
@@ -34,14 +34,23 @@ async function createPasswordProtectedZipExcel(excelRawData, excelNewRegistratio
     archive.append(excelNewRegistrations, { name: 'new-registrations-without-health-insurance.xlsx' });
     archive.append(excelAllNewRegistrations, { name: 'new-registrations.xlsx' });
     archive.append(summaryObject.excelBuffer, { name: 'summary.xlsx' });
+
+    if (Array.isArray(extraZipFiles)) {
+      extraZipFiles.forEach(file => {
+        if (file && file.name && file.content !== undefined && file.content !== null) {
+          archive.append(file.content, { name: file.name });
+        }
+      });
+    }
+
     archive.finalize();
   });
 }
 
-async function sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, emails) {
+async function sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, emails, extraZipFiles = []) {
   return new Promise(async (resolve) => {
     try {
-      const zipContent = await createPasswordProtectedZipExcel(excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password);
+      const zipContent = await createPasswordProtectedZipExcel(excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, extraZipFiles);
       const date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY");
       const zipFilename = `community-data-${date}.zip`;
       const reportData = summaryObject ? summaryObject.emailReportData : null;
