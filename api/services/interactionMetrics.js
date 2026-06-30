@@ -1,4 +1,26 @@
 const DEFAULT_AUTH_SCOPE = 'all';
+const DEFAULT_PLATFORM = 'all';
+
+// Maps the UI "platform" filter to the set of access_channel values stored on
+// interaction_sessions. An empty array means "no platform restriction".
+const PLATFORM_ACCESS_CHANNELS = {
+  all: [],
+  app: ['capacitor_android', 'capacitor_ios'],
+  app_ios: ['capacitor_ios'],
+  app_android: ['capacitor_android'],
+  web: ['web_desktop', 'web_mobile']
+};
+
+const CAPACITOR_ACCESS_CHANNELS = new Set(['capacitor_android', 'capacitor_ios']);
+
+// Order used when stacking the acquisition timeline / listing channels.
+const ACQUISITION_CHANNEL_ORDER = [
+  'capacitor_ios',
+  'capacitor_android',
+  'web_mobile',
+  'web_desktop',
+  'unknown'
+];
 
 const PAGE_TYPE_LABELS = {
   articles_list: {
@@ -225,16 +247,33 @@ function normalizeAuthScope(value) {
     : DEFAULT_AUTH_SCOPE;
 }
 
+function normalizePlatform(value) {
+  const key = String(value || DEFAULT_PLATFORM).trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(PLATFORM_ACCESS_CHANNELS, key)
+    ? key
+    : DEFAULT_PLATFORM;
+}
+
 function normalizeInteractionMetricFilters(filters = {}) {
+  const platform = normalizePlatform(filters.platform);
+
   return {
     from_date: sanitizeDate(filters.from_date),
     to_date: sanitizeDate(filters.to_date),
     auth_scope: normalizeAuthScope(filters.auth_scope),
-    page_types: ensureArray(filters.page_types)
+    page_types: ensureArray(filters.page_types),
+    platform,
+    access_channels: PLATFORM_ACCESS_CHANNELS[platform]
   };
 }
 
-function buildScopedFilter({ filters, alias, dateColumn, useAuthenticatedColumn = false }) {
+function buildScopedFilter({
+  filters,
+  alias,
+  dateColumn,
+  useAuthenticatedColumn = false,
+  accessChannelMode = 'session'
+}) {
   const clauses = [];
   const params = [];
 
@@ -257,6 +296,20 @@ function buildScopedFilter({ filters, alias, dateColumn, useAuthenticatedColumn 
   if (filters.page_types.length > 0) {
     clauses.push(`${alias}.page_type IN (${filters.page_types.map(() => '?').join(',')})`);
     params.push(...filters.page_types);
+  }
+
+  // Platform filter. interaction_sessions carries access_channel directly;
+  // interaction_events does not, so for events we restrict by the access_channel
+  // of the parent session.
+  const accessChannels = filters.access_channels || [];
+  if (accessChannels.length > 0 && accessChannelMode !== 'none') {
+    const placeholders = accessChannels.map(() => '?').join(',');
+    if (accessChannelMode === 'event') {
+      clauses.push(`${alias}.session_id IN (SELECT acs.id FROM interaction_sessions acs WHERE acs.access_channel IN (${placeholders}))`);
+    } else {
+      clauses.push(`${alias}.access_channel IN (${placeholders})`);
+    }
+    params.push(...accessChannels);
   }
 
   return {
@@ -334,7 +387,8 @@ async function fetchInteractionSummary(connection, language = 'en', rawFilters =
   const eventScope = buildScopedFilter({
     filters,
     alias: 'e',
-    dateColumn: 'occurred_at'
+    dateColumn: 'occurred_at',
+    accessChannelMode: 'event'
   });
 
   const [[summaryRow]] = await connection.query(
@@ -609,7 +663,8 @@ async function fetchInteractionUsers(connection, rawFilters = {}) {
   const eventScope = buildScopedFilter({
     filters,
     alias: 'e',
-    dateColumn: 'occurred_at'
+    dateColumn: 'occurred_at',
+    accessChannelMode: 'event'
   });
 
   const [rows] = await connection.query(
@@ -668,7 +723,8 @@ async function fetchInteractionActions(connection, language = 'en', rawFilters =
   const scope = buildScopedFilter({
     filters,
     alias: 'e',
-    dateColumn: 'occurred_at'
+    dateColumn: 'occurred_at',
+    accessChannelMode: 'event'
   });
 
   const [actionRows] = await connection.query(
@@ -783,7 +839,8 @@ async function fetchInteractionAudience(connection, language = 'en', rawFilters 
   const eventScope = buildScopedFilter({
     filters,
     alias: 'e',
-    dateColumn: 'occurred_at'
+    dateColumn: 'occurred_at',
+    accessChannelMode: 'event'
   });
 
   const eventJoin = `
@@ -925,6 +982,227 @@ async function fetchInteractionAudience(connection, language = 'en', rawFilters 
   };
 }
 
+// "first-touch" cohort: one row per visitor_id, describing the very first tracked
+// session for that visitor (its acquisition date, channel and utm source). This is
+// our best in-app proxy for "new installs / first opens": for a Capacitor channel the
+// first session ~ the first time the freshly installed app was opened on that device.
+const FIRST_SESSIONS_CTE = `
+  WITH first_sessions AS (
+    SELECT
+      visitor_id,
+      access_channel AS first_channel,
+      COALESCE(NULLIF(utm_source, ''), 'direct') AS first_source,
+      is_authenticated AS first_authenticated,
+      first_seen_at
+    FROM (
+      SELECT
+        s.visitor_id,
+        s.access_channel,
+        s.utm_source,
+        s.is_authenticated,
+        s.started_at AS first_seen_at,
+        ROW_NUMBER() OVER (
+          PARTITION BY s.visitor_id
+          ORDER BY s.started_at ASC, s.id ASC
+        ) AS rn
+      FROM interaction_sessions s
+    ) ranked
+    WHERE rn = 1
+  )
+`;
+
+function buildAcquisitionCohortFilter(filters) {
+  const clauses = [];
+  const params = [];
+
+  if (filters.from_date) {
+    clauses.push('DATE(fs.first_seen_at) >= ?');
+    params.push(filters.from_date);
+  }
+
+  if (filters.to_date) {
+    clauses.push('DATE(fs.first_seen_at) <= ?');
+    params.push(filters.to_date);
+  }
+
+  const accessChannels = filters.access_channels || [];
+  if (accessChannels.length > 0) {
+    clauses.push(`fs.first_channel IN (${accessChannels.map(() => '?').join(',')})`);
+    params.push(...accessChannels);
+  }
+
+  // Keep the acquisition card consistent with the rest of the dashboard, which
+  // applies the same auth_scope filter. For a cohort we look at the auth state
+  // of the visitor's first tracked session.
+  if (filters.auth_scope === 'authenticated') {
+    clauses.push('fs.first_authenticated = 1');
+  } else if (filters.auth_scope === 'anonymous') {
+    clauses.push('fs.first_authenticated = 0');
+  }
+
+  return {
+    whereClause: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+    params
+  };
+}
+
+function buildAcquisitionActiveFilter(filters) {
+  const clauses = [];
+  const params = [];
+
+  if (filters.from_date) {
+    clauses.push('DATE(s.started_at) >= ?');
+    params.push(filters.from_date);
+  }
+
+  if (filters.to_date) {
+    clauses.push('DATE(s.started_at) <= ?');
+    params.push(filters.to_date);
+  }
+
+  const accessChannels = filters.access_channels || [];
+  if (accessChannels.length > 0) {
+    clauses.push(`s.access_channel IN (${accessChannels.map(() => '?').join(',')})`);
+    params.push(...accessChannels);
+  }
+
+  if (filters.auth_scope === 'authenticated') {
+    clauses.push('s.is_authenticated = 1');
+  } else if (filters.auth_scope === 'anonymous') {
+    clauses.push('s.is_authenticated = 0');
+  }
+
+  return {
+    whereClause: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+    params
+  };
+}
+
+function getAcquisitionSourceLabel(key, language) {
+  if (key === 'direct') {
+    return language === 'es' ? 'Directo / sin origen' : 'Direct / no source';
+  }
+  return key;
+}
+
+async function fetchInteractionAcquisition(connection, language = 'en', rawFilters = {}) {
+  const filters = normalizeInteractionMetricFilters(rawFilters);
+  const cohort = buildAcquisitionCohortFilter(filters);
+  const active = buildAcquisitionActiveFilter(filters);
+
+  // New visitors (first opens) per day and channel, inside the selected range.
+  const [timelineRows] = await connection.query(
+    `
+      ${FIRST_SESSIONS_CTE}
+      SELECT
+        DATE_FORMAT(fs.first_seen_at, '%Y-%m-%d') AS metric_date,
+        COALESCE(NULLIF(fs.first_channel, ''), 'unknown') AS metric_key,
+        COUNT(*) AS total_new
+      FROM first_sessions fs
+      ${cohort.whereClause}
+      GROUP BY DATE(fs.first_seen_at), metric_key
+      ORDER BY DATE(fs.first_seen_at) ASC
+    `,
+    cohort.params
+  );
+
+  // Acquisition source (utm_source first-touch) breakdown inside the range.
+  const [sourceRows] = await connection.query(
+    `
+      ${FIRST_SESSIONS_CTE}
+      SELECT
+        fs.first_source AS metric_key,
+        COUNT(*) AS total_new
+      FROM first_sessions fs
+      ${cohort.whereClause}
+      GROUP BY fs.first_source
+      ORDER BY total_new DESC
+      LIMIT 12
+    `,
+    cohort.params
+  );
+
+  // Distinct visitors that were active (had any session) inside the range.
+  const [[activeRow]] = await connection.query(
+    `
+      SELECT COUNT(DISTINCT s.visitor_id) AS active_visitors
+      FROM interaction_sessions s
+      ${active.whereClause}
+    `,
+    active.params
+  );
+
+  // ---- Assemble the timeline (stacked by channel) and channel breakdown ----
+  const categories = Array.from(new Set(timelineRows.map((row) => row.metric_date)))
+    .sort((a, b) => a.localeCompare(b));
+  const categoryIndex = new Map(categories.map((date, index) => [date, index]));
+
+  const channelTotals = new Map();
+  const channelSeriesData = new Map();
+
+  timelineRows.forEach((row) => {
+    const key = row.metric_key || 'unknown';
+    const value = Number(row.total_new || 0);
+
+    if (!channelSeriesData.has(key)) {
+      channelSeriesData.set(key, new Array(categories.length).fill(0));
+    }
+    const dayIndex = categoryIndex.get(row.metric_date);
+    if (dayIndex !== undefined) {
+      channelSeriesData.get(key)[dayIndex] += value;
+    }
+
+    channelTotals.set(key, (channelTotals.get(key) || 0) + value);
+  });
+
+  const orderedChannelKeys = Array.from(channelTotals.keys()).sort((a, b) => {
+    const orderA = ACQUISITION_CHANNEL_ORDER.indexOf(a);
+    const orderB = ACQUISITION_CHANNEL_ORDER.indexOf(b);
+    const safeA = orderA === -1 ? ACQUISITION_CHANNEL_ORDER.length : orderA;
+    const safeB = orderB === -1 ? ACQUISITION_CHANNEL_ORDER.length : orderB;
+    return safeA - safeB;
+  });
+
+  const timelineSeries = orderedChannelKeys.map((key) => ({
+    key,
+    label: getCatalogLabel(ACCESS_CHANNEL_LABELS, key, language),
+    data: channelSeriesData.get(key) || new Array(categories.length).fill(0)
+  }));
+
+  const channelBreakdown = orderedChannelKeys
+    .map((key) => ({
+      key,
+      label: getCatalogLabel(ACCESS_CHANNEL_LABELS, key, language),
+      totalNewVisitors: Number(channelTotals.get(key) || 0)
+    }))
+    .sort((a, b) => b.totalNewVisitors - a.totalNewVisitors);
+
+  const totalNewVisitors = channelBreakdown.reduce((sum, item) => sum + item.totalNewVisitors, 0);
+  const newAppVisitors = channelBreakdown
+    .filter((item) => CAPACITOR_ACCESS_CHANNELS.has(item.key))
+    .reduce((sum, item) => sum + item.totalNewVisitors, 0);
+
+  const activeVisitors = Number(activeRow?.active_visitors || 0);
+  const returningVisitors = Math.max(0, activeVisitors - totalNewVisitors);
+
+  return {
+    totalNewVisitors,
+    newAppVisitors,
+    activeVisitors,
+    returningVisitors,
+    timeline: {
+      categories,
+      series: timelineSeries
+    },
+    channelBreakdown,
+    acquisitionSources: sourceRows.map((row) => ({
+      key: row.metric_key || 'direct',
+      label: getAcquisitionSourceLabel(row.metric_key || 'direct', language),
+      totalNewVisitors: Number(row.total_new || 0)
+    }))
+  };
+}
+
 module.exports = {
   normalizeInteractionMetricFilters,
   fetchInteractionSummary,
@@ -932,5 +1210,6 @@ module.exports = {
   fetchInteractionContent,
   fetchInteractionUsers,
   fetchInteractionActions,
-  fetchInteractionAudience
+  fetchInteractionAudience,
+  fetchInteractionAcquisition
 };

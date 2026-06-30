@@ -33,7 +33,8 @@ const {
   fetchInteractionContent,
   fetchInteractionUsers,
   fetchInteractionActions,
-  fetchInteractionAudience
+  fetchInteractionAudience,
+  fetchInteractionAcquisition
 } = require('../services/interactionMetrics');
 const { resolveInteractionGeoFromIp } = require('../services/interactionGeo');
 const {
@@ -26623,6 +26624,21 @@ function inferInteractionAccessChannel(accessChannel, operatingSystem, deviceCat
   return deviceCategory === 'desktop' ? 'web_desktop' : 'web_mobile';
 }
 
+function normalizeInteractionUtmValue(value, maxLength = 128) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  // Acquisition tags are free text; trim, cap length and lower-case so that
+  // "Facebook" and "facebook" group into a single source.
+  const normalizedValue = String(value).trim().toLowerCase();
+  if (!normalizedValue) {
+    return null;
+  }
+
+  return normalizedValue.substring(0, maxLength);
+}
+
 function normalizeInteractionMetadata(value) {
   if (value === null || value === undefined || value === '') {
     return null;
@@ -26846,6 +26862,9 @@ router.post('/interaction/session/start', verifyTokenLenientOptional, async (req
       operatingSystem,
       deviceCategory
     );
+    const utmSource = normalizeInteractionUtmValue(req.body.utmSource, 128);
+    const utmMedium = normalizeInteractionUtmValue(req.body.utmMedium, 128);
+    const utmCampaign = normalizeInteractionUtmValue(req.body.utmCampaign, 191);
 
     await mysqlConnection.promise().query(
       `
@@ -26879,11 +26898,15 @@ router.post('/interaction/session/start', verifyTokenLenientOptional, async (req
           ip_longitude,
           ip_geo_status,
           ip_geo_source,
+          utm_source,
+          utm_medium,
+          utm_campaign,
           metadata_json
         ) VALUES (
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?
         )
       `,
       [
@@ -26916,6 +26939,9 @@ router.post('/interaction/session/start', verifyTokenLenientOptional, async (req
         geoData.longitude,
         normalizeInteractionText(geoData.status, 32),
         normalizeInteractionText(geoData.source, 64),
+        utmSource,
+        utmMedium,
+        utmCampaign,
         metadata ? JSON.stringify(metadata) : null
       ]
     );
@@ -27191,6 +27217,24 @@ router.post('/metrics/interaction/audience', verifyToken, async (req, res) => {
   } catch (error) {
     console.error('Error fetching interaction audience metrics:', error);
     logger.error('Error fetching interaction audience metrics:', error);
+    return res.status(500).json('Internal server error');
+  }
+});
+
+router.post('/metrics/interaction/acquisition', verifyToken, async (req, res) => {
+  try {
+    const cabecera = JSON.parse(req.data.data);
+
+    if (!ensureAdminMetricsAccess(cabecera)) {
+      return res.status(401).json('Unauthorized');
+    }
+
+    const language = normalizeInteractionLanguage(req.query.language);
+    const response = await fetchInteractionAcquisition(mysqlConnection.promise(), language, req.body || {});
+    return res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching interaction acquisition metrics:', error);
+    logger.error('Error fetching interaction acquisition metrics:', error);
     return res.status(500).json('Internal server error');
   }
 });
