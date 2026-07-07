@@ -13398,17 +13398,26 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
           query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
         }
       }
+      // Filtros de id parametrizados (?) para evitar inyección SQL. Los params se
+      // acumulan en el mismo orden en que aparecen los fragmentos en la query.
+      const queryParams = [];
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND dt.location_id IN (' + locations.map(() => '?').join(',') + ')';
+        queryParams.push(...locations);
       }
       var query_providers = '';
       if (providers.length > 0) {
-        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+        query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
+        queryParams.push(...providers);
       }
       var query_product_types = '';
       if (product_types.length > 0) {
-        query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+        query_product_types = 'AND p.product_type_id IN (' + product_types.map(() => '?').join(',') + ')';
+        queryParams.push(...product_types);
+      }
+      if (cabecera.role === 'client') {
+        queryParams.push(cabecera.client_id);
       }
       const [rows] = await mysqlConnection.promise().query(
         `SELECT p.id,
@@ -13431,7 +13440,7 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
         ${query_product_types}
         ${cabecera.role === 'client' ? ' AND client_location.client_id = ?' : ''}
         GROUP BY p.id`,
-        [cabecera.client_id]
+        queryParams
       );
 
       var headers_array = [
@@ -13890,25 +13899,37 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       if (filters.to_date) {
         query_to_date = 'AND dt.date < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
+      // Filtros de id parametrizados (?) para evitar inyección SQL. Los params se
+      // acumulan en el mismo orden en que aparecen los fragmentos en la query.
+      // (from_date/to_date van interpolados como literales ya saneados a YYYY-MM-DD.)
+      const queryParams = [];
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND dt.location_id IN (' + locations.map(() => '?').join(',') + ')';
+        queryParams.push(...locations);
       }
       var query_providers = '';
       if (providers.length > 0) {
-        query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+        query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
+        queryParams.push(...providers);
       }
       var query_delivered_by = '';
       if (delivered_by.length > 0) {
-        query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.join() + ')';
+        query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.map(() => '?').join(',') + ')';
+        queryParams.push(...delivered_by);
       }
       var query_transported_by = '';
       if (transported_by.length > 0) {
-        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+        query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.map(() => '?').join(',') + ')';
+        queryParams.push(...transported_by);
       }
       var query_stocker_upload = '';
       if (stocker_upload.length > 0) {
-        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+        query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.map(() => '?').join(',') + ')';
+        queryParams.push(...stocker_upload);
+      }
+      if (cabecera.role === 'client') {
+        queryParams.push(cabecera.client_id);
       }
 
       const [rows] = await mysqlConnection.promise().query(
@@ -13952,7 +13973,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ${query_stocker_upload}
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         ORDER BY dt.date, dt.id, pdt.id`,
-        [from_date, to_date, cabecera.client_id]
+        queryParams
       );
 
       var headers_array = [

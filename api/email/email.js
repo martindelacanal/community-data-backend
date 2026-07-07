@@ -89,6 +89,51 @@ async function sendEmailWithExcelAttachment(subject, message, excelRawData, exce
   });
 }
 
+// Send a scheduled report email with each workbook attached as an individual,
+// non password-protected file (used for the admin reports). `attachments` is an
+// array of { filename, content(Buffer) }. The branded HTML/summary body is the
+// same as the zipped variant; only the attachment presentation differs.
+async function sendReportEmailWithSeparateAttachments(subject, message, attachments, summaryObject, emails) {
+  return new Promise((resolve) => {
+    try {
+      const validAttachments = (Array.isArray(attachments) ? attachments : []).filter(
+        (file) => file && file.filename && file.content !== undefined && file.content !== null
+      );
+
+      const reportData = summaryObject ? summaryObject.emailReportData : null;
+      const fullHtmlMessage = buildReportEmailHtmlSeparate(
+        subject,
+        message,
+        reportData,
+        validAttachments.map((file) => file.filename)
+      );
+      const fullTextMessage = buildReportEmailText(message, reportData);
+
+      let mailOptions = {
+        from: 'bienestarcommunity@gmail.com',
+        to: emails.join(', '),
+        subject: subject,
+        text: fullTextMessage,
+        html: fullHtmlMessage,
+        attachments: validAttachments
+      };
+
+      transporter.sendMail(mailOptions, (err, info) => {
+        if (err) {
+          console.log(`error sendReportEmail to ${emails.join(', ')}: `, err);
+          resolve({ error: err, status: 500 });
+        } else {
+          console.log(`Email enviado to ${emails.join(', ')}: ` + info.response);
+          resolve({ error: null, status: 200 });
+        }
+      });
+    } catch (error) {
+      console.log(`error catch email to ${emails.join(', ')}: `, error);
+      resolve({ error: error, status: 500 });
+    }
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Scheduled report emails (weekly & monthly, for both clients and the admin).
 // Branded, friendly layout that mirrors the volunteer notification emails: the
@@ -156,6 +201,20 @@ function buildAttachmentCallout(zipFilename) {
       <strong style="color:${B.sky};">&#128206; Attached file</strong><br>
       <span style="font-weight:700;">${escapeHtmlValue(zipFilename)}</span>&nbsp;&middot;&nbsp;<span style="color:#7c8a8a;">password-protected</span><br>
       <span style="font-size:13px;color:#7c8a8a;">Includes the raw data, the new registrations (with and without a health plan) and the summary workbook.</span>
+    </td></tr>
+  </table>`;
+}
+
+// Highlighted note listing the individual (non password-protected) attachments.
+function buildSeparateAttachmentsCallout(filenames) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const list = (Array.isArray(filenames) ? filenames : [])
+    .map((name) => `<span style="font-weight:700;">${escapeHtmlValue(name)}</span>`)
+    .join('<br>');
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.lightCyan};border:1px solid ${B.border};border-radius:12px;margin:4px 0 6px 0;">
+    <tr><td style="padding:16px 20px;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:${B.textDark};">
+      <strong style="color:${B.sky};">&#128206; Attached files</strong>&nbsp;&middot;&nbsp;<span style="color:#7c8a8a;">no password required</span><br>
+      ${list}
     </td></tr>
   </table>`;
 }
@@ -246,6 +305,41 @@ function buildReportEmailHtml(subject, message, reportData, zipFilename) {
   const bodyHtml = `
     <p style="margin:0 0 18px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.7;color:${B.textDark};">${escapeHtmlValue(intro)}</p>
     ${buildAttachmentCallout(zipFilename)}
+    ${generateSummaryHtmlReport(reportData)}
+  `;
+
+  const footerHtml = 'You are receiving this automated report because your address is configured as a recipient in Bienestar Community. If you have any questions, just reply to this email &mdash; we are happy to help.<br><br>With gratitude, the Bienestar Community team.';
+
+  return wrapBrandedEmail({
+    lang: 'en',
+    eyebrow: 'Bienestar Community',
+    title,
+    subtitle,
+    preheader: dateRangeDisplay ? `${title} for ${clientName} (${dateRangeDisplay})` : `${title} for ${clientName}`,
+    bodyHtml,
+    footerHtml
+  });
+}
+
+// Variant of the branded report email for when the workbooks are attached as
+// individual, non password-protected files (used for the admin reports). Same
+// shell as buildReportEmailHtml; only the intro line and the attachment callout
+// change so the recipient knows the files open directly, without a password.
+function buildReportEmailHtmlSeparate(subject, message, reportData, filenames) {
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const isMonthly = /monthly/i.test(subject || '');
+  const periodWord = isMonthly ? 'monthly' : 'weekly';
+  const clientName = (reportData && reportData.clientName) ? reportData.clientName : 'Bienestar Community';
+  const dateRangeDisplay = (reportData && reportData.dateRangeDisplay) ? reportData.dateRangeDisplay : '';
+
+  const title = isMonthly ? 'Monthly Activity Report' : 'Weekly Activity Report';
+  const subtitle = dateRangeDisplay ? `${clientName} · ${dateRangeDisplay}` : clientName;
+
+  const intro = `Here is the ${periodWord} Bienestar Community activity summary for ${clientName}${dateRangeDisplay ? `, covering ${dateRangeDisplay}` : ''}. A quick overview is below, and the complete data set is attached as separate files that open directly, without a password.`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 18px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.7;color:${B.textDark};">${escapeHtmlValue(intro)}</p>
+    ${buildSeparateAttachmentsCallout(filenames)}
     ${generateSummaryHtmlReport(reportData)}
   `;
 
@@ -887,6 +981,8 @@ module.exports.sendVolunteerRegistrationNotification = sendVolunteerRegistration
 module.exports.sendTicketEmail = sendTicketEmail;
 
 module.exports.sendEmailWithExcelAttachment = sendEmailWithExcelAttachment;
+
+module.exports.sendReportEmailWithSeparateAttachments = sendReportEmailWithSeparateAttachments;
 
 // Exposed for previewing/testing the report email rendering without sending.
 module.exports.buildReportEmailHtml = buildReportEmailHtml;

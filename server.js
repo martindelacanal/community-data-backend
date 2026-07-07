@@ -503,7 +503,6 @@ adminRule.tz = 'America/Los_Angeles';
 // Schedule for administration email (Sunday 6:00 PM)
 schedule.scheduleJob(adminRule, async () => {
     const adminEmail = 'administration@bienestariswellbeing.org';
-    const password = 'bienestarcommunity';
 
     const [adminClients] = await mysqlConnection.promise().query(
         `SELECT ce.client_id, c.name AS client_name
@@ -534,7 +533,7 @@ schedule.scheduleJob(adminRule, async () => {
             let date = moment().tz("America/Los_Angeles").format("MM-DD-YYYY"); // Use current date for report name consistency
 
             // Message for email
-            const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+            const message = `Dear recipient,\n\nAttached you will find the Bienestar Community report for ${date}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The files are attached separately and open directly, without a password.\n\nBest regards,\nBienestar Community Team`;
             const subject = `Bienestar Community report for ${client.client_name} - ${date}`;
 
             // Generate reports for this specific client using full date-time range
@@ -553,7 +552,17 @@ schedule.scheduleJob(adminRule, async () => {
                     const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"), newRegistrationOptions);
                     const specificReportFiles = await buildSpecificReportZipFiles(client.client_id, lastMonday.format("YYYY-MM-DD"), lastSunday.format("YYYY-MM-DD"));
 
-                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail], specificReportFiles);
+                    // Admin recipient: send each workbook as an individual, non
+                    // password-protected attachment so the files open directly.
+                    const adminAttachments = [
+                        { filename: 'raw-data.xlsx', content: excelRawData },
+                        { filename: 'new-registrations-without-health-insurance.xlsx', content: excelNewRegistrations },
+                        { filename: 'new-registrations.xlsx', content: excelAllNewRegistrations },
+                        { filename: 'summary.xlsx', content: summaryObject.excelBuffer },
+                        ...specificReportFiles.map(file => ({ filename: file.name, content: file.content }))
+                    ];
+
+                    await email.sendReportEmailWithSeparateAttachments(subject, message, adminAttachments, summaryObject, [adminEmail]);
                 } else {
                     logger.warn(`No summary data generated for client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display}. Skipping email.`);
                 }
@@ -741,7 +750,6 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
     if (today.date() > 7) { return; } // Only run on the first Sunday of the month
 
     const adminEmail = 'administration@bienestariswellbeing.org';
-    const password = 'bienestarcommunity';
 
     const [adminClients] = await mysqlConnection.promise().query(
         `SELECT ce.client_id, c.name AS client_name
@@ -779,7 +787,7 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
         const summaryToDate = reportLastSunday.format("YYYY-MM-DD");
 
         for (const client of adminClients) {
-            const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The file is password protected.\n\nBest regards,\nBienestar Community Team`;
+            const message = `Dear recipient,\n\nAttached you will find the monthly Bienestar Community report for ${monthName} ${year}. The report covers the period from ${formatted_from_date_display} to ${formatted_to_date_display}. The files are attached separately and open directly, without a password.\n\nBest regards,\nBienestar Community Team`;
             const subject = `Monthly Bienestar Community report for ${client.client_name} - ${monthName} ${year}`;
 
             const excelRawData = await getRawDataExcel(from_date_db, to_date_db, client.client_id);
@@ -797,7 +805,17 @@ schedule.scheduleJob(firstSundayAdminRule, async () => {
                     const excelAllNewRegistrations = await getNewRegistrationsExcel(excelRawData, summaryFromDate, summaryToDate, newRegistrationOptions);
                     const specificReportFiles = await buildSpecificReportZipFiles(client.client_id, summaryFromDate, summaryToDate);
 
-                    await email.sendEmailWithExcelAttachment(subject, message, excelRawData, excelNewRegistrations, summaryObject, excelAllNewRegistrations, password, [adminEmail], specificReportFiles);
+                    // Admin recipient: send each workbook as an individual, non
+                    // password-protected attachment so the files open directly.
+                    const adminAttachments = [
+                        { filename: 'raw-data.xlsx', content: excelRawData },
+                        { filename: 'new-registrations-without-health-insurance.xlsx', content: excelNewRegistrations },
+                        { filename: 'new-registrations.xlsx', content: excelAllNewRegistrations },
+                        { filename: 'summary.xlsx', content: summaryObject.excelBuffer },
+                        ...specificReportFiles.map(file => ({ filename: file.name, content: file.content }))
+                    ];
+
+                    await email.sendReportEmailWithSeparateAttachments(subject, message, adminAttachments, summaryObject, [adminEmail]);
                 } else {
                     logger.warn(`No summary data generated for admin client ${client.client_name} (${client.client_id}) for period ${formatted_from_date_display} to ${formatted_to_date_display} (Monthly Admin). Skipping email.`);
                 }
