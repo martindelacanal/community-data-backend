@@ -18614,6 +18614,615 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
 }
 );
 
+const PRODUCT_METRICS_ACCESS_ROLES = new Set(['admin', 'client', 'director', 'auditor']);
+const PRODUCT_METRICS_TIMEZONE = 'America/Los_Angeles';
+const PRODUCT_METRICS_INTERVALS = new Set(['day', 'week', 'month', 'quarter', 'year']);
+
+function hasProductMetricsAccess(cabecera) {
+  return cabecera && PRODUCT_METRICS_ACCESS_ROLES.has(cabecera.role);
+}
+
+function normalizeProductMetricsDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+    return value.slice(0, 10);
+  }
+
+  const parsedDate = new Date(value);
+  if (Number.isNaN(parsedDate.getTime())) {
+    return null;
+  }
+
+  return parsedDate.toISOString().slice(0, 10);
+}
+
+function formatProductMetricsDateOnly(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    return value.slice(0, 10);
+  }
+
+  const parsedDate = new Date(value);
+  if (Number.isNaN(parsedDate.getTime())) {
+    return null;
+  }
+
+  return parsedDate.toISOString().slice(0, 10);
+}
+
+function normalizeProductMetricsIdArray(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(new Set(
+    value
+      .map((item) => Number.parseInt(item, 10))
+      .filter((item) => Number.isInteger(item) && item > 0)
+  ));
+}
+
+function normalizeProductMetricsFilters(filters = {}) {
+  const interval = PRODUCT_METRICS_INTERVALS.has(filters.interval) ? filters.interval : 'month';
+
+  return {
+    from_date: normalizeProductMetricsDate(filters.from_date),
+    to_date: normalizeProductMetricsDate(filters.to_date),
+    interval,
+    locations: normalizeProductMetricsIdArray(filters.locations),
+    providers: normalizeProductMetricsIdArray(filters.providers),
+    product_types: normalizeProductMetricsIdArray(filters.product_types),
+    stocker_upload: normalizeProductMetricsIdArray(filters.stocker_upload),
+    transported_by: normalizeProductMetricsIdArray(filters.transported_by)
+  };
+}
+
+function addProductMetricsInCondition(where, params, column, values) {
+  if (!values || values.length === 0) {
+    return;
+  }
+
+  where.push(`${column} IN (${values.map(() => '?').join(',')})`);
+  params.push(...values);
+}
+
+function getProductMetricsPeriodExpression(interval) {
+  switch (interval) {
+    case 'day':
+      return "DATE_FORMAT(dt.date, '%Y-%m-%d')";
+    case 'week':
+      return "DATE_FORMAT(dt.date, '%x-W%v')";
+    case 'quarter':
+      return "CONCAT(YEAR(dt.date), '-Q', QUARTER(dt.date))";
+    case 'year':
+      return "DATE_FORMAT(dt.date, '%Y')";
+    case 'month':
+    default:
+      return "DATE_FORMAT(dt.date, '%Y-%m')";
+  }
+}
+
+function buildProductMetricsClientJoin(cabecera) {
+  return cabecera.role === 'client'
+    ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id'
+    : '';
+}
+
+function buildProductMetricsWhere(normalizedFilters, cabecera, options = {}) {
+  const where = ['dt.enabled = ?'];
+  const params = ['Y'];
+  const productTypeMode = options.productTypeMode || 'join';
+
+  if (normalizedFilters.from_date) {
+    where.push('dt.date >= ?');
+    params.push(normalizedFilters.from_date);
+  }
+
+  if (normalizedFilters.to_date) {
+    where.push('dt.date < DATE_ADD(?, INTERVAL 1 DAY)');
+    params.push(normalizedFilters.to_date);
+  }
+
+  addProductMetricsInCondition(where, params, 'dt.location_id', normalizedFilters.locations);
+  addProductMetricsInCondition(where, params, 'dt.provider_id', normalizedFilters.providers);
+  addProductMetricsInCondition(where, params, 'sl.user_id', normalizedFilters.stocker_upload);
+  addProductMetricsInCondition(where, params, 'dt.transported_by_id', normalizedFilters.transported_by);
+
+  if (normalizedFilters.product_types.length > 0) {
+    if (productTypeMode === 'exists') {
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM product_donation_ticket as pdt_filter
+          INNER JOIN product as p_filter ON pdt_filter.product_id = p_filter.id
+          WHERE pdt_filter.donation_ticket_id = dt.id
+            AND p_filter.product_type_id IN (${normalizedFilters.product_types.map(() => '?').join(',')})
+        )
+      `);
+      params.push(...normalizedFilters.product_types);
+    } else {
+      addProductMetricsInCondition(where, params, 'p.product_type_id', normalizedFilters.product_types);
+    }
+  }
+
+  if (cabecera.role === 'client') {
+    where.push('cl.client_id = ?');
+    params.push(cabecera.client_id);
+  }
+
+  return {
+    whereSql: where.join('\n AND '),
+    params
+  };
+}
+
+async function resolveProductMetricsDateRange(normalizedFilters) {
+  if (normalizedFilters.from_date && normalizedFilters.to_date) {
+    return normalizedFilters;
+  }
+
+  const [dateRange] = await mysqlConnection.promise().query(
+    `SELECT MIN(date) AS min_date, MAX(date) AS max_date
+     FROM donation_ticket
+     WHERE enabled = ?`,
+    ['Y']
+  );
+
+  const minDate = formatProductMetricsDateOnly(dateRange[0]?.min_date) || '1970-01-01';
+  const maxDate = formatProductMetricsDateOnly(dateRange[0]?.max_date) || minDate;
+
+  return {
+    ...normalizedFilters,
+    from_date: normalizedFilters.from_date || minDate,
+    to_date: normalizedFilters.to_date || maxDate
+  };
+}
+
+function buildProductMetricsSeries(rows, periods, interval) {
+  const periodIndex = new Map(periods.map((period, index) => [period, index]));
+  const seriesMap = new Map();
+
+  rows.forEach((row) => {
+    if (!row.name || !periodIndex.has(row.period)) {
+      return;
+    }
+
+    if (!seriesMap.has(row.name)) {
+      seriesMap.set(row.name, Array(periods.length).fill(0));
+    }
+
+    seriesMap.get(row.name)[periodIndex.get(row.period)] = Number(Number(row.data || 0).toFixed(2));
+  });
+
+  return {
+    series: Array.from(seriesMap, ([name, data]) => ({ name, data })),
+    categories: periods.map((period) => formatPeriod(period, interval))
+  };
+}
+
+function calculateProductMetricsSummary(rows) {
+  if (!rows.length) {
+    return { average: 0, median: 0 };
+  }
+
+  const totals = rows.map((row) => Number(row.total || 0)).sort((a, b) => a - b);
+  const sum = totals.reduce((total, value) => total + value, 0);
+  const average = Number((sum / totals.length).toFixed(2));
+  const middle = Math.floor(totals.length / 2);
+  const median = totals.length % 2 === 0
+    ? Number(((totals[middle - 1] + totals[middle]) / 2).toFixed(2))
+    : Number(totals[middle].toFixed(2));
+
+  return { average, median };
+}
+
+function normalizeProductMetricsPagination(req) {
+  const parsedPage = Number.parseInt(req.query.page, 10);
+  const parsedPageSize = Number.parseInt(req.query.pageSize, 10);
+  const page = Number.isInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+  const pageSize = Number.isInteger(parsedPageSize) && parsedPageSize > 0
+    ? Math.min(parsedPageSize, 50)
+    : 10;
+
+  return {
+    page,
+    pageSize,
+    offset: (page - 1) * pageSize
+  };
+}
+
+function getProductMetricsDeliveryUtcDateRange(normalizedFilters) {
+  const result = {};
+
+  if (normalizedFilters.from_date) {
+    result.fromDateUtc = moment
+      .tz(normalizedFilters.from_date, 'YYYY-MM-DD', PRODUCT_METRICS_TIMEZONE)
+      .startOf('day')
+      .utc()
+      .format('YYYY-MM-DD HH:mm:ss');
+  }
+
+  if (normalizedFilters.to_date) {
+    result.toDateUtc = moment
+      .tz(normalizedFilters.to_date, 'YYYY-MM-DD', PRODUCT_METRICS_TIMEZONE)
+      .add(1, 'day')
+      .startOf('day')
+      .utc()
+      .format('YYYY-MM-DD HH:mm:ss');
+  }
+
+  return result;
+}
+
+async function optimizedProductReachHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (!hasProductMetricsAccess(cabecera)) {
+    return res.status(403).json('Unauthorized');
+  }
+
+  try {
+    const filters = normalizeProductMetricsFilters(req.body);
+    const deliveryDateRange = getProductMetricsDeliveryUtcDateRange(filters);
+    const userWhere = ['u.role_id = 5', 'u.enabled = ?'];
+    const userParams = ['Y'];
+    const deliveryWhere = ['db.receiving_user_id = u.id'];
+    const deliveryParams = [];
+
+    if (deliveryDateRange.fromDateUtc) {
+      deliveryWhere.push('db.creation_date >= ?');
+      deliveryParams.push(deliveryDateRange.fromDateUtc);
+    }
+
+    if (deliveryDateRange.toDateUtc) {
+      deliveryWhere.push('db.creation_date < ?');
+      deliveryParams.push(deliveryDateRange.toDateUtc);
+    }
+
+    addProductMetricsInCondition(deliveryWhere, deliveryParams, 'db.location_id', filters.locations);
+
+    if (cabecera.role === 'client') {
+      userWhere.push('cu.client_id = ?');
+      userParams.push(cabecera.client_id);
+    }
+
+    const [rowsReach] = await mysqlConnection.promise().query(
+      `SELECT COALESCE(SUM(u.household_size), 0) AS reach
+       FROM user as u
+       ${cabecera.role === 'client' ? 'INNER JOIN client_user as cu ON u.id = cu.user_id' : ''}
+       WHERE ${userWhere.join('\n AND ')}
+         AND EXISTS (
+           SELECT 1
+           FROM delivery_beneficiary as db
+           WHERE ${deliveryWhere.join('\n AND ')}
+         )`,
+      userParams.concat(deliveryParams)
+    );
+
+    const useProductQuantity = filters.product_types.length > 0;
+    const productJoins = useProductQuantity
+      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+         INNER JOIN product as p ON pdt.product_id = p.id`
+      : '';
+    const productWhere = buildProductMetricsWhere(filters, cabecera);
+    const [rowsPoundsDelivered] = await mysqlConnection.promise().query(
+      `SELECT COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS poundsDelivered
+       FROM donation_ticket as dt
+       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+       ${productJoins}
+       ${buildProductMetricsClientJoin(cabecera)}
+       WHERE ${productWhere.whereSql}`,
+      productWhere.params
+    );
+
+    return res.json({
+      reach: Number(rowsReach[0]?.reach || 0),
+      poundsDelivered: Number(Number(rowsPoundsDelivered[0]?.poundsDelivered || 0).toFixed(2))
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json('Internal server error');
+  }
+}
+
+async function optimizedProductTotalPoundsHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (!hasProductMetricsAccess(cabecera)) {
+    return res.status(403).send('Forbidden');
+  }
+
+  try {
+    const filters = await resolveProductMetricsDateRange(normalizeProductMetricsFilters(req.body));
+    const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
+    const useProductQuantity = filters.product_types.length > 0;
+    const productJoins = useProductQuantity
+      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+         INNER JOIN product as p ON pdt.product_id = p.id`
+      : '';
+    const metricWhere = buildProductMetricsWhere(filters, cabecera);
+    const periodExpression = getProductMetricsPeriodExpression(filters.interval);
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+         pr.name AS name,
+         ${periodExpression} AS period,
+         COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS data
+       FROM donation_ticket as dt
+       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+       INNER JOIN provider as pr ON dt.provider_id = pr.id
+       ${productJoins}
+       ${buildProductMetricsClientJoin(cabecera)}
+       WHERE ${metricWhere.whereSql}
+       GROUP BY pr.id, pr.name, period
+       ORDER BY period`,
+      metricWhere.params
+    );
+
+    return res.json(buildProductMetricsSeries(rows, periods, filters.interval));
+  } catch (error) {
+    console.log(error);
+    return res.status(500).send(error.message);
+  }
+}
+
+async function optimizedProductNumberOfTripsHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (!hasProductMetricsAccess(cabecera)) {
+    return res.status(403).send('Forbidden');
+  }
+
+  try {
+    const filters = await resolveProductMetricsDateRange(normalizeProductMetricsFilters(req.body));
+    const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
+    const productJoins = filters.product_types.length > 0
+      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+         INNER JOIN product as p ON pdt.product_id = p.id`
+      : '';
+    const metricWhere = buildProductMetricsWhere(filters, cabecera);
+    const periodExpression = getProductMetricsPeriodExpression(filters.interval);
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+         tb.name AS name,
+         ${periodExpression} AS period,
+         COUNT(DISTINCT dt.id) AS data
+       FROM donation_ticket as dt
+       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+       INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id AND tb.enabled = 'Y'
+       ${productJoins}
+       ${buildProductMetricsClientJoin(cabecera)}
+       WHERE ${metricWhere.whereSql}
+       GROUP BY tb.id, tb.name, period
+       ORDER BY period`,
+      metricWhere.params
+    );
+
+    return res.json(buildProductMetricsSeries(rows, periods, filters.interval));
+  } catch (error) {
+    console.log(error);
+    return res.status(500).send(error.message);
+  }
+}
+
+async function optimizedProductKindOfProductHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (!hasProductMetricsAccess(cabecera)) {
+    return res.status(403).json('Unauthorized');
+  }
+
+  try {
+    const filters = normalizeProductMetricsFilters(req.body);
+    const language = req.query.language === 'es' ? 'es' : 'en';
+    const metricWhere = buildProductMetricsWhere(filters, cabecera);
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+         ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS name,
+         COALESCE(SUM(pdt.quantity), 0) AS total
+       FROM donation_ticket as dt
+       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+       INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+       INNER JOIN product as p ON pdt.product_id = p.id
+       INNER JOIN product_type as pt ON p.product_type_id = pt.id
+       ${buildProductMetricsClientJoin(cabecera)}
+       WHERE ${metricWhere.whereSql}
+       GROUP BY pt.id, name
+       ORDER BY total DESC`,
+      metricWhere.params
+    );
+
+    rows.forEach((row) => {
+      row.total = Number(Number(row.total || 0).toFixed(2));
+    });
+
+    return res.json(rows);
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json('Internal server error');
+  }
+}
+
+async function optimizedProductPoundsPerLocationHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (!hasProductMetricsAccess(cabecera)) {
+    return res.status(403).json('Unauthorized');
+  }
+
+  try {
+    const filters = normalizeProductMetricsFilters(req.body);
+    const useProductQuantity = filters.product_types.length > 0;
+    const productJoins = useProductQuantity
+      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+         INNER JOIN product as p ON pdt.product_id = p.id`
+      : '';
+    const metricWhere = buildProductMetricsWhere(filters, cabecera);
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+         l.community_city AS name,
+         COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS total
+       FROM donation_ticket as dt
+       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+       INNER JOIN location as l ON dt.location_id = l.id
+       ${productJoins}
+       ${buildProductMetricsClientJoin(cabecera)}
+       WHERE ${metricWhere.whereSql}
+       GROUP BY l.id, l.community_city
+       ORDER BY total DESC`,
+      metricWhere.params
+    );
+
+    rows.forEach((row) => {
+      row.name = String(row.name);
+      row.total = Number(Number(row.total || 0).toFixed(2));
+    });
+
+    const summary = calculateProductMetricsSummary(rows);
+    return res.json({ ...summary, data: rows });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json('Internal server error');
+  }
+}
+
+async function optimizedProductPoundsPerProductHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (!hasProductMetricsAccess(cabecera)) {
+    return res.status(403).json('Unauthorized');
+  }
+
+  try {
+    const filters = normalizeProductMetricsFilters(req.body);
+    const pagination = normalizeProductMetricsPagination(req);
+    const metricWhere = buildProductMetricsWhere(filters, cabecera);
+    const productTotalsCte = `
+      WITH product_totals AS (
+        SELECT
+          p.name AS name,
+          COALESCE(SUM(pdt.quantity), 0) AS total
+        FROM donation_ticket as dt
+        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+        INNER JOIN product as p ON pdt.product_id = p.id
+        ${buildProductMetricsClientJoin(cabecera)}
+        WHERE ${metricWhere.whereSql}
+        GROUP BY p.id, p.name
+      )
+    `;
+
+    const [summaryRows] = await mysqlConnection.promise().query(
+      `${productTotalsCte}
+       SELECT
+         COUNT(*) AS totalItems,
+         COALESCE(AVG(total), 0) AS average
+       FROM product_totals`,
+      metricWhere.params
+    );
+
+    const [medianRows] = await mysqlConnection.promise().query(
+      `${productTotalsCte},
+       numbered_totals AS (
+         SELECT
+           total,
+           ROW_NUMBER() OVER (ORDER BY total) AS row_number_value,
+           COUNT(*) OVER () AS total_count
+         FROM product_totals
+       )
+       SELECT COALESCE(AVG(total), 0) AS median
+       FROM numbered_totals
+       WHERE row_number_value IN (
+         FLOOR((total_count + 1) / 2),
+         FLOOR((total_count + 2) / 2)
+       )`,
+      metricWhere.params
+    );
+
+    const [dataRows] = await mysqlConnection.promise().query(
+      `${productTotalsCte}
+       SELECT
+         name,
+         ROUND(total, 2) AS total
+       FROM product_totals
+       ORDER BY total DESC
+       LIMIT ? OFFSET ?`,
+      metricWhere.params.concat([pagination.pageSize, pagination.offset])
+    );
+
+    const totalItems = Number(summaryRows[0]?.totalItems || 0);
+    return res.json({
+      average: Number(Number(summaryRows[0]?.average || 0).toFixed(2)),
+      median: Number(Number(medianRows[0]?.median || 0).toFixed(2)),
+      totalItems,
+      page: pagination.page - 1,
+      data: dataRows.map((row) => ({
+        name: String(row.name),
+        total: Number(Number(row.total || 0).toFixed(2))
+      }))
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json('Internal server error');
+  }
+}
+
+async function optimizedDashboardGraphicLineHandler(req, res) {
+  const cabecera = JSON.parse(req.data.data);
+  if (!hasProductMetricsAccess(cabecera)) {
+    return res.status(401).json('Unauthorized');
+  }
+
+  const { tabSelected } = req.params;
+  if (tabSelected !== 'pounds-filters') {
+    return res.status(400).json('Bad request');
+  }
+
+  try {
+    const filters = await resolveProductMetricsDateRange(normalizeProductMetricsFilters(req.body));
+    const language = req.query.language === 'es' ? 'es' : 'en';
+    const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
+    const metricWhere = buildProductMetricsWhere(filters, cabecera, { productTypeMode: 'exists' });
+    const periodExpression = getProductMetricsPeriodExpression(filters.interval);
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT
+         ${periodExpression} AS period,
+         COALESCE(SUM(dt.total_weight), 0) AS value
+       FROM donation_ticket as dt
+       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+       ${buildProductMetricsClientJoin(cabecera)}
+       WHERE ${metricWhere.whereSql}
+       GROUP BY period
+       ORDER BY period`,
+      metricWhere.params
+    );
+
+    const valueByPeriod = new Map(rows.map((row) => [row.period, Number(row.value || 0)]));
+    return res.json({
+      name: language === 'es' ? 'Libras entregadas' : 'Pounds delivered',
+      series: periods.map((period) => ({
+        name: formatPeriod(period, filters.interval),
+        value: Number(Number(valueByPeriod.get(period) || 0).toFixed(2))
+      }))
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json('Internal server error');
+  }
+}
+
+overrideRouteHandler('/metrics/product/reach', 'post', optimizedProductReachHandler);
+overrideRouteHandler('/metrics/product/total_pounds', 'post', optimizedProductTotalPoundsHandler);
+overrideRouteHandler('/metrics/product/number_of_trips', 'post', optimizedProductNumberOfTripsHandler);
+overrideRouteHandler('/metrics/product/kind_of_product', 'post', optimizedProductKindOfProductHandler);
+overrideRouteHandler('/metrics/product/pounds_per_location', 'post', optimizedProductPoundsPerLocationHandler);
+overrideRouteHandler('/metrics/product/pounds_per_product', 'post', optimizedProductPoundsPerProductHandler);
+overrideRouteHandler('/dashboard/graphic-line/:tabSelected', 'post', optimizedDashboardGraphicLineHandler);
+
 router.get('/table/notification', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   let buscar = req.query.search;
