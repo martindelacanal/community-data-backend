@@ -14762,6 +14762,20 @@ router.post('/metrics/volunteer/location', verifyToken, async (req, res) => {
         median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
       }
 
+      // Paginación opcional (query params page/pageSize); sin page se mantiene
+      // el contrato original con la lista completa.
+      if (req.query.page !== undefined) {
+        const pagination = normalizeProductMetricsPagination(req);
+        return res.json({
+          average,
+          median,
+          total,
+          totalItems: rows.length,
+          page: pagination.page - 1,
+          data: rows.slice(pagination.offset, pagination.offset + pagination.pageSize)
+        });
+      }
+
       res.json({ average, median, total, data: rows });
     } catch (err) {
       console.log(err);
@@ -17614,7 +17628,24 @@ async function optimizedParticipantLocationNewRecurringHandler(req, res) {
   ) {
     try {
       const language = req.query.language || 'en';
-      res.json(await getParticipantLocationNewRecurring(cabecera, req.body, language));
+      const result = await getParticipantLocationNewRecurring(cabecera, req.body, language);
+
+      // Paginación opcional por locación (query params page/pageSize): el
+      // resultado completo queda cacheado y acá se recortan categories y cada
+      // serie de forma alineada. Sin page se mantiene el contrato original.
+      if (req.query.page !== undefined) {
+        const pagination = normalizeProductMetricsPagination(req);
+        const start = pagination.offset;
+        const end = pagination.offset + pagination.pageSize;
+        return res.json({
+          series: (result.series || []).map((serie) => ({ ...serie, data: (serie.data || []).slice(start, end) })),
+          categories: (result.categories || []).slice(start, end),
+          totalItems: (result.categories || []).length,
+          page: pagination.page - 1
+        });
+      }
+
+      res.json(result);
     } catch (error) {
       console.log(error);
       res.status(500).send(error.message);
@@ -18617,6 +18648,11 @@ router.post('/metrics/product/pounds_per_product', verifyToken, async (req, res)
 const PRODUCT_METRICS_ACCESS_ROLES = new Set(['admin', 'client', 'director', 'auditor']);
 const PRODUCT_METRICS_TIMEZONE = 'America/Los_Angeles';
 const PRODUCT_METRICS_INTERVALS = new Set(['day', 'week', 'month', 'quarter', 'year']);
+// Short-lived cache for product metrics: donation tickets change infrequently, so
+// serving up-to-60s-old aggregates is acceptable and makes repeat page loads and
+// chart page changes hit memory instead of MySQL. Reuses the participant cache
+// infrastructure (getCachedParticipantMetrics / buildParticipantMetricsCacheKey).
+const PRODUCT_METRICS_CACHE_TTL_MS = 60000;
 
 function hasProductMetricsAccess(cabecera) {
   return cabecera && PRODUCT_METRICS_ACCESS_ROLES.has(cabecera.role);
@@ -18868,62 +18904,68 @@ async function optimizedProductReachHandler(req, res) {
 
   try {
     const filters = normalizeProductMetricsFilters(req.body);
-    const deliveryDateRange = getProductMetricsDeliveryUtcDateRange(filters);
-    const userWhere = ['u.role_id = 5', 'u.enabled = ?'];
-    const userParams = ['Y'];
-    const deliveryWhere = ['db.receiving_user_id = u.id'];
-    const deliveryParams = [];
+    const cacheKey = buildParticipantMetricsCacheKey('product-reach', cabecera, filters);
 
-    if (deliveryDateRange.fromDateUtc) {
-      deliveryWhere.push('db.creation_date >= ?');
-      deliveryParams.push(deliveryDateRange.fromDateUtc);
-    }
+    const response = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
+      const deliveryDateRange = getProductMetricsDeliveryUtcDateRange(filters);
+      const userWhere = ['u.role_id = 5', 'u.enabled = ?'];
+      const userParams = ['Y'];
+      const deliveryWhere = ['db.receiving_user_id = u.id'];
+      const deliveryParams = [];
 
-    if (deliveryDateRange.toDateUtc) {
-      deliveryWhere.push('db.creation_date < ?');
-      deliveryParams.push(deliveryDateRange.toDateUtc);
-    }
+      if (deliveryDateRange.fromDateUtc) {
+        deliveryWhere.push('db.creation_date >= ?');
+        deliveryParams.push(deliveryDateRange.fromDateUtc);
+      }
 
-    addProductMetricsInCondition(deliveryWhere, deliveryParams, 'db.location_id', filters.locations);
+      if (deliveryDateRange.toDateUtc) {
+        deliveryWhere.push('db.creation_date < ?');
+        deliveryParams.push(deliveryDateRange.toDateUtc);
+      }
 
-    if (cabecera.role === 'client') {
-      userWhere.push('cu.client_id = ?');
-      userParams.push(cabecera.client_id);
-    }
+      addProductMetricsInCondition(deliveryWhere, deliveryParams, 'db.location_id', filters.locations);
 
-    const [rowsReach] = await mysqlConnection.promise().query(
-      `SELECT COALESCE(SUM(u.household_size), 0) AS reach
-       FROM user as u
-       ${cabecera.role === 'client' ? 'INNER JOIN client_user as cu ON u.id = cu.user_id' : ''}
-       WHERE ${userWhere.join('\n AND ')}
-         AND EXISTS (
-           SELECT 1
-           FROM delivery_beneficiary as db
-           WHERE ${deliveryWhere.join('\n AND ')}
-         )`,
-      userParams.concat(deliveryParams)
-    );
+      if (cabecera.role === 'client') {
+        userWhere.push('cu.client_id = ?');
+        userParams.push(cabecera.client_id);
+      }
 
-    const useProductQuantity = filters.product_types.length > 0;
-    const productJoins = useProductQuantity
-      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-         INNER JOIN product as p ON pdt.product_id = p.id`
-      : '';
-    const productWhere = buildProductMetricsWhere(filters, cabecera);
-    const [rowsPoundsDelivered] = await mysqlConnection.promise().query(
-      `SELECT COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS poundsDelivered
-       FROM donation_ticket as dt
-       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-       ${productJoins}
-       ${buildProductMetricsClientJoin(cabecera)}
-       WHERE ${productWhere.whereSql}`,
-      productWhere.params
-    );
+      const [rowsReach] = await mysqlConnection.promise().query(
+        `SELECT COALESCE(SUM(u.household_size), 0) AS reach
+         FROM user as u
+         ${cabecera.role === 'client' ? 'INNER JOIN client_user as cu ON u.id = cu.user_id' : ''}
+         WHERE ${userWhere.join('\n AND ')}
+           AND EXISTS (
+             SELECT 1
+             FROM delivery_beneficiary as db
+             WHERE ${deliveryWhere.join('\n AND ')}
+           )`,
+        userParams.concat(deliveryParams)
+      );
 
-    return res.json({
-      reach: Number(rowsReach[0]?.reach || 0),
-      poundsDelivered: Number(Number(rowsPoundsDelivered[0]?.poundsDelivered || 0).toFixed(2))
+      const useProductQuantity = filters.product_types.length > 0;
+      const productJoins = useProductQuantity
+        ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+           INNER JOIN product as p ON pdt.product_id = p.id`
+        : '';
+      const productWhere = buildProductMetricsWhere(filters, cabecera);
+      const [rowsPoundsDelivered] = await mysqlConnection.promise().query(
+        `SELECT COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS poundsDelivered
+         FROM donation_ticket as dt
+         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+         ${productJoins}
+         ${buildProductMetricsClientJoin(cabecera)}
+         WHERE ${productWhere.whereSql}`,
+        productWhere.params
+      );
+
+      return {
+        reach: Number(rowsReach[0]?.reach || 0),
+        poundsDelivered: Number(Number(rowsPoundsDelivered[0]?.poundsDelivered || 0).toFixed(2))
+      };
     });
+
+    return res.json(response);
   } catch (error) {
     console.log(error);
     return res.status(500).json('Internal server error');
@@ -18937,33 +18979,40 @@ async function optimizedProductTotalPoundsHandler(req, res) {
   }
 
   try {
-    const filters = await resolveProductMetricsDateRange(normalizeProductMetricsFilters(req.body));
-    const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
-    const useProductQuantity = filters.product_types.length > 0;
-    const productJoins = useProductQuantity
-      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-         INNER JOIN product as p ON pdt.product_id = p.id`
-      : '';
-    const metricWhere = buildProductMetricsWhere(filters, cabecera);
-    const periodExpression = getProductMetricsPeriodExpression(filters.interval);
+    const rawFilters = normalizeProductMetricsFilters(req.body);
+    const cacheKey = buildParticipantMetricsCacheKey('product-total-pounds', cabecera, rawFilters);
 
-    const [rows] = await mysqlConnection.promise().query(
-      `SELECT
-         pr.name AS name,
-         ${periodExpression} AS period,
-         COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS data
-       FROM donation_ticket as dt
-       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-       INNER JOIN provider as pr ON dt.provider_id = pr.id
-       ${productJoins}
-       ${buildProductMetricsClientJoin(cabecera)}
-       WHERE ${metricWhere.whereSql}
-       GROUP BY pr.id, pr.name, period
-       ORDER BY period`,
-      metricWhere.params
-    );
+    const response = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
+      const filters = await resolveProductMetricsDateRange(rawFilters);
+      const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
+      const useProductQuantity = filters.product_types.length > 0;
+      const productJoins = useProductQuantity
+        ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+           INNER JOIN product as p ON pdt.product_id = p.id`
+        : '';
+      const metricWhere = buildProductMetricsWhere(filters, cabecera);
+      const periodExpression = getProductMetricsPeriodExpression(filters.interval);
 
-    return res.json(buildProductMetricsSeries(rows, periods, filters.interval));
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+           pr.name AS name,
+           ${periodExpression} AS period,
+           COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS data
+         FROM donation_ticket as dt
+         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+         INNER JOIN provider as pr ON dt.provider_id = pr.id
+         ${productJoins}
+         ${buildProductMetricsClientJoin(cabecera)}
+         WHERE ${metricWhere.whereSql}
+         GROUP BY pr.id, pr.name, period
+         ORDER BY period`,
+        metricWhere.params
+      );
+
+      return buildProductMetricsSeries(rows, periods, filters.interval);
+    });
+
+    return res.json(response);
   } catch (error) {
     console.log(error);
     return res.status(500).send(error.message);
@@ -18977,32 +19026,39 @@ async function optimizedProductNumberOfTripsHandler(req, res) {
   }
 
   try {
-    const filters = await resolveProductMetricsDateRange(normalizeProductMetricsFilters(req.body));
-    const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
-    const productJoins = filters.product_types.length > 0
-      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-         INNER JOIN product as p ON pdt.product_id = p.id`
-      : '';
-    const metricWhere = buildProductMetricsWhere(filters, cabecera);
-    const periodExpression = getProductMetricsPeriodExpression(filters.interval);
+    const rawFilters = normalizeProductMetricsFilters(req.body);
+    const cacheKey = buildParticipantMetricsCacheKey('product-number-of-trips', cabecera, rawFilters);
 
-    const [rows] = await mysqlConnection.promise().query(
-      `SELECT
-         tb.name AS name,
-         ${periodExpression} AS period,
-         COUNT(DISTINCT dt.id) AS data
-       FROM donation_ticket as dt
-       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-       INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id AND tb.enabled = 'Y'
-       ${productJoins}
-       ${buildProductMetricsClientJoin(cabecera)}
-       WHERE ${metricWhere.whereSql}
-       GROUP BY tb.id, tb.name, period
-       ORDER BY period`,
-      metricWhere.params
-    );
+    const response = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
+      const filters = await resolveProductMetricsDateRange(rawFilters);
+      const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
+      const productJoins = filters.product_types.length > 0
+        ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+           INNER JOIN product as p ON pdt.product_id = p.id`
+        : '';
+      const metricWhere = buildProductMetricsWhere(filters, cabecera);
+      const periodExpression = getProductMetricsPeriodExpression(filters.interval);
 
-    return res.json(buildProductMetricsSeries(rows, periods, filters.interval));
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+           tb.name AS name,
+           ${periodExpression} AS period,
+           COUNT(DISTINCT dt.id) AS data
+         FROM donation_ticket as dt
+         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+         INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id AND tb.enabled = 'Y'
+         ${productJoins}
+         ${buildProductMetricsClientJoin(cabecera)}
+         WHERE ${metricWhere.whereSql}
+         GROUP BY tb.id, tb.name, period
+         ORDER BY period`,
+        metricWhere.params
+      );
+
+      return buildProductMetricsSeries(rows, periods, filters.interval);
+    });
+
+    return res.json(response);
   } catch (error) {
     console.log(error);
     return res.status(500).send(error.message);
@@ -19018,29 +19074,34 @@ async function optimizedProductKindOfProductHandler(req, res) {
   try {
     const filters = normalizeProductMetricsFilters(req.body);
     const language = req.query.language === 'es' ? 'es' : 'en';
-    const metricWhere = buildProductMetricsWhere(filters, cabecera);
+    const cacheKey = buildParticipantMetricsCacheKey('product-kind-of-product', cabecera, filters, { language });
 
-    const [rows] = await mysqlConnection.promise().query(
-      `SELECT
-         ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS name,
-         COALESCE(SUM(pdt.quantity), 0) AS total
-       FROM donation_ticket as dt
-       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-       INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-       INNER JOIN product as p ON pdt.product_id = p.id
-       INNER JOIN product_type as pt ON p.product_type_id = pt.id
-       ${buildProductMetricsClientJoin(cabecera)}
-       WHERE ${metricWhere.whereSql}
-       GROUP BY pt.id, name
-       ORDER BY total DESC`,
-      metricWhere.params
-    );
+    const response = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
+      const metricWhere = buildProductMetricsWhere(filters, cabecera);
 
-    rows.forEach((row) => {
-      row.total = Number(Number(row.total || 0).toFixed(2));
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+           ${language === 'en' ? 'pt.name' : 'pt.name_es'} AS name,
+           COALESCE(SUM(pdt.quantity), 0) AS total
+         FROM donation_ticket as dt
+         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+         INNER JOIN product as p ON pdt.product_id = p.id
+         INNER JOIN product_type as pt ON p.product_type_id = pt.id
+         ${buildProductMetricsClientJoin(cabecera)}
+         WHERE ${metricWhere.whereSql}
+         GROUP BY pt.id, name
+         ORDER BY total DESC`,
+        metricWhere.params
+      );
+
+      return rows.map((row) => ({
+        ...row,
+        total: Number(Number(row.total || 0).toFixed(2))
+      }));
     });
 
-    return res.json(rows);
+    return res.json(response);
   } catch (error) {
     console.log(error);
     return res.status(500).json('Internal server error');
@@ -19055,34 +19116,51 @@ async function optimizedProductPoundsPerLocationHandler(req, res) {
 
   try {
     const filters = normalizeProductMetricsFilters(req.body);
-    const useProductQuantity = filters.product_types.length > 0;
-    const productJoins = useProductQuantity
-      ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-         INNER JOIN product as p ON pdt.product_id = p.id`
-      : '';
-    const metricWhere = buildProductMetricsWhere(filters, cabecera);
+    const cacheKey = buildParticipantMetricsCacheKey('product-pounds-per-location', cabecera, filters);
 
-    const [rows] = await mysqlConnection.promise().query(
-      `SELECT
-         l.community_city AS name,
-         COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS total
-       FROM donation_ticket as dt
-       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-       INNER JOIN location as l ON dt.location_id = l.id
-       ${productJoins}
-       ${buildProductMetricsClientJoin(cabecera)}
-       WHERE ${metricWhere.whereSql}
-       GROUP BY l.id, l.community_city
-       ORDER BY total DESC`,
-      metricWhere.params
-    );
+    const rows = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
+      const useProductQuantity = filters.product_types.length > 0;
+      const productJoins = useProductQuantity
+        ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+           INNER JOIN product as p ON pdt.product_id = p.id`
+        : '';
+      const metricWhere = buildProductMetricsWhere(filters, cabecera);
 
-    rows.forEach((row) => {
-      row.name = String(row.name);
-      row.total = Number(Number(row.total || 0).toFixed(2));
+      const [groupedRows] = await mysqlConnection.promise().query(
+        `SELECT
+           l.community_city AS name,
+           COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS total
+         FROM donation_ticket as dt
+         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+         INNER JOIN location as l ON dt.location_id = l.id
+         ${productJoins}
+         ${buildProductMetricsClientJoin(cabecera)}
+         WHERE ${metricWhere.whereSql}
+         GROUP BY l.id, l.community_city
+         ORDER BY total DESC`,
+        metricWhere.params
+      );
+
+      return groupedRows.map((row) => ({
+        name: String(row.name),
+        total: Number(Number(row.total || 0).toFixed(2))
+      }));
     });
 
     const summary = calculateProductMetricsSummary(rows);
+
+    // Optional server-side pagination (page/pageSize query params). Without a
+    // page param the full list is returned, preserving the original contract.
+    if (req.query.page !== undefined) {
+      const pagination = normalizeProductMetricsPagination(req);
+      return res.json({
+        ...summary,
+        totalItems: rows.length,
+        page: pagination.page - 1,
+        data: rows.slice(pagination.offset, pagination.offset + pagination.pageSize)
+      });
+    }
+
     return res.json({ ...summary, data: rows });
   } catch (error) {
     console.log(error);
@@ -19099,70 +19177,48 @@ async function optimizedProductPoundsPerProductHandler(req, res) {
   try {
     const filters = normalizeProductMetricsFilters(req.body);
     const pagination = normalizeProductMetricsPagination(req);
-    const metricWhere = buildProductMetricsWhere(filters, cabecera);
-    const productTotalsCte = `
-      WITH product_totals AS (
-        SELECT
-          p.name AS name,
-          COALESCE(SUM(pdt.quantity), 0) AS total
-        FROM donation_ticket as dt
-        INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-        INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-        INNER JOIN product as p ON pdt.product_id = p.id
-        ${buildProductMetricsClientJoin(cabecera)}
-        WHERE ${metricWhere.whereSql}
-        GROUP BY p.id, p.name
-      )
-    `;
+    // The cache key deliberately excludes pagination: the full grouped list is
+    // cached once and every page is served from memory. At product-catalog
+    // cardinality (a few thousand rows) one aggregate query is cheaper than the
+    // previous pattern of running the same CTE three times per page request.
+    const cacheKey = buildParticipantMetricsCacheKey('product-pounds-per-product', cabecera, filters);
 
-    const [summaryRows] = await mysqlConnection.promise().query(
-      `${productTotalsCte}
-       SELECT
-         COUNT(*) AS totalItems,
-         COALESCE(AVG(total), 0) AS average
-       FROM product_totals`,
-      metricWhere.params
-    );
+    const rows = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
+      const metricWhere = buildProductMetricsWhere(filters, cabecera);
 
-    const [medianRows] = await mysqlConnection.promise().query(
-      `${productTotalsCte},
-       numbered_totals AS (
-         SELECT
-           total,
-           ROW_NUMBER() OVER (ORDER BY total) AS row_number_value,
-           COUNT(*) OVER () AS total_count
-         FROM product_totals
-       )
-       SELECT COALESCE(AVG(total), 0) AS median
-       FROM numbered_totals
-       WHERE row_number_value IN (
-         FLOOR((total_count + 1) / 2),
-         FLOOR((total_count + 2) / 2)
-       )`,
-      metricWhere.params
-    );
+      const [groupedRows] = await mysqlConnection.promise().query(
+        `SELECT
+           p.name AS name,
+           COALESCE(SUM(pdt.quantity), 0) AS total
+         FROM donation_ticket as dt
+         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+         INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
+         INNER JOIN product as p ON pdt.product_id = p.id
+         ${buildProductMetricsClientJoin(cabecera)}
+         WHERE ${metricWhere.whereSql}
+         GROUP BY p.id, p.name
+         ORDER BY total DESC`,
+        metricWhere.params
+      );
 
-    const [dataRows] = await mysqlConnection.promise().query(
-      `${productTotalsCte}
-       SELECT
-         name,
-         ROUND(total, 2) AS total
-       FROM product_totals
-       ORDER BY total DESC
-       LIMIT ? OFFSET ?`,
-      metricWhere.params.concat([pagination.pageSize, pagination.offset])
-    );
-
-    const totalItems = Number(summaryRows[0]?.totalItems || 0);
-    return res.json({
-      average: Number(Number(summaryRows[0]?.average || 0).toFixed(2)),
-      median: Number(Number(medianRows[0]?.median || 0).toFixed(2)),
-      totalItems,
-      page: pagination.page - 1,
-      data: dataRows.map((row) => ({
+      // Se cachea el total SIN redondear: average/median deben calcularse sobre
+      // los valores crudos (igual que el AVG/mediana SQL que reemplazó esto);
+      // el redondeo a 2 decimales se aplica recién al armar la página.
+      return groupedRows.map((row) => ({
         name: String(row.name),
-        total: Number(Number(row.total || 0).toFixed(2))
-      }))
+        total: Number(row.total || 0)
+      }));
+    });
+
+    const summary = calculateProductMetricsSummary(rows);
+    return res.json({
+      average: summary.average,
+      median: summary.median,
+      totalItems: rows.length,
+      page: pagination.page - 1,
+      data: rows
+        .slice(pagination.offset, pagination.offset + pagination.pageSize)
+        .map((row) => ({ name: row.name, total: Number(Number(row.total).toFixed(2)) }))
     });
   } catch (error) {
     console.log(error);
@@ -19182,33 +19238,40 @@ async function optimizedDashboardGraphicLineHandler(req, res) {
   }
 
   try {
-    const filters = await resolveProductMetricsDateRange(normalizeProductMetricsFilters(req.body));
+    const rawFilters = normalizeProductMetricsFilters(req.body);
     const language = req.query.language === 'es' ? 'es' : 'en';
-    const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
-    const metricWhere = buildProductMetricsWhere(filters, cabecera, { productTypeMode: 'exists' });
-    const periodExpression = getProductMetricsPeriodExpression(filters.interval);
+    const cacheKey = buildParticipantMetricsCacheKey('product-graphic-line-pounds', cabecera, rawFilters, { language });
 
-    const [rows] = await mysqlConnection.promise().query(
-      `SELECT
-         ${periodExpression} AS period,
-         COALESCE(SUM(dt.total_weight), 0) AS value
-       FROM donation_ticket as dt
-       INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-       ${buildProductMetricsClientJoin(cabecera)}
-       WHERE ${metricWhere.whereSql}
-       GROUP BY period
-       ORDER BY period`,
-      metricWhere.params
-    );
+    const response = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
+      const filters = await resolveProductMetricsDateRange(rawFilters);
+      const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
+      const metricWhere = buildProductMetricsWhere(filters, cabecera, { productTypeMode: 'exists' });
+      const periodExpression = getProductMetricsPeriodExpression(filters.interval);
 
-    const valueByPeriod = new Map(rows.map((row) => [row.period, Number(row.value || 0)]));
-    return res.json({
-      name: language === 'es' ? 'Libras entregadas' : 'Pounds delivered',
-      series: periods.map((period) => ({
-        name: formatPeriod(period, filters.interval),
-        value: Number(Number(valueByPeriod.get(period) || 0).toFixed(2))
-      }))
+      const [rows] = await mysqlConnection.promise().query(
+        `SELECT
+           ${periodExpression} AS period,
+           COALESCE(SUM(dt.total_weight), 0) AS value
+         FROM donation_ticket as dt
+         INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+         ${buildProductMetricsClientJoin(cabecera)}
+         WHERE ${metricWhere.whereSql}
+         GROUP BY period
+         ORDER BY period`,
+        metricWhere.params
+      );
+
+      const valueByPeriod = new Map(rows.map((row) => [row.period, Number(row.value || 0)]));
+      return {
+        name: language === 'es' ? 'Libras entregadas' : 'Pounds delivered',
+        series: periods.map((period) => ({
+          name: formatPeriod(period, filters.interval),
+          value: Number(Number(valueByPeriod.get(period) || 0).toFixed(2))
+        }))
+      };
     });
+
+    return res.json(response);
   } catch (error) {
     console.log(error);
     return res.status(500).json('Internal server error');
