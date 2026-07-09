@@ -17405,33 +17405,54 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
         newUsersParams
       ),
       mysqlConnection.promise().query(
-        `SELECT
-           db.location_id AS location_id,
-           COUNT(DISTINCT db.receiving_user_id) AS recurring_count
-         FROM delivery_beneficiary db
-         ${recurringUsersJoins.join('\n')}
-         WHERE ${recurringUsersConditions.join('\n           AND ')}
-           AND (
-             EXISTS (
-               SELECT 1
-               FROM delivery_beneficiary db_prev
-               WHERE db_prev.receiving_user_id = u.id
-                 AND db_prev.creation_date < db.creation_date
-                 ${filters.locations.length > 0 ? `AND db_prev.location_id IN (${locationPlaceholders})` : ''}
-             )
-             OR (
-               u.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
-               ${filters.locations.length > 0 ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
-               AND NOT EXISTS (
+        `WITH new_users AS (
+           SELECT DISTINCT u.id AS user_id
+           FROM user u
+           LEFT JOIN delivery_beneficiary db
+             ON db.receiving_user_id = u.id
+            AND db.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+            AND db.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+           ${newUsersJoins.join('\n')}
+           WHERE u.creation_date >= CONVERT_TZ(?, ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+             AND u.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+             AND ${newUsersConditions.join('\n             AND ')}
+         ),
+         recurring_users_by_location AS (
+           SELECT
+             db.location_id AS location_id,
+             db.receiving_user_id AS user_id
+           FROM delivery_beneficiary db
+           ${recurringUsersJoins.join('\n')}
+           WHERE ${recurringUsersConditions.join('\n             AND ')}
+             AND (
+               EXISTS (
                  SELECT 1
-                 FROM delivery_beneficiary db_past
-                 WHERE db_past.receiving_user_id = u.id
-                   AND db_past.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+                 FROM delivery_beneficiary db_prev
+                 WHERE db_prev.receiving_user_id = u.id
+                   AND db_prev.creation_date < db.creation_date
+                   ${filters.locations.length > 0 ? `AND db_prev.location_id IN (${locationPlaceholders})` : ''}
+               )
+               OR (
+                 u.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+                 ${filters.locations.length > 0 ? `AND u.first_location_id IN (${locationPlaceholders})` : ''}
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM delivery_beneficiary db_past
+                   WHERE db_past.receiving_user_id = u.id
+                     AND db_past.creation_date < CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), ${PARTICIPANT_LA_TIME_ZONE_SQL}, ${PARTICIPANT_UTC_TIME_ZONE_SQL})
+                 )
                )
              )
-           )
-         GROUP BY db.location_id`,
-        recurringUsersParams
+           GROUP BY db.location_id, db.receiving_user_id
+         )
+         SELECT
+           rub.location_id AS location_id,
+           COUNT(*) AS recurring_count,
+           SUM(CASE WHEN nu.user_id IS NULL THEN 1 ELSE 0 END) AS recurring_without_new_count
+         FROM recurring_users_by_location rub
+         LEFT JOIN new_users nu ON nu.user_id = rub.user_id
+         GROUP BY rub.location_id`,
+        [...newUsersParams, ...recurringUsersParams]
       ),
       mysqlConnection.promise().query(
         `SELECT location_id, SUM(participations_count) AS participations_count
@@ -17483,6 +17504,7 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
         name: location.name,
         new_users: 0,
         recurring_users: 0,
+        recurring_without_new_users: 0,
         participations: 0
       });
     });
@@ -17496,6 +17518,7 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
     recurringUsersResult[0].forEach(row => {
       if (row.location_id && locationsMap.has(row.location_id)) {
         locationsMap.get(row.location_id).recurring_users = Number(row.recurring_count || 0);
+        locationsMap.get(row.location_id).recurring_without_new_users = Number(row.recurring_without_new_count || 0);
       }
     });
 
@@ -17515,6 +17538,10 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
         {
           name: language === 'en' ? 'Recurring' : 'Recurrentes',
           data: orderedLocations.map(location => location.recurring_users)
+        },
+        {
+          name: language === 'en' ? 'Recurring without new' : 'Recurrentes sin nuevos',
+          data: orderedLocations.map(location => location.recurring_without_new_users)
         },
         {
           name: language === 'en' ? 'Participations' : 'Participaciones',
