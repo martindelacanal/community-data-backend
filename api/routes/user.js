@@ -14734,6 +14734,13 @@ router.post('/metrics/volunteer/location', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin') {
     try {
       const { whereSql, params } = buildVolunteerWhere(req.body || {});
+      const requestedSortBy = String(req.query.sortBy || 'alphabetical').toLowerCase();
+      const sortBy = requestedSortBy === 'value' ? 'value' : 'alphabetical';
+      const requestedSortDirection = String(req.query.sortDirection || 'asc').toLowerCase();
+      const sortDirection = requestedSortDirection === 'desc' ? 'DESC' : 'ASC';
+      const orderSql = sortBy === 'value'
+        ? `total ${sortDirection}, l.community_city ASC, l.id ASC`
+        : `l.community_city ${sortDirection}, l.id ASC`;
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
@@ -14743,7 +14750,7 @@ router.post('/metrics/volunteer/location', verifyToken, async (req, res) => {
         INNER JOIN location AS l ON v.location_id = l.id
         WHERE ${whereSql}
         GROUP BY l.id, l.community_city
-        ORDER BY l.community_city`,
+        ORDER BY ${orderSql}`,
         params
       );
 
@@ -17645,6 +17652,57 @@ async function optimizedParticipantRegisterHistoryHandler(req, res) {
   }
 }
 
+function sortParticipantLocationMetrics(result, requestedSortBy, requestedSortDirection, language) {
+  const seriesIndexBySort = {
+    new: 0,
+    recurring: 1,
+    recurring_without_new: 2,
+    participations: 3
+  };
+  const normalizedSortBy = String(requestedSortBy || 'alphabetical').toLowerCase();
+  const sortBy = normalizedSortBy === 'alphabetical' ||
+    Object.prototype.hasOwnProperty.call(seriesIndexBySort, normalizedSortBy)
+    ? normalizedSortBy
+    : 'alphabetical';
+  const normalizedDirection = String(requestedSortDirection || 'asc').toLowerCase();
+  const sortDirection = normalizedDirection === 'desc' ? 'desc' : 'asc';
+  const directionMultiplier = sortDirection === 'desc' ? -1 : 1;
+  const categories = Array.isArray(result.categories) ? result.categories : [];
+  const series = Array.isArray(result.series) ? result.series : [];
+  const collator = new Intl.Collator(language === 'es' ? 'es' : 'en', {
+    sensitivity: 'base',
+    numeric: true
+  });
+
+  const orderedRows = categories.map((category, categoryIndex) => ({
+    category,
+    values: series.map(serie => Array.isArray(serie.data) ? serie.data[categoryIndex] : 0)
+  }));
+
+  orderedRows.sort((left, right) => {
+    if (sortBy === 'alphabetical') {
+      return collator.compare(String(left.category || ''), String(right.category || '')) * directionMultiplier;
+    }
+
+    const seriesIndex = seriesIndexBySort[sortBy];
+    const valueComparison = (Number(left.values[seriesIndex] || 0) - Number(right.values[seriesIndex] || 0)) * directionMultiplier;
+    return valueComparison || collator.compare(String(left.category || ''), String(right.category || ''));
+  });
+
+  return {
+    result: {
+      ...result,
+      categories: orderedRows.map(row => row.category),
+      series: series.map((serie, seriesIndex) => ({
+        ...serie,
+        data: orderedRows.map(row => row.values[seriesIndex])
+      }))
+    },
+    sortBy,
+    sortDirection
+  };
+}
+
 async function optimizedParticipantLocationNewRecurringHandler(req, res) {
   const cabecera = JSON.parse(req.data.data);
   if (
@@ -17656,23 +17714,33 @@ async function optimizedParticipantLocationNewRecurringHandler(req, res) {
     try {
       const language = req.query.language || 'en';
       const result = await getParticipantLocationNewRecurring(cabecera, req.body, language);
+      const sortedMetrics = sortParticipantLocationMetrics(
+        result,
+        req.query.sortBy,
+        req.query.sortDirection,
+        language
+      );
+      const orderedResult = sortedMetrics.result;
 
       // Paginación opcional por locación (query params page/pageSize): el
       // resultado completo queda cacheado y acá se recortan categories y cada
-      // serie de forma alineada. Sin page se mantiene el contrato original.
+      // serie de forma alineada. El orden se aplica antes del recorte para que
+      // el paginador represente el dataset completo ordenado.
       if (req.query.page !== undefined) {
         const pagination = normalizeProductMetricsPagination(req);
         const start = pagination.offset;
         const end = pagination.offset + pagination.pageSize;
         return res.json({
-          series: (result.series || []).map((serie) => ({ ...serie, data: (serie.data || []).slice(start, end) })),
-          categories: (result.categories || []).slice(start, end),
-          totalItems: (result.categories || []).length,
-          page: pagination.page - 1
+          series: (orderedResult.series || []).map((serie) => ({ ...serie, data: (serie.data || []).slice(start, end) })),
+          categories: (orderedResult.categories || []).slice(start, end),
+          totalItems: (orderedResult.categories || []).length,
+          page: pagination.page - 1,
+          sortBy: sortedMetrics.sortBy,
+          sortDirection: sortedMetrics.sortDirection
         });
       }
 
-      res.json(result);
+      res.json(orderedResult);
     } catch (error) {
       console.log(error);
       res.status(500).send(error.message);
