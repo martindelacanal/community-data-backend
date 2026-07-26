@@ -966,14 +966,257 @@ router.put('/admin/reset-password', verifyToken, async (req, res) => {
   }
 });
 
-// Modificar el middleware upload para aceptar un array de archivos
-const upload = multer({ storage: storage }).array('ticket[]');
-router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
+const MAX_TICKET_IMAGES = 4;
+const MAX_TICKET_IMAGE_SIZE = 10 * 1024 * 1024;
+const ALLOWED_TICKET_IMAGE_TYPES = new Set(['image/jpeg', 'image/png']);
+
+// Multer enforces these limits while consuming the multipart stream, before
+// memoryStorage can expose a completed oversized/extra file to the route.
+const ticketImageUpload = multer({
+  storage: storage,
+  limits: {
+    files: MAX_TICKET_IMAGES,
+    fileSize: MAX_TICKET_IMAGE_SIZE
+  },
+  fileFilter: (req, file, callback) => {
+    if (!ALLOWED_TICKET_IMAGE_TYPES.has(file.mimetype)) {
+      const error = new Error('Only JPEG and PNG ticket images are allowed');
+      error.code = 'INVALID_TICKET_IMAGE_TYPE';
+      return callback(error);
+    }
+    return callback(null, true);
+  }
+}).array('ticket[]', MAX_TICKET_IMAGES);
+
+function handleTicketImageUpload(req, res, next) {
+  ticketImageUpload(req, res, (error) => {
+    if (!error) {
+      return next();
+    }
+
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json('Each ticket image must be 10 MB or less');
+    }
+    if (error.code === 'LIMIT_FILE_COUNT') {
+      return res.status(400).json(`A ticket cannot contain more than ${MAX_TICKET_IMAGES} images`);
+    }
+    if (error.code === 'LIMIT_UNEXPECTED_FILE') {
+      const message = error.field === 'ticket[]'
+        ? `A ticket cannot contain more than ${MAX_TICKET_IMAGES} images`
+        : 'Unexpected ticket image field';
+      return res.status(400).json(message);
+    }
+    if (error.code === 'INVALID_TICKET_IMAGE_TYPE') {
+      return res.status(400).json(error.message);
+    }
+
+    logger.error('Ticket image upload validation failed:', error);
+    return res.status(400).json('Invalid ticket image upload');
+  });
+}
+
+function normalizeTicketImageInteger(value) {
+  if (Number.isSafeInteger(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const normalizedValue = Number(value);
+    return Number.isSafeInteger(normalizedValue) ? normalizedValue : null;
+  }
+
+  return null;
+}
+
+function validateTicketImageUpdate({
+  existingImages,
+  deletedImageIds,
+  newImageCount,
+  imageOrderProvided,
+  imageOrder
+}) {
+  if (!Array.isArray(deletedImageIds)) {
+    return { error: 'deleted_image_ids must be an array' };
+  }
+
+  const normalizedDeletedIds = deletedImageIds.map(normalizeTicketImageInteger);
+  if (normalizedDeletedIds.some((imageId) => imageId === null || imageId <= 0)) {
+    return { error: 'deleted_image_ids contains an invalid image id' };
+  }
+
+  const deletedIdSet = new Set(normalizedDeletedIds);
+  if (deletedIdSet.size !== normalizedDeletedIds.length) {
+    return { error: 'deleted_image_ids contains duplicate image ids' };
+  }
+
+  const existingImageIdSet = new Set(existingImages.map((image) => Number(image.id)));
+  if (normalizedDeletedIds.some((imageId) => !existingImageIdSet.has(imageId))) {
+    return { error: 'One or more deleted images do not belong to this ticket' };
+  }
+
+  const remainingExistingImages = existingImages.filter(
+    (image) => !deletedIdSet.has(Number(image.id))
+  );
+  const finalImageCount = remainingExistingImages.length + newImageCount;
+
+  if (finalImageCount < 1 || finalImageCount > MAX_TICKET_IMAGES) {
+    return { error: `A ticket must contain between 1 and ${MAX_TICKET_IMAGES} images` };
+  }
+
+  if (!imageOrderProvided) {
+    return {
+      deletedImageIds: normalizedDeletedIds,
+      orderedImages: [
+        ...remainingExistingImages.map((image) => ({
+          kind: 'existing',
+          id: Number(image.id)
+        })),
+        ...Array.from({ length: newImageCount }, (_, index) => ({
+          kind: 'new',
+          index
+        }))
+      ]
+    };
+  }
+
+  if (!Array.isArray(imageOrder)) {
+    return { error: 'image_order must be an array' };
+  }
+
+  if (imageOrder.length !== finalImageCount) {
+    return { error: 'image_order must include every retained and newly uploaded image exactly once' };
+  }
+
+  const remainingExistingIdSet = new Set(
+    remainingExistingImages.map((image) => Number(image.id))
+  );
+  const orderedImages = [];
+  const orderedExistingIds = new Set();
+  const orderedNewIndexes = new Set();
+
+  for (const imageReference of imageOrder) {
+    if (!imageReference || typeof imageReference !== 'object' || Array.isArray(imageReference)) {
+      return { error: 'image_order contains an invalid image reference' };
+    }
+
+    if (imageReference.kind === 'existing') {
+      const imageId = normalizeTicketImageInteger(imageReference.id);
+      if (imageId === null || imageId <= 0 || !remainingExistingIdSet.has(imageId)) {
+        return { error: 'image_order references an invalid existing image' };
+      }
+      if (orderedExistingIds.has(imageId)) {
+        return { error: 'image_order contains a duplicate existing image' };
+      }
+
+      orderedExistingIds.add(imageId);
+      orderedImages.push({ kind: 'existing', id: imageId });
+    } else if (imageReference.kind === 'new') {
+      const imageIndex = normalizeTicketImageInteger(imageReference.index);
+      if (imageIndex === null || imageIndex < 0 || imageIndex >= newImageCount) {
+        return { error: 'image_order references an invalid new image index' };
+      }
+      if (orderedNewIndexes.has(imageIndex)) {
+        return { error: 'image_order contains a duplicate new image index' };
+      }
+
+      orderedNewIndexes.add(imageIndex);
+      orderedImages.push({ kind: 'new', index: imageIndex });
+    } else {
+      return { error: 'image_order contains an invalid image kind' };
+    }
+  }
+
+  if (
+    orderedExistingIds.size !== remainingExistingIdSet.size
+    || orderedNewIndexes.size !== newImageCount
+  ) {
+    return { error: 'image_order must include every retained and newly uploaded image exactly once' };
+  }
+
+  return {
+    deletedImageIds: normalizedDeletedIds,
+    orderedImages
+  };
+}
+
+function createTicketRequestError(status, message) {
+  const error = new Error(message);
+  error.httpStatus = status;
+  return error;
+}
+
+function assertSingleAffectedRow(result, message) {
+  if (!result || result.affectedRows !== 1) {
+    throw new Error(message);
+  }
+}
+
+async function deleteTicketImageObjectsBestEffort(objectKeys, context) {
+  const uniqueKeys = [...new Set(
+    objectKeys.filter((key) => typeof key === 'string' && key.length > 0)
+  )];
+
+  if (uniqueKeys.length === 0) {
+    return true;
+  }
+
+  try {
+    const result = await s3.send(new DeleteObjectsCommand({
+      Bucket: bucketName,
+      Delete: {
+        Objects: uniqueKeys.map((key) => ({ Key: key })),
+        Quiet: false
+      }
+    }));
+
+    if (result.Errors && result.Errors.length > 0) {
+      logger.error(`${context}: S3 reported image deletion errors`, result.Errors);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    logger.error(`${context}: could not delete ticket images from S3`, error);
+    return false;
+  }
+}
+
+router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
     try {
       if (req.files && req.files.length > 0) {
-        formulario = JSON.parse(req.body.form);
+        if (req.files.length > MAX_TICKET_IMAGES) {
+          return res.status(400).json(`A ticket cannot contain more than ${MAX_TICKET_IMAGES} images`);
+        }
+
+        let formulario;
+        try {
+          formulario = JSON.parse(req.body.form);
+        } catch (error) {
+          return res.status(400).json('Invalid ticket form');
+        }
+        const postDeletedImageIds = Object.prototype.hasOwnProperty.call(formulario, 'deleted_image_ids')
+          ? formulario.deleted_image_ids
+          : [];
+        const postImageOrderProvided = Object.prototype.hasOwnProperty.call(formulario, 'image_order');
+        const postImageValidation = validateTicketImageUpdate({
+          existingImages: [],
+          deletedImageIds: postDeletedImageIds,
+          newImageCount: req.files.length,
+          imageOrderProvided: postImageOrderProvided,
+          imageOrder: formulario.image_order
+        });
+
+        if (postImageValidation.error) {
+          return res.status(400).json(postImageValidation.error);
+        }
+
+        const postDisplayOrderByNewIndex = new Map(
+          postImageValidation.orderedImages.map((imageReference, displayIndex) => [
+            imageReference.index,
+            displayIndex + 1
+          ])
+        );
 
         const donation_id = formulario.donation_id || null;
         const total_weight = formulario.total_weight || null;
@@ -986,7 +1229,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         var products = formulario.products || [];
         var date = null;
         if (formulario.date) {
-          fecha = new Date(formulario.date);
+          const fecha = new Date(formulario.date);
           // Formatear la fecha en el formato deseado (YYYY-MM-DD)
           date = fecha.toISOString().slice(0, 10);
         }
@@ -1074,7 +1317,7 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           } catch (error) {
             console.log(error);
             logger.error(error);
-            res.status(500).json('Could not create product_donation_ticket');
+            return res.status(500).json('Could not create product_donation_ticket');
           }
           try {
             for (let i = 0; i < req.files.length; i++) {
@@ -1089,14 +1332,14 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
               const commandLogo = new PutObjectCommand(paramsLogo);
               const uploadLogo = await s3.send(commandLogo);
               await mysqlConnection.promise().query(
-                'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
-                [donation_ticket_id, req.files[i].filename]
+                'insert into donation_ticket_image(donation_ticket_id, file, display_order) values(?,?,?)',
+                [donation_ticket_id, req.files[i].filename, postDisplayOrderByNewIndex.get(i)]
               );
             }
           } catch (error) {
             console.log(error);
             logger.error(error);
-            res.status(500).json('Could not upload image');
+            return res.status(500).json('Could not upload image');
           }
           try {
             // insertar en stocker_log la operation 5 (create), el ticket insertado y el id del usuario logueado
@@ -1107,10 +1350,10 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
           } catch (error) {
             console.log(error);
             logger.error(error);
-            res.status(500).json('Could not create stocker_log');
+            return res.status(500).json('Could not create stocker_log');
           }
         } else {
-          res.status(500).json('Not ticket inserted');
+          return res.status(500).json('Not ticket inserted');
         }
         res.status(200).json('Data inserted successfully');
 
@@ -1205,228 +1448,320 @@ router.post('/upload/ticket', verifyToken, upload, async (req, res) => {
         }
         return;
       } else {
-        res.status(400).json('Donation ticket image is required');
+        return res.status(400).json('Donation ticket image is required');
       }
     } catch (error) {
       console.log(error);
       logger.error(error);
-      res.status(500).json('Internal server error');
+      if (!res.headersSent) {
+        return res.status(500).json('Internal server error');
+      }
+      return;
     }
   } else {
-    res.status(401).json('Unauthorized');
+    return res.status(401).json('Unauthorized');
   }
 });
 
-router.put('/upload/ticket/:id', verifyToken, upload, async (req, res) => {
+router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
-    try {
-      const id = req.params.id || null;
-      formulario = JSON.parse(req.body.form);
-
-      // Handle selective image deletion
-      const deleted_image_ids = formulario.deleted_image_ids || [];
-
-      // Delete specific images if requested
-      if (deleted_image_ids.length > 0) {
-        // Get files to delete from S3
-        const [rows_files_to_delete] = await mysqlConnection
-          .promise()
-          .execute(
-            "SELECT file FROM donation_ticket_image WHERE id IN (" + deleted_image_ids.map(() => '?').join(',') + ")",
-            deleted_image_ids
-          );
-
-        if (rows_files_to_delete.length > 0) {
-          const params = {
-            Bucket: bucketName,
-            Delete: {
-              Objects: [],
-              Quiet: false,
-            },
-          };
-
-          // Add files to delete from S3
-          for (let row of rows_files_to_delete) {
-            if (row.file !== null && row.file !== "" && row.file !== undefined) {
-              params.Delete.Objects.push({
-                Key: row.file,
-              });
-            }
-          }
-
-          try {
-            if (params.Delete.Objects.length > 0) {
-              const command = new DeleteObjectsCommand(params);
-              await s3.send(command);
-            }
-
-            // Delete specific images from database
-            await mysqlConnection.promise().execute(
-              "DELETE FROM donation_ticket_image WHERE id IN (" + deleted_image_ids.map(() => '?').join(',') + ")",
-              deleted_image_ids
-            );
-          } catch (error) {
-            console.log(error);
-            logger.error(error);
-            return res.status(500).json('Could not delete selected images');
-          }
-        }
-      }
-
-      // Upload new images if provided
-      if (req.files && req.files.length > 0) {
-        try {
-          for (let i = 0; i < req.files.length; i++) {
-            // renombrar cada archivo con un nombre aleatorio
-            req.files[i].filename = randomImageName();
-            const paramsLogo = {
-              Bucket: bucketName,
-              Key: req.files[i].filename,
-              Body: req.files[i].buffer,
-              ContentType: req.files[i].mimetype,
-            };
-            const commandLogo = new PutObjectCommand(paramsLogo);
-            const uploadLogo = await s3.send(commandLogo);
-            await mysqlConnection.promise().query(
-              'insert into donation_ticket_image(donation_ticket_id, file) values(?,?)',
-              [id, req.files[i].filename]
-            );
-          }
-        } catch (error) {
-          console.log(error);
-          logger.error(error);
-          return res.status(500).json('Could not upload new images');
-        }
-      }
-      const donation_id = formulario.donation_id || null;
-      const total_weight = formulario.total_weight || null;
-      var provider = formulario.provider || null;
-      var transported_by = formulario.transported_by || null;
-      const destination = formulario.destination || null;
-      const audit_status = formulario.audit_status || null;
-      const notes = formulario.notes || null;
-      var delivered_by = formulario.delivered_by || null;
-      var products = formulario.products || [];
-      var date = null;
-      if (formulario.date) {
-        fecha = new Date(formulario.date);
-        // Formatear la fecha en el formato deseado (YYYY-MM-DD)
-        date = fecha.toISOString().slice(0, 10);
-      }
-      if (!Number.isInteger(provider)) {
-        const [rows_insert_provider] = await mysqlConnection.promise().query(
-          'insert into provider(name) values(?)',
-          [provider]
-        );
-        provider = rows_insert_provider.insertId;
-        // insertar en stocker_log la operation 5 (create), el provider insertado y el id del usuario logueado
-        const [rows2] = await mysqlConnection.promise().query(
-          'insert into stocker_log(user_id, operation_id, provider_id) values(?,?,?)',
-          [cabecera.id, 5, provider]
-        );
-      }
-      if (!Number.isInteger(transported_by)) {
-        const [rows_insert_transported_by] = await mysqlConnection.promise().query(
-          'insert into transported_by(name) values(?)',
-          [transported_by]
-        );
-        transported_by = rows_insert_transported_by.insertId;
-        // insertar en stocker_log la operation 5 (create), el transported_by insertado y el id del usuario logueado
-        const [rows2] = await mysqlConnection.promise().query(
-          'insert into stocker_log(user_id, operation_id, transported_by_id) values(?,?,?)',
-          [cabecera.id, 5, transported_by]
-        );
-      }
-      if (!Number.isInteger(delivered_by)) {
-        const [rows_insert_delivered_by] = await mysqlConnection.promise().query(
-          'insert into delivered_by(name) values(?)',
-          [delivered_by]
-        );
-        delivered_by = rows_insert_delivered_by.insertId;
-        // insertar en stocker_log la operation 5 (create), el delivered_by insertado y el id del usuario logueado
-        const [rows2] = await mysqlConnection.promise().query(
-          'insert into stocker_log(user_id, operation_id, delivered_by_id) values(?,?,?)',
-          [cabecera.id, 5, delivered_by]
-        );
-      }
-
-      // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
-      for (let i = 0; i < products.length; i++) {
-        if (!Number.isInteger(products[i].product)) {
-          const [rows] = await mysqlConnection.promise().query(
-            'insert into product(name,product_type_id) values(?,?)',
-            [products[i].product, products[i].product_type]
-          );
-          products[i].product = rows.insertId;
-          // insertar en stocker_log la operation 5 (create), el product insertado y el id del usuario logueado
-          const [rows2] = await mysqlConnection.promise().query(
-            'insert into stocker_log(user_id, operation_id, product_id) values(?,?,?)',
-            [cabecera.id, 5, products[i].product]
-          );
-        }
-      }
-      // insertar en donation_ticket_note si notes no es null
-      if (notes) {
-        await mysqlConnection.promise().query(
-          'insert into donation_ticket_note(donation_ticket_id, user_id, note) values(?,?,?)',
-          [id, cabecera.id, notes]
-        );
-      }
-      let query = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, transported_by_id = ?, location_id = ?, date = ?, delivered_by = ?';
-      let parametros_update_donation_ticket = [donation_id, total_weight, provider, transported_by, destination, date, delivered_by];
-
-      if (audit_status !== null) {
-        query += ', audit_status_id = ?';
-        parametros_update_donation_ticket.push(audit_status);
-      }
-
-      query += ' WHERE id = ?';
-      parametros_update_donation_ticket.push(id);
-
-      const [rows_update_ticket] = await mysqlConnection.promise().query(query, parametros_update_donation_ticket);
-
-      try {
-        // delete all product_donation_ticket records for the ticket
-        await mysqlConnection.promise().query(
-          'delete from product_donation_ticket where donation_ticket_id = ?',
-          [id]
-        );
-
-        for (let i = 0; i < products.length; i++) {
-          await mysqlConnection.promise().query(
-            'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
-            [products[i].product, id, products[i].quantity]
-          );
-        }
-      } catch (error) {
-        console.log(error);
-        logger.error(error);
-        res.status(500).json('Could not create product_donation_ticket');
-      }
-
-      try {
-        // insertar en stocker_log la operation 6 (edit), el ticket insertado y el id del usuario logueado
-        const [rows2] = await mysqlConnection.promise().query(
-          'insert into stocker_log(user_id, operation_id, donation_ticket_id, audit_status_id) values(?,?,?,?)',
-          [cabecera.id, 6, id, audit_status]
-        );
-      } catch (error) {
-        console.log(error);
-        logger.error(error);
-        res.status(500).json('Could not create stocker_log');
-      }
-
-      res.status(200).json('Data edited successfully');
-
-    } catch (error) {
-      console.log(error);
-      logger.error(error);
-      res.status(500).json('Internal server error');
-    }
-  } else {
-    res.status(401).json('Unauthorized');
+  if (
+    cabecera.role !== 'admin'
+    && cabecera.role !== 'opsmanager'
+    && cabecera.role !== 'stocker'
+    && cabecera.role !== 'auditor'
+  ) {
+    return res.status(401).json('Unauthorized');
   }
+
+  let formulario;
+  try {
+    formulario = JSON.parse(req.body.form);
+  } catch (error) {
+    return res.status(400).json('Invalid ticket form');
+  }
+
+  const id = req.params.id || null;
+  const newImageFiles = req.files || [];
+  const uploadedNewImageKeys = [];
+  const oldImageKeysToDelete = [];
+  let connection = null;
+  let transactionStarted = false;
+  let transactionCommitted = false;
+  let requestError = null;
+
+  try {
+    const donation_id = formulario.donation_id || null;
+    const total_weight = formulario.total_weight || null;
+    let provider = formulario.provider || null;
+    let transported_by = formulario.transported_by || null;
+    const destination = formulario.destination || null;
+    const audit_status = formulario.audit_status || null;
+    const notes = formulario.notes || null;
+    let delivered_by = formulario.delivered_by || null;
+    const products = formulario.products || [];
+    let date = null;
+
+    if (!Array.isArray(products)) {
+      throw createTicketRequestError(400, 'products must be an array');
+    }
+
+    if (formulario.date) {
+      const parsedDate = new Date(formulario.date);
+      if (Number.isNaN(parsedDate.getTime())) {
+        throw createTicketRequestError(400, 'Invalid ticket date');
+      }
+      date = parsedDate.toISOString().slice(0, 10);
+    }
+
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const [ticketRows] = await connection.query(
+      `SELECT id
+       FROM donation_ticket
+       WHERE id = ? AND enabled = 'Y'
+       FOR UPDATE`,
+      [id]
+    );
+    if (ticketRows.length === 0) {
+      throw createTicketRequestError(404, 'Ticket not found');
+    }
+
+    const [existingImages] = await connection.query(
+      `SELECT id, file, display_order
+       FROM donation_ticket_image
+       WHERE donation_ticket_id = ?
+       ORDER BY (display_order = 0) ASC, display_order ASC, id ASC
+       FOR UPDATE`,
+      [id]
+    );
+    const deletedImageIds = Object.prototype.hasOwnProperty.call(formulario, 'deleted_image_ids')
+      ? formulario.deleted_image_ids
+      : [];
+    const imageOrderProvided = Object.prototype.hasOwnProperty.call(formulario, 'image_order');
+    const imageValidation = validateTicketImageUpdate({
+      existingImages,
+      deletedImageIds,
+      newImageCount: newImageFiles.length,
+      imageOrderProvided,
+      imageOrder: formulario.image_order
+    });
+    if (imageValidation.error) {
+      throw createTicketRequestError(400, imageValidation.error);
+    }
+
+    const deletedImageIdSet = new Set(imageValidation.deletedImageIds);
+    for (const image of existingImages) {
+      if (deletedImageIdSet.has(Number(image.id)) && image.file) {
+        oldImageKeysToDelete.push(image.file);
+      }
+    }
+
+    if (!Number.isInteger(provider)) {
+      const [insertedProvider] = await connection.query(
+        'insert into provider(name) values(?)',
+        [provider]
+      );
+      assertSingleAffectedRow(insertedProvider, 'Could not create provider');
+      provider = insertedProvider.insertId;
+
+      const [providerLog] = await connection.query(
+        'insert into stocker_log(user_id, operation_id, provider_id) values(?,?,?)',
+        [cabecera.id, 5, provider]
+      );
+      assertSingleAffectedRow(providerLog, 'Could not create provider stocker_log');
+    }
+
+    if (!Number.isInteger(transported_by)) {
+      const [insertedTransportedBy] = await connection.query(
+        'insert into transported_by(name) values(?)',
+        [transported_by]
+      );
+      assertSingleAffectedRow(insertedTransportedBy, 'Could not create transported_by');
+      transported_by = insertedTransportedBy.insertId;
+
+      const [transportedByLog] = await connection.query(
+        'insert into stocker_log(user_id, operation_id, transported_by_id) values(?,?,?)',
+        [cabecera.id, 5, transported_by]
+      );
+      assertSingleAffectedRow(transportedByLog, 'Could not create transported_by stocker_log');
+    }
+
+    if (!Number.isInteger(delivered_by)) {
+      const [insertedDeliveredBy] = await connection.query(
+        'insert into delivered_by(name) values(?)',
+        [delivered_by]
+      );
+      assertSingleAffectedRow(insertedDeliveredBy, 'Could not create delivered_by');
+      delivered_by = insertedDeliveredBy.insertId;
+
+      const [deliveredByLog] = await connection.query(
+        'insert into stocker_log(user_id, operation_id, delivered_by_id) values(?,?,?)',
+        [cabecera.id, 5, delivered_by]
+      );
+      assertSingleAffectedRow(deliveredByLog, 'Could not create delivered_by stocker_log');
+    }
+
+    for (let productIndex = 0; productIndex < products.length; productIndex++) {
+      if (!Number.isInteger(products[productIndex].product)) {
+        const [insertedProduct] = await connection.query(
+          'insert into product(name,product_type_id) values(?,?)',
+          [products[productIndex].product, products[productIndex].product_type]
+        );
+        assertSingleAffectedRow(insertedProduct, 'Could not create product');
+        products[productIndex].product = insertedProduct.insertId;
+
+        const [productLog] = await connection.query(
+          'insert into stocker_log(user_id, operation_id, product_id) values(?,?,?)',
+          [cabecera.id, 5, products[productIndex].product]
+        );
+        assertSingleAffectedRow(productLog, 'Could not create product stocker_log');
+      }
+    }
+
+    if (notes) {
+      const [insertedNote] = await connection.query(
+        'insert into donation_ticket_note(donation_ticket_id, user_id, note) values(?,?,?)',
+        [id, cabecera.id, notes]
+      );
+      assertSingleAffectedRow(insertedNote, 'Could not create donation_ticket_note');
+    }
+
+    let ticketUpdateQuery = 'UPDATE donation_ticket SET donation_id = ?, total_weight = ?, provider_id = ?, transported_by_id = ?, location_id = ?, date = ?, delivered_by = ?';
+    const ticketUpdateParameters = [
+      donation_id,
+      total_weight,
+      provider,
+      transported_by,
+      destination,
+      date,
+      delivered_by
+    ];
+
+    if (audit_status !== null) {
+      ticketUpdateQuery += ', audit_status_id = ?';
+      ticketUpdateParameters.push(audit_status);
+    }
+
+    ticketUpdateQuery += " WHERE id = ? AND enabled = 'Y'";
+    ticketUpdateParameters.push(id);
+
+    const [updatedTicket] = await connection.query(
+      ticketUpdateQuery,
+      ticketUpdateParameters
+    );
+    assertSingleAffectedRow(updatedTicket, 'Could not update donation ticket');
+
+    await connection.query(
+      'delete from product_donation_ticket where donation_ticket_id = ?',
+      [id]
+    );
+
+    for (const product of products) {
+      const [insertedTicketProduct] = await connection.query(
+        'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
+        [product.product, id, product.quantity]
+      );
+      assertSingleAffectedRow(insertedTicketProduct, 'Could not create product_donation_ticket');
+    }
+
+    const newImageIds = [];
+    for (let imageIndex = 0; imageIndex < newImageFiles.length; imageIndex++) {
+      const file = newImageFiles[imageIndex];
+      const imageKey = randomImageName();
+      file.filename = imageKey;
+      uploadedNewImageKeys.push(imageKey);
+
+      await s3.send(new PutObjectCommand({
+        Bucket: bucketName,
+        Key: imageKey,
+        Body: file.buffer,
+        ContentType: file.mimetype
+      }));
+
+      const [insertedImage] = await connection.query(
+        'insert into donation_ticket_image(donation_ticket_id, file, display_order) values(?,?,?)',
+        [id, imageKey, existingImages.length + imageIndex + 1]
+      );
+      assertSingleAffectedRow(insertedImage, 'Could not create donation_ticket_image');
+      newImageIds[imageIndex] = insertedImage.insertId;
+    }
+
+    if (imageValidation.deletedImageIds.length > 0) {
+      const [deletedImages] = await connection.query(
+        "DELETE FROM donation_ticket_image WHERE donation_ticket_id = ? AND id IN (" + imageValidation.deletedImageIds.map(() => '?').join(',') + ")",
+        [id, ...imageValidation.deletedImageIds]
+      );
+      if (deletedImages.affectedRows !== imageValidation.deletedImageIds.length) {
+        throw new Error('Could not delete all selected ticket images');
+      }
+    }
+
+    for (let imageIndex = 0; imageIndex < imageValidation.orderedImages.length; imageIndex++) {
+      const imageReference = imageValidation.orderedImages[imageIndex];
+      const imageId = imageReference.kind === 'existing'
+        ? imageReference.id
+        : newImageIds[imageReference.index];
+
+      const [updatedImage] = await connection.query(
+        `UPDATE donation_ticket_image
+         SET display_order = ?
+         WHERE id = ? AND donation_ticket_id = ?`,
+        [imageIndex + 1, imageId, id]
+      );
+      assertSingleAffectedRow(updatedImage, 'Could not update ticket image order');
+    }
+
+    const [ticketLog] = await connection.query(
+      'insert into stocker_log(user_id, operation_id, donation_ticket_id, audit_status_id) values(?,?,?,?)',
+      [cabecera.id, 6, id, audit_status]
+    );
+    assertSingleAffectedRow(ticketLog, 'Could not create ticket stocker_log');
+
+    await connection.commit();
+    transactionCommitted = true;
+  } catch (error) {
+    requestError = error;
+
+    if (connection && transactionStarted && !transactionCommitted) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        logger.error('Could not roll back ticket update transaction:', rollbackError);
+      }
+    }
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+
+  if (requestError) {
+    if (!transactionCommitted && uploadedNewImageKeys.length > 0) {
+      await deleteTicketImageObjectsBestEffort(
+        uploadedNewImageKeys,
+        'Ticket update rollback cleanup'
+      );
+    }
+
+    const status = requestError.httpStatus || 500;
+    if (status >= 500) {
+      console.log(requestError);
+      logger.error(requestError);
+    }
+    return res.status(status).json(
+      status >= 500 ? 'Internal server error' : requestError.message
+    );
+  }
+
+  await deleteTicketImageObjectsBestEffort(
+    oldImageKeysToDelete,
+    'Ticket update post-commit cleanup'
+  );
+
+  return res.status(200).json('Data edited successfully');
 });
 
 router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
@@ -1513,7 +1848,10 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
 
         // Fetch images with public S3 URLs
         const [rows_images] = await mysqlConnection.promise().query(
-          `SELECT id, file FROM donation_ticket_image WHERE donation_ticket_id = ?`,
+          `SELECT id, file, display_order
+           FROM donation_ticket_image
+           WHERE donation_ticket_id = ?
+           ORDER BY (display_order = 0) ASC, display_order ASC, id ASC`,
           [id]
         );
 
@@ -1530,14 +1868,16 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
 
               newTicket.images.push({
                 id: image.id,
-                url: url
+                url: url,
+                display_order: image.display_order
               });
             } catch (error) {
               console.log('Error generating signed URL for image:', image.file, error);
               // Still add the image with a placeholder or skip it
               newTicket.images.push({
                 id: image.id,
-                url: null
+                url: null,
+                display_order: image.display_order
               });
             }
           }
@@ -22932,9 +23272,10 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
 
     const [rows] = await mysqlConnection.promise().query(`
-                          select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
+                          select id, file, display_order, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
                           from donation_ticket_image \
-                          where donation_ticket_id = ?`, [idTicket]);
+                          where donation_ticket_id = ?
+                          ORDER BY (display_order = 0) ASC, display_order ASC, id ASC`, [idTicket]);
 
     if (rows.length > 0) {
       for (let i = 0; i < rows.length; i++) {
