@@ -32,6 +32,48 @@ function parseUsDate(value) {
   return Date.UTC(year, month - 1, day);
 }
 
+function addTicketDestinationCsvColumns(row) {
+  let destinations = row.destinations_json;
+  if (Buffer.isBuffer(destinations)) {
+    destinations = destinations.toString('utf8');
+  }
+  if (typeof destinations === 'string') {
+    try {
+      destinations = JSON.parse(destinations);
+    } catch (error) {
+      destinations = [];
+    }
+  }
+  if (!Array.isArray(destinations)) {
+    destinations = [];
+  }
+
+  destinations.sort((left, right) => (
+    Number(left.display_order) - Number(right.display_order)
+    || Number(left.relation_id) - Number(right.relation_id)
+  ));
+
+  return {
+    ...row,
+    destination_ids: destinations
+      .map((destination) => destination.location_id)
+      .join(', '),
+    destinations: destinations
+      .map((destination) => destination.location || `#${destination.location_id}`)
+      .join(' | '),
+    destination_weights: destinations
+      .map((destination) => {
+        const location = destination.location || `#${destination.location_id}`;
+        const weight = destination.total_weight === null
+          || destination.total_weight === undefined
+          ? ''
+          : destination.total_weight;
+        return `${location} [${destination.location_id}]: ${weight} lb`;
+      })
+      .join(' | ')
+  };
+}
+
 async function generateVolunteerTableCsv() {
   const [rows] = await mysqlConnection.promise().query(
     `SELECT
@@ -119,11 +161,16 @@ async function generateWorkerTableCsv() {
 }
 
 async function generateTicketTableCsvs() {
-  const [rows] = await mysqlConnection.promise().query(
-    `SELECT
+  const [ticketRows, ticketFoodRows] = await Promise.all([
+    mysqlConnection.promise().query(
+      `SELECT
         dt.id,
         dt.donation_id,
         dt.total_weight,
+        dtl.location_id,
+        dtl.total_weight AS location_total_weight,
+        dtl.display_order AS location_display_order,
+        dtl.id AS location_relation_id,
         p.id AS provider_id,
         p.name AS provider,
         loc.community_city AS location,
@@ -134,33 +181,139 @@ async function generateTicketTableCsvs() {
         u.id AS created_by_id,
         u.username AS created_by_username,
         DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
-        DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
-        product.id AS product_id,
-        product.name AS product,
-        pt.name AS product_type,
-        pdt.quantity AS quantity
+        DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time
       FROM donation_ticket AS dt
       LEFT JOIN stocker_log AS sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
       LEFT JOIN delivered_by AS db ON dt.delivered_by = db.id
       LEFT JOIN transported_by AS tb ON dt.transported_by_id = tb.id
       LEFT JOIN provider AS p ON dt.provider_id = p.id
       LEFT JOIN audit_status AS as1 ON dt.audit_status_id = as1.id
-      LEFT JOIN location AS loc ON dt.location_id = loc.id
+      INNER JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
+      INNER JOIN location AS loc ON dtl.location_id = loc.id
       LEFT JOIN user AS u ON sl.user_id = u.id
-      LEFT JOIN product_donation_ticket AS pdt ON dt.id = pdt.donation_ticket_id
-      LEFT JOIN product AS product ON pdt.product_id = product.id
-      LEFT JOIN product_type AS pt ON product.product_type_id = pt.id
       WHERE dt.enabled = 'Y'
-      ORDER BY dt.date, dt.id, pdt.id`
-  );
+      ORDER BY dt.date, dt.id, dtl.display_order, dtl.id`
+    ),
+    mysqlConnection.promise().query(
+      `WITH visible_ticket_destinations AS (
+         SELECT
+           dtl.donation_ticket_id,
+           JSON_ARRAYAGG(
+             JSON_OBJECT(
+               'location_id', dtl.location_id,
+               'location', loc.community_city,
+               'total_weight', dtl.total_weight,
+               'display_order', dtl.display_order,
+               'relation_id', dtl.id
+             )
+           ) AS destinations_json
+         FROM donation_ticket_location AS dtl
+         INNER JOIN location AS loc ON dtl.location_id = loc.id
+         GROUP BY dtl.donation_ticket_id
+       ),
+       ticket_products AS (
+         SELECT
+           donation_ticket_id,
+           product_id,
+           SUM(quantity) AS quantity,
+           MIN(id) AS sort_id
+         FROM product_donation_ticket
+         GROUP BY donation_ticket_id, product_id
+       )
+       SELECT
+         dt.id,
+         dt.donation_id,
+         dt.total_weight,
+         destinations.destinations_json,
+         p.id AS provider_id,
+         p.name AS provider,
+         DATE_FORMAT(dt.date, '%m/%d/%Y') AS date,
+         db.name AS delivered_by,
+         tb.name AS transported_by,
+         as1.name AS audit_status,
+         u.id AS created_by_id,
+         u.username AS created_by_username,
+         DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+         DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+         product.id AS product_id,
+         product.name AS product,
+         pt.name AS product_type,
+         ticket_product.quantity
+       FROM donation_ticket AS dt
+       LEFT JOIN stocker_log AS sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+       LEFT JOIN delivered_by AS db ON dt.delivered_by = db.id
+       LEFT JOIN transported_by AS tb ON dt.transported_by_id = tb.id
+       LEFT JOIN provider AS p ON dt.provider_id = p.id
+       LEFT JOIN audit_status AS as1 ON dt.audit_status_id = as1.id
+       INNER JOIN visible_ticket_destinations AS destinations
+         ON dt.id = destinations.donation_ticket_id
+       LEFT JOIN user AS u ON sl.user_id = u.id
+       LEFT JOIN ticket_products AS ticket_product
+         ON dt.id = ticket_product.donation_ticket_id
+       LEFT JOIN product AS product ON ticket_product.product_id = product.id
+       LEFT JOIN product_type AS pt ON product.product_type_id = pt.id
+       WHERE dt.enabled = 'Y'
+       ORDER BY dt.date, dt.id, ticket_product.sort_id`
+    )
+  ]);
 
-  const headers = [
+  const uniqueTicketLocations = new Set();
+  const ticketsWithGeneralWeight = new Set();
+  const rows = ticketRows[0].reduce((result, row) => {
+    const key = `${row.id}:${row.location_id}`;
+    if (uniqueTicketLocations.has(key)) {
+      return result;
+    }
+
+    uniqueTicketLocations.add(key);
+    const isFirstDestination = !ticketsWithGeneralWeight.has(row.id);
+    ticketsWithGeneralWeight.add(row.id);
+    result.push({
+      ...row,
+      total_weight: isFirstDestination ? row.total_weight : ''
+    });
+    return result;
+  }, []);
+
+  const uniqueTicketProducts = new Set();
+  const foodRows = ticketFoodRows[0].map(addTicketDestinationCsvColumns).filter((row) => {
+    const key = `${row.id}:${row.product_id ?? 'no-product'}`;
+    if (uniqueTicketProducts.has(key)) {
+      return false;
+    }
+
+    uniqueTicketProducts.add(key);
+    return true;
+  });
+
+  const ticketHeaders = [
     { id: 'id', title: 'ID' },
     { id: 'donation_id', title: 'Donation ID' },
     { id: 'total_weight', title: 'Total weight' },
+    { id: 'location_id', title: 'Location ID' },
+    { id: 'location_total_weight', title: 'Location total weight' },
     { id: 'provider_id', title: 'Provider ID' },
     { id: 'provider', title: 'Provider' },
     { id: 'location', title: 'Location' },
+    { id: 'date', title: 'Date' },
+    { id: 'delivered_by', title: 'Delivered by' },
+    { id: 'transported_by', title: 'Transported by' },
+    { id: 'audit_status', title: 'Audit status' },
+    { id: 'created_by_id', title: 'Created by ID' },
+    { id: 'created_by_username', title: 'Created by username' },
+    { id: 'creation_date', title: 'Creation date' },
+    { id: 'creation_time', title: 'Creation time' }
+  ];
+
+  const foodHeaders = [
+    { id: 'id', title: 'ID' },
+    { id: 'donation_id', title: 'Donation ID' },
+    { id: 'total_weight', title: 'Total weight' },
+    { id: 'destination_ids', title: 'Destination IDs' },
+    { id: 'destinations', title: 'Destinations' },
+    { id: 'destination_weights', title: 'Destination weights' },
+    { id: 'provider_id', title: 'Provider ID' },
+    { id: 'provider', title: 'Provider' },
     { id: 'date', title: 'Date' },
     { id: 'delivered_by', title: 'Delivered by' },
     { id: 'transported_by', title: 'Transported by' },
@@ -175,29 +328,15 @@ async function generateTicketTableCsvs() {
     { id: 'quantity', title: 'Quantity' }
   ];
 
-  const headersWithoutProduct = headers.filter(
-    header => !['product_id', 'product', 'product_type', 'quantity'].includes(header.id)
-  );
-
-  const uniqueTicketIds = new Set();
-  const uniqueRows = rows.filter(row => {
-    if (uniqueTicketIds.has(row.id)) {
-      return false;
-    }
-
-    uniqueTicketIds.add(row.id);
-    return true;
-  });
-
   return {
     tickets: {
-      body: createCsvReadableFromRows(headersWithoutProduct, uniqueRows),
-      getRowCount: () => uniqueRows.length,
+      body: createCsvReadableFromRows(ticketHeaders, rows),
+      getRowCount: () => rows.length,
       fileName: 'tickets.csv'
     },
     ticketsWithFood: {
-      body: createCsvReadableFromRows(headers, rows),
-      getRowCount: () => rows.length,
+      body: createCsvReadableFromRows(foodHeaders, foodRows),
+      getRowCount: () => foodRows.length,
       fileName: 'tickets-with-food.csv'
     }
   };

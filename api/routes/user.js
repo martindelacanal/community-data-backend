@@ -1151,6 +1151,199 @@ function assertSingleAffectedRow(result, message) {
   }
 }
 
+function normalizeTicketLocationId(value) {
+  const locationId = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : NaN);
+
+  return Number.isSafeInteger(locationId) && locationId > 0 ? locationId : null;
+}
+
+function normalizePositiveIntegerArray(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(new Set(
+    value
+      .map((item) => typeof item === 'number' ? item : Number(item))
+      .filter((item) => Number.isSafeInteger(item) && item > 0)
+  ));
+}
+
+function parseTicketDestinationAggregate(value) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (Buffer.isBuffer(value)) {
+    value = value.toString('utf8');
+  }
+
+  if (typeof value !== 'string' || value.length === 0) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    logger.error('Could not parse aggregated ticket destinations', error);
+    return [];
+  }
+}
+
+function addTicketDestinationCsvColumns(row) {
+  const destinations = parseTicketDestinationAggregate(row.destinations_json)
+    .sort((left, right) => (
+      Number(left.display_order) - Number(right.display_order)
+      || Number(left.relation_id) - Number(right.relation_id)
+    ));
+
+  return {
+    ...row,
+    destination_ids: destinations
+      .map((destination) => destination.location_id)
+      .join(', '),
+    destinations: destinations
+      .map((destination) => destination.location || `#${destination.location_id}`)
+      .join(' | '),
+    destination_weights: destinations
+      .map((destination) => {
+        const location = destination.location || `#${destination.location_id}`;
+        const weight = destination.total_weight === null
+          || destination.total_weight === undefined
+          ? ''
+          : destination.total_weight;
+        return `${location} [${destination.location_id}]: ${weight} lb`;
+      })
+      .join(' | ')
+  };
+}
+
+function normalizeTicketLocationWeight(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const normalizedValue = typeof value === 'number'
+    ? String(value)
+    : String(value).trim();
+  const hasAtMostTwoDecimals = /^(?:\d+(?:\.\d{1,2})?|\.\d{1,2})$/.test(normalizedValue);
+  const weight = Number(normalizedValue);
+
+  return Number.isFinite(weight)
+    && weight >= 0
+    && weight <= 9999999999.99
+    && hasAtMostTwoDecimals
+    ? weight
+    : null;
+}
+
+/**
+ * New clients send `destinations`, while the legacy mobile/web clients send
+ * one scalar `destination`. Keeping both inputs makes the database migration
+ * deployable before the frontend without dropping or inventing destinations.
+ */
+function normalizeTicketDestinations(formulario) {
+  let rawDestinations;
+
+  if (Array.isArray(formulario.destinations) && formulario.destinations.length > 0) {
+    rawDestinations = formulario.destinations;
+  } else if (Array.isArray(formulario.destination)) {
+    rawDestinations = formulario.destination.map((locationId) => ({
+      location_id: locationId,
+      total_weight: formulario.destination.length === 1 ? formulario.total_weight : null
+    }));
+  } else if (formulario.destination !== null && formulario.destination !== undefined && formulario.destination !== '') {
+    rawDestinations = [{
+      location_id: formulario.destination,
+      total_weight: formulario.total_weight
+    }];
+  } else {
+    throw createTicketRequestError(400, 'At least one destination is required');
+  }
+
+  const normalizedDestinations = [];
+  const locationIds = new Set();
+
+  for (let index = 0; index < rawDestinations.length; index++) {
+    const rawDestination = rawDestinations[index];
+    const locationId = normalizeTicketLocationId(
+      rawDestination && typeof rawDestination === 'object'
+        ? (rawDestination.location_id ?? rawDestination.id ?? rawDestination.destination)
+        : rawDestination
+    );
+    const locationWeight = normalizeTicketLocationWeight(
+      rawDestination && typeof rawDestination === 'object'
+        ? rawDestination.total_weight
+        : (rawDestinations.length === 1 ? formulario.total_weight : null)
+    );
+
+    if (!locationId) {
+      throw createTicketRequestError(400, `destinations[${index}].location_id must be a positive integer`);
+    }
+    if (locationWeight === null) {
+      throw createTicketRequestError(
+        400,
+        `destinations[${index}].total_weight must be between 0 and 9999999999.99 with at most two decimal places`
+      );
+    }
+    if (locationIds.has(locationId)) {
+      throw createTicketRequestError(400, 'A destination can only be selected once');
+    }
+
+    locationIds.add(locationId);
+    normalizedDestinations.push({
+      location_id: locationId,
+      total_weight: locationWeight,
+      display_order: index + 1
+    });
+  }
+
+  return normalizedDestinations;
+}
+
+async function assertTicketDestinationLocationsExist(connection, destinations) {
+  const locationIds = destinations.map((destination) => destination.location_id);
+  const [rows] = await connection.query(
+    `SELECT id
+     FROM location
+     WHERE id IN (${locationIds.map(() => '?').join(',')})`,
+    locationIds
+  );
+  const existingIds = new Set(rows.map((row) => Number(row.id)));
+  const missingIds = locationIds.filter((locationId) => !existingIds.has(locationId));
+
+  if (missingIds.length > 0) {
+    throw createTicketRequestError(400, `Unknown destination location: ${missingIds.join(', ')}`);
+  }
+}
+
+async function replaceTicketDestinations(connection, donationTicketId, destinations) {
+  await connection.query(
+    'DELETE FROM donation_ticket_location WHERE donation_ticket_id = ?',
+    [donationTicketId]
+  );
+
+  const values = destinations.map((destination) => [
+    donationTicketId,
+    destination.location_id,
+    destination.total_weight,
+    destination.display_order
+  ]);
+  const [result] = await connection.query(
+    `INSERT INTO donation_ticket_location
+       (donation_ticket_id, location_id, total_weight, display_order)
+     VALUES ?`,
+    [values]
+  );
+
+  if (!result || result.affectedRows !== destinations.length) {
+    throw new Error('Could not save every ticket destination');
+  }
+}
+
 async function deleteTicketImageObjectsBestEffort(objectKeys, context) {
   const uniqueKeys = [...new Set(
     objectKeys.filter((key) => typeof key === 'string' && key.length > 0)
@@ -1182,6 +1375,11 @@ async function deleteTicketImageObjectsBestEffort(objectKeys, context) {
 
 router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
+  let connection = null;
+  let transactionStarted = false;
+  let transactionCommitted = false;
+  const uploadedImageKeys = [];
+
   if (cabecera.role === 'admin' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager') {
     try {
       if (req.files && req.files.length > 0) {
@@ -1219,52 +1417,64 @@ router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, 
         );
 
         const donation_id = formulario.donation_id || null;
-        const total_weight = formulario.total_weight || null;
+        const total_weight = formulario.total_weight ?? null;
         var provider = formulario.provider || null;
         var transported_by = formulario.transported_by || null;
-        const destination = formulario.destination || null;
+        const ticketDestinations = normalizeTicketDestinations(formulario);
+        const destination = ticketDestinations[0].location_id;
         const audit_status = formulario.audit_status || null;
         const notes = formulario.notes || null;
         var delivered_by = formulario.delivered_by || null;
         var products = formulario.products || [];
         var date = null;
+        if (!Array.isArray(products)) {
+          throw createTicketRequestError(400, 'products must be an array');
+        }
         if (formulario.date) {
           const fecha = new Date(formulario.date);
+          if (Number.isNaN(fecha.getTime())) {
+            throw createTicketRequestError(400, 'Invalid ticket date');
+          }
           // Formatear la fecha en el formato deseado (YYYY-MM-DD)
           date = fecha.toISOString().slice(0, 10);
         }
+        connection = await mysqlConnection.promise().getConnection();
+        await connection.beginTransaction();
+        transactionStarted = true;
+
+        await assertTicketDestinationLocationsExist(connection, ticketDestinations);
         if (!Number.isInteger(provider)) {
-          const [rows] = await mysqlConnection.promise().query(
+          const [rows] = await connection.query(
             'insert into provider(name) values(?)',
             [provider]
           );
           provider = rows.insertId;
           // insertar en stocker_log la operation 5 (create), el provider insertado y el id del usuario logueado
-          const [rows2] = await mysqlConnection.promise().query(
+          const [rows2] = await connection.query(
             'insert into stocker_log(user_id, operation_id, provider_id) values(?,?,?)',
             [cabecera.id, 5, provider]
           );
         }
         if (!Number.isInteger(transported_by)) {
-          const [rows] = await mysqlConnection.promise().query(
+          const [rows] = await connection.query(
             'insert into transported_by(name) values(?)',
             [transported_by]
           );
           transported_by = rows.insertId;
           // insertar en stocker_log la operation 5 (create), el transported_by insertado y el id del usuario logueado
-          const [rows2] = await mysqlConnection.promise().query(
+          const [rows2] = await connection.query(
             'insert into stocker_log(user_id, operation_id, transported_by_id) values(?,?,?)',
             [cabecera.id, 5, transported_by]
           );
         }
         if (!Number.isInteger(delivered_by)) {
-          const [rows] = await mysqlConnection.promise().query(
+          const [rows] = await connection.query(
             'insert into delivered_by(name) values(?)',
             [delivered_by]
           );
           delivered_by = rows.insertId;
           // insertar en stocker_log la operation 5 (create), el delivered_by insertado y el id del usuario logueado
-          const [rows2] = await mysqlConnection.promise().query(
+          const [rows2] = await connection.query(
             'insert into stocker_log(user_id, operation_id, delivered_by_id) values(?,?,?)',
             [cabecera.id, 5, delivered_by]
           );
@@ -1273,13 +1483,13 @@ router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, 
         // iterar el array de objetos products (product,product_type,quantity) y si product no es un integer, entonces es un string con el nombre del producto nuevo, debe insertarse en tabla Products y obtener el id para reemplazarlo en el objeto en el campo product en la posicion i
         for (let i = 0; i < products.length; i++) {
           if (!Number.isInteger(products[i].product)) {
-            const [rows] = await mysqlConnection.promise().query(
+            const [rows] = await connection.query(
               'insert into product(name,product_type_id) values(?,?)',
               [products[i].product, products[i].product_type]
             );
             products[i].product = rows.insertId;
             // insertar en stocker_log la operation 5 (create), el product insertado y el id del usuario logueado
-            const [rows2] = await mysqlConnection.promise().query(
+            const [rows2] = await connection.query(
               'insert into stocker_log(user_id, operation_id, product_id) values(?,?,?)',
               [cabecera.id, 5, products[i].product]
             );
@@ -1297,64 +1507,61 @@ router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, 
 
         query += ') ' + values + ')';
 
-        const [rows] = await mysqlConnection.promise().query(query, parametros_insert_donation_ticket);
+        const [rows] = await connection.query(query, parametros_insert_donation_ticket);
+        assertSingleAffectedRow(rows, 'Could not create donation ticket');
+        const donation_ticket_id = rows.insertId;
 
-        if (rows.affectedRows > 0) {
-          const donation_ticket_id = rows.insertId;
-          try {
-            if (notes) {
-              await mysqlConnection.promise().query(
-                'insert into donation_ticket_note(donation_ticket_id, user_id, note) values(?,?,?)',
-                [donation_ticket_id, cabecera.id, notes]
-              );
-            }
-            for (let i = 0; i < products.length; i++) {
-              await mysqlConnection.promise().query(
-                'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
-                [products[i].product, donation_ticket_id, products[i].quantity]
-              );
-            }
-          } catch (error) {
-            console.log(error);
-            logger.error(error);
-            return res.status(500).json('Could not create product_donation_ticket');
-          }
-          try {
-            for (let i = 0; i < req.files.length; i++) {
-              // renombrar cada archivo con un nombre aleatorio
-              req.files[i].filename = randomImageName();
-              const paramsLogo = {
-                Bucket: bucketName,
-                Key: req.files[i].filename,
-                Body: req.files[i].buffer,
-                ContentType: req.files[i].mimetype,
-              };
-              const commandLogo = new PutObjectCommand(paramsLogo);
-              const uploadLogo = await s3.send(commandLogo);
-              await mysqlConnection.promise().query(
-                'insert into donation_ticket_image(donation_ticket_id, file, display_order) values(?,?,?)',
-                [donation_ticket_id, req.files[i].filename, postDisplayOrderByNewIndex.get(i)]
-              );
-            }
-          } catch (error) {
-            console.log(error);
-            logger.error(error);
-            return res.status(500).json('Could not upload image');
-          }
-          try {
-            // insertar en stocker_log la operation 5 (create), el ticket insertado y el id del usuario logueado
-            const [rows2] = await mysqlConnection.promise().query(
-              'insert into stocker_log(user_id, operation_id, donation_ticket_id, audit_status_id) values(?,?,?,?)',
-              [cabecera.id, 5, donation_ticket_id, audit_status]
-            );
-          } catch (error) {
-            console.log(error);
-            logger.error(error);
-            return res.status(500).json('Could not create stocker_log');
-          }
-        } else {
-          return res.status(500).json('Not ticket inserted');
+        await replaceTicketDestinations(
+          connection,
+          donation_ticket_id,
+          ticketDestinations
+        );
+        if (notes) {
+          const [insertedNote] = await connection.query(
+            'insert into donation_ticket_note(donation_ticket_id, user_id, note) values(?,?,?)',
+            [donation_ticket_id, cabecera.id, notes]
+          );
+          assertSingleAffectedRow(insertedNote, 'Could not create donation_ticket_note');
         }
+        for (let i = 0; i < products.length; i++) {
+          const [insertedTicketProduct] = await connection.query(
+            'insert into product_donation_ticket(product_id, donation_ticket_id, quantity) values(?,?,?)',
+            [products[i].product, donation_ticket_id, products[i].quantity]
+          );
+          assertSingleAffectedRow(insertedTicketProduct, 'Could not create product_donation_ticket');
+        }
+
+        for (let i = 0; i < req.files.length; i++) {
+          req.files[i].filename = randomImageName();
+          const paramsLogo = {
+            Bucket: bucketName,
+            Key: req.files[i].filename,
+            Body: req.files[i].buffer,
+            ContentType: req.files[i].mimetype,
+          };
+          const commandLogo = new PutObjectCommand(paramsLogo);
+          await s3.send(commandLogo);
+          uploadedImageKeys.push(req.files[i].filename);
+
+          const [insertedImage] = await connection.query(
+            'insert into donation_ticket_image(donation_ticket_id, file, display_order) values(?,?,?)',
+            [donation_ticket_id, req.files[i].filename, postDisplayOrderByNewIndex.get(i)]
+          );
+          assertSingleAffectedRow(insertedImage, 'Could not create donation_ticket_image');
+        }
+
+        const [ticketLog] = await connection.query(
+          'insert into stocker_log(user_id, operation_id, donation_ticket_id, audit_status_id) values(?,?,?,?)',
+          [cabecera.id, 5, donation_ticket_id, audit_status]
+        );
+        assertSingleAffectedRow(ticketLog, 'Could not create stocker_log');
+
+        await connection.commit();
+        transactionCommitted = true;
+        connection.release();
+        connection = null;
+
+        invalidateTicketMetricsCache();
         res.status(200).json('Data inserted successfully');
 
         const [rows_emails] = await mysqlConnection.promise().query(
@@ -1373,7 +1580,9 @@ router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, 
           'Provider': provider,
           'Transported By': transported_by,
           'Received By': delivered_by,
-          'Destination': destination,
+          'Destinations': ticketDestinations
+            .map((ticketDestination) => `${ticketDestination.location_id} (${ticketDestination.total_weight} lb)`)
+            .join(', '),
           'Audit Status': audit_status || '',
           'Notes': notes || '',
           'Date': date ? moment(date).format('MM/DD/YYYY') : '',
@@ -1405,12 +1614,23 @@ router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, 
           formData['Delivered By'] = deliveredByRows[0]?.name || delivered_by;
         }
 
-        if (destination) {
+        if (ticketDestinations.length > 0) {
           const [destinationRows] = await mysqlConnection.promise().query(
-            'SELECT community_city FROM location WHERE id = ?',
-            [destination]
+            `SELECT id, community_city
+             FROM location
+             WHERE id IN (${ticketDestinations.map(() => '?').join(',')})`,
+            ticketDestinations.map((ticketDestination) => ticketDestination.location_id)
           );
-          formData['Destination'] = destinationRows[0]?.community_city || destination;
+          const destinationNameById = new Map(
+            destinationRows.map((destinationRow) => [Number(destinationRow.id), destinationRow.community_city])
+          );
+          formData['Destinations'] = ticketDestinations
+            .map((ticketDestination) => {
+              const destinationName = destinationNameById.get(ticketDestination.location_id)
+                || ticketDestination.location_id;
+              return `${destinationName} (${ticketDestination.total_weight} lb)`;
+            })
+            .join(', ');
         }
 
         if (delivered_by) {
@@ -1451,12 +1671,36 @@ router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, 
         return res.status(400).json('Donation ticket image is required');
       }
     } catch (error) {
-      console.log(error);
-      logger.error(error);
+      if (connection && transactionStarted && !transactionCommitted) {
+        try {
+          await connection.rollback();
+        } catch (rollbackError) {
+          logger.error('Could not roll back ticket creation transaction:', rollbackError);
+        }
+      }
+
+      if (!transactionCommitted && uploadedImageKeys.length > 0) {
+        await deleteTicketImageObjectsBestEffort(
+          uploadedImageKeys,
+          'Ticket creation rollback cleanup'
+        );
+      }
+
+      const status = error.httpStatus || 500;
+      if (status >= 500) {
+        console.log(error);
+        logger.error(error);
+      }
       if (!res.headersSent) {
-        return res.status(500).json('Internal server error');
+        return res.status(status).json(
+          status >= 500 ? 'Internal server error' : error.message
+        );
       }
       return;
+    } finally {
+      if (connection) {
+        connection.release();
+      }
     }
   } else {
     return res.status(401).json('Unauthorized');
@@ -1492,10 +1736,11 @@ router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (re
 
   try {
     const donation_id = formulario.donation_id || null;
-    const total_weight = formulario.total_weight || null;
+    const total_weight = formulario.total_weight ?? null;
     let provider = formulario.provider || null;
     let transported_by = formulario.transported_by || null;
-    const destination = formulario.destination || null;
+    const ticketDestinations = normalizeTicketDestinations(formulario);
+    const destination = ticketDestinations[0].location_id;
     const audit_status = formulario.audit_status || null;
     const notes = formulario.notes || null;
     let delivered_by = formulario.delivered_by || null;
@@ -1528,6 +1773,7 @@ router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (re
     if (ticketRows.length === 0) {
       throw createTicketRequestError(404, 'Ticket not found');
     }
+    await assertTicketDestinationLocationsExist(connection, ticketDestinations);
 
     const [existingImages] = await connection.query(
       `SELECT id, file, display_order
@@ -1654,6 +1900,8 @@ router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (re
     );
     assertSingleAffectedRow(updatedTicket, 'Could not update donation ticket');
 
+    await replaceTicketDestinations(connection, id, ticketDestinations);
+
     await connection.query(
       'delete from product_donation_ticket where donation_ticket_id = ?',
       [id]
@@ -1722,6 +1970,7 @@ router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (re
 
     await connection.commit();
     transactionCommitted = true;
+    invalidateTicketMetricsCache();
   } catch (error) {
     requestError = error;
 
@@ -1803,6 +2052,7 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
           provider: rows[0].provider,
           transported_by: rows[0].transported_by,
           destination: rows[0].destination,
+          destinations: [],
           date: rows[0].date,
           delivered_by: rows[0].delivered_by,
           audit_status: rows[0].audit_status,
@@ -1818,6 +2068,34 @@ router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
             product_donation_ticket_id: row.product_donation_ticket_id
           });
         }
+
+        const [destinationRows] = await mysqlConnection.promise().query(
+          `SELECT
+             dtl.location_id,
+             dtl.total_weight,
+             dtl.display_order,
+             l.community_city AS location,
+             l.organization,
+             l.address
+           FROM donation_ticket_location AS dtl
+           INNER JOIN location AS l ON l.id = dtl.location_id
+           WHERE dtl.donation_ticket_id = ?
+           ORDER BY dtl.display_order, dtl.id`,
+          [id]
+        );
+        newTicket.destinations = destinationRows.length > 0
+          ? destinationRows.map((destinationRow) => ({
+            ...destinationRow,
+            location_id: Number(destinationRow.location_id),
+            total_weight: destinationRow.total_weight === null
+              ? null
+              : Number(destinationRow.total_weight)
+          }))
+          : [{
+            location_id: Number(rows[0].destination),
+            total_weight: Number(rows[0].total_weight),
+            display_order: 1
+          }];
 
         const [rows_notes] = await mysqlConnection.promise().query(
           `SELECT dtn.id,
@@ -10120,10 +10398,13 @@ router.get('/pounds-delivered', verifyToken, async (req, res) => {
     if (cabecera.role === 'client') {
       try {
         const [rows] = await mysqlConnection.promise().query(
-          `select sum(dt.total_weight) as pounds_delivered 
-          from donation_ticket as dt
-          inner join client_location as cl on dt.location_id = cl.location_id
-          where cl.client_id = ? AND dt.enabled = 'Y'`,
+          `SELECT SUM(dtl.total_weight) AS pounds_delivered
+           FROM donation_ticket AS dt
+           INNER JOIN donation_ticket_location AS dtl
+             ON dt.id = dtl.donation_ticket_id
+           INNER JOIN client_location AS cl
+             ON dtl.location_id = cl.location_id
+           WHERE cl.client_id = ? AND dt.enabled = 'Y'`,
           [cabecera.client_id]
         );
         if (rows[0].pounds_delivered === null) {
@@ -10594,8 +10875,14 @@ router.get('/total-tickets-uploaded', verifyToken, async (req, res) => {
           `SELECT
             COUNT(DISTINCT dt.id) AS total_tickets_uploaded
             FROM donation_ticket as dt
-            INNER JOIN client_location as cl ON dt.location_id = cl.location_id
-            WHERE cl.client_id = ? AND dt.enabled = 'Y'`,
+            WHERE dt.enabled = 'Y'
+              AND EXISTS (
+                SELECT 1
+                FROM donation_ticket_location AS dtl
+                INNER JOIN client_location AS cl ON dtl.location_id = cl.location_id
+                WHERE dtl.donation_ticket_id = dt.id
+                  AND cl.client_id = ?
+              )`,
           [cabecera.client_id]
         );
         res.json(rows[0].total_tickets_uploaded);
@@ -10669,8 +10956,14 @@ router.get('/total-products-uploaded', verifyToken, async (req, res) => {
             FROM product as p
             INNER JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
             INNER JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
-            INNER JOIN client_location as cl ON dt.location_id = cl.location_id
-            WHERE cl.client_id = ? AND dt.enabled = 'Y'`,
+            WHERE dt.enabled = 'Y'
+              AND EXISTS (
+                SELECT 1
+                FROM donation_ticket_location AS dtl
+                INNER JOIN client_location AS cl ON dtl.location_id = cl.location_id
+                WHERE dtl.donation_ticket_id = dt.id
+                  AND cl.client_id = ?
+              )`,
           [cabecera.client_id]
         );
         res.json(rows[0].total_products_uploaded);
@@ -10870,10 +11163,11 @@ router.get('/dashboard/graphic-line/:tabSelected', verifyToken, async (req, res)
             }
             [rows] = await mysqlConnection.promise().query(
               `SELECT
-                  SUM(dt.total_weight) AS value,
+                  SUM(dtl.total_weight) AS value,
                   DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%Y') AS name
                 FROM donation_ticket as dt
-                INNER JOIN client_location as cl ON dt.location_id = cl.location_id
+                INNER JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
+                INNER JOIN client_location as cl ON dtl.location_id = cl.location_id
                 WHERE cl.client_id = ? AND dt.enabled = 'Y'
                 GROUP BY YEAR(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')), MONTH(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'))
                 ORDER BY CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles')`,
@@ -13743,8 +14037,24 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
       const queryParams = [];
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND dt.location_id IN (' + locations.map(() => '?').join(',') + ')';
+        query_locations = `AND EXISTS (
+          SELECT 1
+          FROM donation_ticket_location AS dtl_filter
+          WHERE dtl_filter.donation_ticket_id = dt.id
+            AND dtl_filter.location_id IN (${locations.map(() => '?').join(',')})
+            ${cabecera.role === 'client'
+              ? `AND EXISTS (
+                   SELECT 1
+                   FROM client_location AS cl_filter
+                   WHERE cl_filter.location_id = dtl_filter.location_id
+                     AND cl_filter.client_id = ?
+                 )`
+              : ''}
+        )`;
         queryParams.push(...locations);
+        if (cabecera.role === 'client') {
+          queryParams.push(cabecera.client_id);
+        }
       }
       var query_providers = '';
       if (providers.length > 0) {
@@ -13771,14 +14081,25 @@ router.post('/table/product/download-csv', verifyToken, async (req, res) => {
           ${cabecera.role === 'admin' || cabecera.role === 'opsmanager' ? `DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time` : `DATE_FORMAT(CONVERT_TZ(min(dt.modification_date), '+00:00', 'America/Los_Angeles'), '%T') AS modification_time`}
         FROM product as p
         INNER JOIN product_type as pt ON pt.id = p.product_type_id
-        ${cabecera.role === 'admin' || cabecera.role === 'opsmanager' ? 'LEFT JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id LEFT JOIN client_location ON dt.location_id = client_location.location_id' : 'INNER JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id INNER JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id INNER JOIN client_location ON dt.location_id = client_location.location_id'}
+        ${cabecera.role === 'admin' || cabecera.role === 'opsmanager'
+          ? 'LEFT JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id LEFT JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id'
+          : 'INNER JOIN product_donation_ticket ON p.id = product_donation_ticket.product_id INNER JOIN donation_ticket as dt ON product_donation_ticket.donation_ticket_id = dt.id'}
         WHERE 1=1
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
         ${query_providers}
         ${query_product_types}
-        ${cabecera.role === 'client' ? ' AND client_location.client_id = ?' : ''}
+        ${cabecera.role === 'client'
+          ? ` AND EXISTS (
+                SELECT 1
+                FROM donation_ticket_location AS dtl_client
+                INNER JOIN client_location AS cl_client
+                  ON dtl_client.location_id = cl_client.location_id
+                WHERE dtl_client.donation_ticket_id = dt.id
+                  AND cl_client.client_id = ?
+              )`
+          : ''}
         GROUP BY p.id`,
         queryParams
       );
@@ -13891,7 +14212,7 @@ router.post('/table/provider/download-csv', verifyToken, async (req, res) => {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
-      const locations = filters.locations || [];
+      const locations = normalizePositiveIntegerArray(filters.locations);
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -13910,21 +14231,15 @@ router.post('/table/provider/download-csv', verifyToken, async (req, res) => {
         query_to_date = 'AND CONVERT_TZ(p.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
       }
       var query_locations = '';
+      const queryParams = [];
       if (locations.length > 0) {
-        query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+        query_locations = 'AND dtl.location_id IN (' + locations.map(() => '?').join(',') + ')';
+        queryParams.push(...locations);
       }
 
-      let providerIds = [];
-
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT DISTINCT p.id
-          FROM provider as p
-          LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id
-          LEFT JOIN location as l ON dt.location_id = l.id
-          WHERE 1=1 ${query_locations}`
-      );
-
-      providerIds = rows.map(row => row.id);
+      if (cabecera.role === 'client') {
+        queryParams.push(cabecera.client_id);
+      }
 
       const [rows2] = await mysqlConnection.promise().query(
         `SELECT p.id,
@@ -13936,16 +14251,18 @@ router.post('/table/provider/download-csv', verifyToken, async (req, res) => {
                         DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
         FROM provider as p
         LEFT JOIN donation_ticket as dt ON p.id = dt.provider_id
-        LEFT JOIN location as l ON dt.location_id = l.id
-        LEFT JOIN client_location ON dt.location_id = client_location.location_id
-        WHERE p.id IN (${providerIds.join()})
+        LEFT JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
+        LEFT JOIN location as l ON dtl.location_id = l.id
+        LEFT JOIN client_location AS cl ON dtl.location_id = cl.location_id
+        WHERE 1=1
         ${query_from_date}
         ${query_to_date}
-        ${cabecera.role === 'client' ? ' AND client_location.client_id = ?' : ''}
+        ${query_locations}
+        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
         GROUP BY p.id
         ORDER BY p.id
         `,
-        [cabecera.client_id]
+        queryParams
       );
 
       var headers_array = [
@@ -14245,7 +14562,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       const queryParams = [];
       var query_locations = '';
       if (locations.length > 0) {
-        query_locations = 'AND dt.location_id IN (' + locations.map(() => '?').join(',') + ')';
+        query_locations = 'AND dtl.location_id IN (' + locations.map(() => '?').join(',') + ')';
         queryParams.push(...locations);
       }
       var query_providers = '';
@@ -14272,10 +14589,35 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         queryParams.push(cabecera.client_id);
       }
 
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT dt.id,
+      const foodQueryParams = [];
+      if (locations.length > 0) {
+        foodQueryParams.push(...locations);
+      }
+      if (cabecera.role === 'client') {
+        foodQueryParams.push(cabecera.client_id);
+      }
+      if (providers.length > 0) {
+        foodQueryParams.push(...providers);
+      }
+      if (delivered_by.length > 0) {
+        foodQueryParams.push(...delivered_by);
+      }
+      if (transported_by.length > 0) {
+        foodQueryParams.push(...transported_by);
+      }
+      if (stocker_upload.length > 0) {
+        foodQueryParams.push(...stocker_upload);
+      }
+
+      const [ticketRowsResult, foodRowsResult] = await Promise.all([
+        mysqlConnection.promise().query(
+          `SELECT dt.id,
                 dt.donation_id,
                 dt.total_weight,
+                dtl.location_id,
+                dtl.total_weight AS location_total_weight,
+                dtl.display_order AS location_display_order,
+                dtl.id AS location_relation_id,
                 p.id as provider_id,
                 p.name as provider,
                 loc.community_city as location,
@@ -14286,23 +14628,17 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
                 u.id as created_by_id,
                 u.username as created_by_username,
                 DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
-                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
-                product.id as product_id,
-                product.name as product,
-                pt.name as product_type,
-                pdt.quantity as quantity
+                DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time
         FROM donation_ticket as dt
         LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         LEFT JOIN delivered_by as db ON dt.delivered_by = db.id
         LEFT JOIN transported_by as tb ON dt.transported_by_id = tb.id
         LEFT JOIN provider as p ON dt.provider_id = p.id
         LEFT JOIN audit_status as as1 ON dt.audit_status_id = as1.id
-        LEFT JOIN location as loc ON dt.location_id = loc.id
-        ${cabecera.role === 'client' ? 'LEFT JOIN client_location cl ON dt.location_id = cl.location_id' : ''}
+        INNER JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
+        INNER JOIN location as loc ON dtl.location_id = loc.id
+        ${cabecera.role === 'client' ? 'INNER JOIN client_location cl ON dtl.location_id = cl.location_id' : ''}
         LEFT JOIN user as u ON sl.user_id = u.id
-        LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-        LEFT JOIN product as product ON pdt.product_id = product.id
-        LEFT JOIN product_type as pt ON product.product_type_id = pt.id
         WHERE dt.enabled = 'Y'
         ${query_from_date}
         ${query_to_date}
@@ -14312,17 +14648,117 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ${query_transported_by}
         ${query_stocker_upload}
         ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
-        ORDER BY dt.date, dt.id, pdt.id`,
-        queryParams
-      );
+        ORDER BY dt.date, dt.id, dtl.display_order, dtl.id`,
+          queryParams
+        ),
+        mysqlConnection.promise().query(
+          `WITH visible_ticket_destinations AS (
+             SELECT
+               dtl.donation_ticket_id,
+               JSON_ARRAYAGG(
+                 JSON_OBJECT(
+                   'location_id', dtl.location_id,
+                   'location', loc.community_city,
+                   'total_weight', dtl.total_weight,
+                   'display_order', dtl.display_order,
+                   'relation_id', dtl.id
+                 )
+               ) AS destinations_json
+             FROM donation_ticket_location AS dtl
+             INNER JOIN location AS loc ON dtl.location_id = loc.id
+             ${cabecera.role === 'client'
+              ? 'INNER JOIN client_location AS cl_visible ON dtl.location_id = cl_visible.location_id'
+              : ''}
+             WHERE 1=1
+             ${query_locations}
+             ${cabecera.role === 'client' ? 'AND cl_visible.client_id = ?' : ''}
+             GROUP BY dtl.donation_ticket_id
+           ),
+           ticket_products AS (
+             SELECT
+               donation_ticket_id,
+               product_id,
+               SUM(quantity) AS quantity,
+               MIN(id) AS sort_id
+             FROM product_donation_ticket
+             GROUP BY donation_ticket_id, product_id
+           )
+           SELECT
+             dt.id,
+             dt.donation_id,
+             dt.total_weight,
+             destinations.destinations_json,
+             p.id AS provider_id,
+             p.name AS provider,
+             DATE_FORMAT(dt.date, '%m/%d/%Y') AS date,
+             db.name AS delivered_by,
+             tb.name AS transported_by,
+             as1.name AS audit_status,
+             u.id AS created_by_id,
+             u.username AS created_by_username,
+             DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
+             DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
+             product.id AS product_id,
+             product.name AS product,
+             pt.name AS product_type,
+             ticket_product.quantity
+           FROM donation_ticket AS dt
+           LEFT JOIN stocker_log AS sl
+             ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
+           LEFT JOIN delivered_by AS db ON dt.delivered_by = db.id
+           LEFT JOIN transported_by AS tb ON dt.transported_by_id = tb.id
+           LEFT JOIN provider AS p ON dt.provider_id = p.id
+           LEFT JOIN audit_status AS as1 ON dt.audit_status_id = as1.id
+           INNER JOIN visible_ticket_destinations AS destinations
+             ON dt.id = destinations.donation_ticket_id
+           LEFT JOIN user AS u ON sl.user_id = u.id
+           LEFT JOIN ticket_products AS ticket_product
+             ON dt.id = ticket_product.donation_ticket_id
+           LEFT JOIN product AS product ON ticket_product.product_id = product.id
+           LEFT JOIN product_type AS pt ON product.product_type_id = pt.id
+           WHERE dt.enabled = 'Y'
+           ${query_from_date}
+           ${query_to_date}
+           ${query_providers}
+           ${query_delivered_by}
+           ${query_transported_by}
+           ${query_stocker_upload}
+           ORDER BY dt.date, dt.id, ticket_product.sort_id`,
+          foodQueryParams
+        )
+      ]);
 
-      var headers_array = [
+      const ticketRows = ticketRowsResult[0];
+      const foodRows = foodRowsResult[0].map(addTicketDestinationCsvColumns);
+
+      const ticketHeaders = [
         { id: 'id', title: 'ID' },
         { id: 'donation_id', title: 'Donation ID' },
         { id: 'total_weight', title: 'Total weight' },
+        { id: 'location_id', title: 'Location ID' },
+        { id: 'location_total_weight', title: 'Location total weight' },
         { id: 'provider_id', title: 'Provider ID' },
         { id: 'provider', title: 'Provider' },
         { id: 'location', title: 'Location' },
+        { id: 'date', title: 'Date' },
+        { id: 'delivered_by', title: 'Delivered by' },
+        { id: 'transported_by', title: 'Transported by' },
+        { id: 'audit_status', title: 'Audit status' },
+        { id: 'created_by_id', title: 'Created by ID' },
+        { id: 'created_by_username', title: 'Created by username' },
+        { id: 'creation_date', title: 'Creation date' },
+        { id: 'creation_time', title: 'Creation time' }
+      ];
+
+      const foodHeaders = [
+        { id: 'id', title: 'ID' },
+        { id: 'donation_id', title: 'Donation ID' },
+        { id: 'total_weight', title: 'Total weight' },
+        { id: 'destination_ids', title: 'Destination IDs' },
+        { id: 'destinations', title: 'Destinations' },
+        { id: 'destination_weights', title: 'Destination weights' },
+        { id: 'provider_id', title: 'Provider ID' },
+        { id: 'provider', title: 'Provider' },
         { id: 'date', title: 'Date' },
         { id: 'delivered_by', title: 'Delivered by' },
         { id: 'transported_by', title: 'Transported by' },
@@ -14337,39 +14773,54 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         { id: 'quantity', title: 'Quantity' }
       ];
 
-      const csvStringifier = createCsvStringifier({
-        header: headers_array,
-        fieldDelimiter: ';'
-      });
-
-      let csvData = csvStringifier.getHeaderString();
-      csvData += csvStringifier.stringifyRecords(rows);
-
-      // res.setHeader('Content-disposition', 'attachment; filename=tickets-table.csv');
-      // res.setHeader('Content-type', 'text/csv; charset=utf-8');
-      // res.send(csvData);
-
-      // Generar el segundo CSV
-      const headersArrayWithoutProduct = headers_array.filter(header => !['product_id', 'product', 'product_type', 'quantity'].includes(header.id));
-      const csvStringifierWithoutProduct = createCsvStringifier({
-        header: headersArrayWithoutProduct,
-        fieldDelimiter: ';'
-      });
-      const uniqueTickets = new Set();
-      const uniqueRows = rows.filter(row => {
-        if (!uniqueTickets.has(row.id)) {
-          uniqueTickets.add(row.id);
-          return true;
+      const uniqueFoodRows = [];
+      const foodRowKeys = new Set();
+      foodRows.forEach((row) => {
+        const key = `${row.id}:${row.product_id ?? 'no-product'}`;
+        if (!foodRowKeys.has(key)) {
+          foodRowKeys.add(key);
+          uniqueFoodRows.push(row);
         }
-        return false;
       });
-      let csvDataWithoutProduct = csvStringifierWithoutProduct.getHeaderString();
-      csvDataWithoutProduct += csvStringifierWithoutProduct.stringifyRecords(uniqueRows);
+
+      const foodCsvStringifier = createCsvStringifier({
+        header: foodHeaders,
+        fieldDelimiter: ';'
+      });
+
+      let foodCsvData = foodCsvStringifier.getHeaderString();
+      foodCsvData += foodCsvStringifier.stringifyRecords(uniqueFoodRows);
+
+      const ticketCsvStringifier = createCsvStringifier({
+        header: ticketHeaders,
+        fieldDelimiter: ';'
+      });
+      const uniqueTicketLocations = new Set();
+      const ticketsWithGeneralWeight = new Set();
+      const uniqueTicketRows = ticketRows.reduce((result, row) => {
+        const ticketLocationKey = `${row.id}:${row.location_id}`;
+        if (uniqueTicketLocations.has(ticketLocationKey)) {
+          return result;
+        }
+
+        uniqueTicketLocations.add(ticketLocationKey);
+        const isFirstVisibleDestination = !ticketsWithGeneralWeight.has(row.id);
+        ticketsWithGeneralWeight.add(row.id);
+        result.push({
+          ...row,
+          // Keep the legacy/global Total weight summable after the export
+          // changes from one row per ticket to one row per destination.
+          total_weight: isFirstVisibleDestination ? row.total_weight : ''
+        });
+        return result;
+      }, []);
+      let ticketCsvData = ticketCsvStringifier.getHeaderString();
+      ticketCsvData += ticketCsvStringifier.stringifyRecords(uniqueTicketRows);
 
       // Crear un archivo ZIP
       const zip = new JSZip();
-      zip.file("tickets-with-food.csv", csvData);
-      zip.file("tickets.csv", csvDataWithoutProduct);
+      zip.file("tickets-with-food.csv", foodCsvData);
+      zip.file("tickets.csv", ticketCsvData);
 
       // Establecer encabezados antes de enviar el cuerpo de la respuesta
       res.setHeader('Content-disposition', 'attachment; filename=tickets.zip');
@@ -15243,6 +15694,10 @@ const PARTICIPANT_CACHE_MAX_ENTRIES = 200;
 const PARTICIPANT_LA_TIME_ZONE_SQL = "'America/Los_Angeles'";
 const PARTICIPANT_UTC_TIME_ZONE_SQL = "'+00:00'";
 const participantMetricsCache = new Map();
+
+function invalidateTicketMetricsCache() {
+  participantMetricsCache.clear();
+}
 
 function cleanupParticipantMetricsCache() {
   if (participantMetricsCache.size <= PARTICIPANT_CACHE_MAX_ENTRIES) {
@@ -19180,15 +19635,17 @@ function getProductMetricsPeriodExpression(interval) {
 }
 
 function buildProductMetricsClientJoin(cabecera) {
-  return cabecera.role === 'client'
-    ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id'
-    : '';
+  // Client/location scoping is expressed with EXISTS in the WHERE clause.
+  // Joining the many-to-many destination table here would multiply ticket
+  // products and ticket-level totals.
+  return '';
 }
 
 function buildProductMetricsWhere(normalizedFilters, cabecera, options = {}) {
   const where = ['dt.enabled = ?'];
   const params = ['Y'];
   const productTypeMode = options.productTypeMode || 'join';
+  const destinationAlias = options.destinationAlias || null;
 
   if (normalizedFilters.from_date) {
     where.push('dt.date >= ?');
@@ -19200,7 +19657,26 @@ function buildProductMetricsWhere(normalizedFilters, cabecera, options = {}) {
     params.push(normalizedFilters.to_date);
   }
 
-  addProductMetricsInCondition(where, params, 'dt.location_id', normalizedFilters.locations);
+  if (normalizedFilters.locations.length > 0) {
+    if (destinationAlias) {
+      addProductMetricsInCondition(
+        where,
+        params,
+        `${destinationAlias}.location_id`,
+        normalizedFilters.locations
+      );
+    } else {
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM donation_ticket_location AS dtl_filter
+          WHERE dtl_filter.donation_ticket_id = dt.id
+            AND dtl_filter.location_id IN (${normalizedFilters.locations.map(() => '?').join(',')})
+        )
+      `);
+      params.push(...normalizedFilters.locations);
+    }
+  }
   addProductMetricsInCondition(where, params, 'dt.provider_id', normalizedFilters.providers);
   addProductMetricsInCondition(where, params, 'sl.user_id', normalizedFilters.stocker_upload);
   addProductMetricsInCondition(where, params, 'dt.transported_by_id', normalizedFilters.transported_by);
@@ -19223,12 +19699,65 @@ function buildProductMetricsWhere(normalizedFilters, cabecera, options = {}) {
   }
 
   if (cabecera.role === 'client') {
-    where.push('cl.client_id = ?');
+    const scopedLocationExpression = destinationAlias
+      ? `${destinationAlias}.location_id`
+      : 'dtl_client.location_id';
+    const scopedLocationFilter = normalizedFilters.locations.length > 0
+      ? `AND ${scopedLocationExpression} IN (${normalizedFilters.locations.map(() => '?').join(',')})`
+      : '';
+    where.push(`
+      EXISTS (
+        SELECT 1
+        ${destinationAlias ? '' : 'FROM donation_ticket_location AS dtl_client'}
+        ${destinationAlias ? 'FROM client_location AS cl_client' : 'INNER JOIN client_location AS cl_client ON dtl_client.location_id = cl_client.location_id'}
+        WHERE ${destinationAlias ? `cl_client.location_id = ${scopedLocationExpression}` : 'dtl_client.donation_ticket_id = dt.id'}
+          ${scopedLocationFilter}
+          AND cl_client.client_id = ?
+      )
+    `);
+    if (normalizedFilters.locations.length > 0) {
+      params.push(...normalizedFilters.locations);
+    }
     params.push(cabecera.client_id);
   }
 
   return {
     whereSql: where.join('\n AND '),
+    params
+  };
+}
+
+function buildProductMetricsWeightExpression(normalizedFilters, cabecera) {
+  if (normalizedFilters.locations.length === 0 && cabecera.role !== 'client') {
+    return { sql: 'dt.total_weight', params: [] };
+  }
+
+  const where = ['dtl_weight.donation_ticket_id = dt.id'];
+  const params = [];
+
+  if (normalizedFilters.locations.length > 0) {
+    where.push(`dtl_weight.location_id IN (${normalizedFilters.locations.map(() => '?').join(',')})`);
+    params.push(...normalizedFilters.locations);
+  }
+
+  if (cabecera.role === 'client') {
+    where.push(`
+      EXISTS (
+        SELECT 1
+        FROM client_location AS cl_weight
+        WHERE cl_weight.location_id = dtl_weight.location_id
+          AND cl_weight.client_id = ?
+      )
+    `);
+    params.push(cabecera.client_id);
+  }
+
+  return {
+    sql: `COALESCE((
+      SELECT SUM(dtl_weight.total_weight)
+      FROM donation_ticket_location AS dtl_weight
+      WHERE ${where.join('\n AND ')}
+    ), 0)`,
     params
   };
 }
@@ -19384,14 +19913,15 @@ async function optimizedProductReachHandler(req, res) {
            INNER JOIN product as p ON pdt.product_id = p.id`
         : '';
       const productWhere = buildProductMetricsWhere(filters, cabecera);
+      const ticketWeight = buildProductMetricsWeightExpression(filters, cabecera);
       const [rowsPoundsDelivered] = await mysqlConnection.promise().query(
-        `SELECT COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS poundsDelivered
+        `SELECT COALESCE(SUM(${useProductQuantity ? 'pdt.quantity' : ticketWeight.sql}), 0) AS poundsDelivered
          FROM donation_ticket as dt
          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
          ${productJoins}
          ${buildProductMetricsClientJoin(cabecera)}
          WHERE ${productWhere.whereSql}`,
-        productWhere.params
+        (useProductQuantity ? [] : ticketWeight.params).concat(productWhere.params)
       );
 
       return {
@@ -19426,13 +19956,14 @@ async function optimizedProductTotalPoundsHandler(req, res) {
            INNER JOIN product as p ON pdt.product_id = p.id`
         : '';
       const metricWhere = buildProductMetricsWhere(filters, cabecera);
+      const ticketWeight = buildProductMetricsWeightExpression(filters, cabecera);
       const periodExpression = getProductMetricsPeriodExpression(filters.interval);
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
            pr.name AS name,
            ${periodExpression} AS period,
-           COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS data
+           COALESCE(SUM(${useProductQuantity ? 'pdt.quantity' : ticketWeight.sql}), 0) AS data
          FROM donation_ticket as dt
          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
          INNER JOIN provider as pr ON dt.provider_id = pr.id
@@ -19441,7 +19972,7 @@ async function optimizedProductTotalPoundsHandler(req, res) {
          WHERE ${metricWhere.whereSql}
          GROUP BY pr.id, pr.name, period
          ORDER BY period`,
-        metricWhere.params
+        (useProductQuantity ? [] : ticketWeight.params).concat(metricWhere.params)
       );
 
       return buildProductMetricsSeries(rows, periods, filters.interval);
@@ -19554,21 +20085,20 @@ async function optimizedProductPoundsPerLocationHandler(req, res) {
     const cacheKey = buildParticipantMetricsCacheKey('product-pounds-per-location', cabecera, filters);
 
     const rows = await getCachedParticipantMetrics(cacheKey, PRODUCT_METRICS_CACHE_TTL_MS, async () => {
-      const useProductQuantity = filters.product_types.length > 0;
-      const productJoins = useProductQuantity
-        ? `INNER JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
-           INNER JOIN product as p ON pdt.product_id = p.id`
-        : '';
-      const metricWhere = buildProductMetricsWhere(filters, cabecera);
+      const metricWhere = buildProductMetricsWhere(filters, cabecera, {
+        destinationAlias: 'dtl_metric',
+        productTypeMode: 'exists'
+      });
 
       const [groupedRows] = await mysqlConnection.promise().query(
         `SELECT
            l.community_city AS name,
-           COALESCE(${useProductQuantity ? 'SUM(pdt.quantity)' : 'SUM(dt.total_weight)'}, 0) AS total
+           COALESCE(SUM(dtl_metric.total_weight), 0) AS total
          FROM donation_ticket as dt
          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
-         INNER JOIN location as l ON dt.location_id = l.id
-         ${productJoins}
+         INNER JOIN donation_ticket_location AS dtl_metric
+           ON dt.id = dtl_metric.donation_ticket_id
+         INNER JOIN location as l ON dtl_metric.location_id = l.id
          ${buildProductMetricsClientJoin(cabecera)}
          WHERE ${metricWhere.whereSql}
          GROUP BY l.id, l.community_city
@@ -19681,19 +20211,20 @@ async function optimizedDashboardGraphicLineHandler(req, res) {
       const filters = await resolveProductMetricsDateRange(rawFilters);
       const periods = generatePeriods(filters.from_date, filters.to_date, filters.interval);
       const metricWhere = buildProductMetricsWhere(filters, cabecera, { productTypeMode: 'exists' });
+      const ticketWeight = buildProductMetricsWeightExpression(filters, cabecera);
       const periodExpression = getProductMetricsPeriodExpression(filters.interval);
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
            ${periodExpression} AS period,
-           COALESCE(SUM(dt.total_weight), 0) AS value
+           COALESCE(SUM(${ticketWeight.sql}), 0) AS value
          FROM donation_ticket as dt
          INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
          ${buildProductMetricsClientJoin(cabecera)}
          WHERE ${metricWhere.whereSql}
          GROUP BY period
          ORDER BY period`,
-        metricWhere.params
+        ticketWeight.params.concat(metricWhere.params)
       );
 
       const valueByPeriod = new Map(rows.map((row) => [row.period, Number(row.value || 0)]));
@@ -20452,12 +20983,13 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
-    const locations = filters.locations || [];
-    const providers = filters.providers || [];
-    const delivered_by = filters.delivered_by || [];
-    const transported_by = filters.transported_by || [];
-    const stocker_upload = filters.stocker_upload || [];
+    const locations = normalizePositiveIntegerArray(filters.locations);
+    const providers = normalizePositiveIntegerArray(filters.providers);
+    const delivered_by = normalizePositiveIntegerArray(filters.delivered_by);
+    const transported_by = normalizePositiveIntegerArray(filters.transported_by);
+    const stocker_upload = normalizePositiveIntegerArray(filters.stocker_upload);
     const language = req.query.language || 'en';
+    const filterParams = [];
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -20476,27 +21008,46 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     }
     var query_locations = '';
     if (locations.length > 0) {
-      query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      query_locations = `AND EXISTS (
+        SELECT 1
+        FROM donation_ticket_location AS dtl_filter
+        WHERE dtl_filter.donation_ticket_id = dt.id
+          AND dtl_filter.location_id IN (${locations.map(() => '?').join(',')})
+          ${cabecera.role === 'client'
+            ? `AND EXISTS (
+                 SELECT 1
+                 FROM client_location AS cl_filter
+                 WHERE cl_filter.location_id = dtl_filter.location_id
+                   AND cl_filter.client_id = ${Number.parseInt(cabecera.client_id, 10)}
+               )`
+            : ''}
+      )`;
+      filterParams.push(...locations);
     }
     var query_providers = '';
     if (providers.length > 0) {
-      query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
+      filterParams.push(...providers);
     }
     var query_delivered_by = '';
     if (delivered_by.length > 0) {
-      query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.join() + ')';
+      query_delivered_by = 'AND dt.delivered_by IN (' + delivered_by.map(() => '?').join(',') + ')';
+      filterParams.push(...delivered_by);
     }
     var query_transported_by = '';
     if (transported_by.length > 0) {
-      query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.join() + ')';
+      query_transported_by = 'AND dt.transported_by_id IN (' + transported_by.map(() => '?').join(',') + ')';
+      filterParams.push(...transported_by);
     }
     var query_stocker_upload = '';
     if (stocker_upload.length > 0) {
-      query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.join() + ')';
+      query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.map(() => '?').join(',') + ')';
+      filterParams.push(...stocker_upload);
     }
 
     let buscar = req.query.search;
     let queryBuscar = '';
+    const searchParams = [];
 
     var page = req.query.page ? Number(req.query.page) : 1;
 
@@ -20505,13 +21056,34 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     }
     var resultsPerPage = req.query.pageSize ? Number(req.query.pageSize) : 10;
     var start = (page - 1) * resultsPerPage;
+    const clientId = Number.parseInt(cabecera.client_id, 10);
+    if (cabecera.role === 'client' && (!Number.isSafeInteger(clientId) || clientId <= 0)) {
+      return res.status(400).json('Invalid client');
+    }
+    const ticketLocationSummaryJoin = `
+      INNER JOIN (
+        SELECT
+          dtl.donation_ticket_id,
+          GROUP_CONCAT(l.community_city ORDER BY dtl.display_order, dtl.id SEPARATOR ', ') AS location
+        FROM donation_ticket_location AS dtl
+        INNER JOIN location AS l ON dtl.location_id = l.id
+        ${cabecera.role === 'client'
+          ? `WHERE EXISTS (
+               SELECT 1
+               FROM client_location AS cl_summary
+               WHERE cl_summary.location_id = dtl.location_id
+                 AND cl_summary.client_id = ${clientId}
+             )`
+          : ''}
+        GROUP BY dtl.donation_ticket_id
+      ) AS ticket_locations ON dt.id = ticket_locations.donation_ticket_id`;
 
     const ticketOrder = buildTableOrder(req, {
       id: 'dt.id',
       donation_id: 'dt.donation_id',
       total_weight: 'dt.total_weight',
       provider: 'provider.name',
-      location: 'location.community_city',
+      location: 'ticket_locations.location',
       date: 'dt.date',
       transported_by: 'tb.name',
       delivered_by: 'db.name',
@@ -20526,8 +21098,19 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      queryBuscar = ` AND (dt.id like '${buscar}' or dt.donation_id like '${buscar}' or dt.total_weight like '${buscar}' or provider.name like '${buscar}' or location.community_city like '${buscar}' or DATE_FORMAT(dt.date, '%m/%d/%Y') like '${buscar}' or db.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = ` AND (
+        dt.id LIKE ?
+        OR dt.donation_id LIKE ?
+        OR dt.total_weight LIKE ?
+        OR provider.name LIKE ?
+        OR ticket_locations.location LIKE ?
+        OR DATE_FORMAT(dt.date, '%m/%d/%Y') LIKE ?
+        OR db.name LIKE ?
+        OR DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') LIKE ?
+      )`;
+      searchParams.push(...Array(8).fill(buscar));
     }
+    const tableQueryParams = searchParams.concat(filterParams);
 
     try {
       const query = `SELECT
@@ -20535,7 +21118,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       dt.donation_id,
       dt.total_weight,
       provider.name as provider,
-      location.community_city as location,
+      ticket_locations.location as location,
       DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
       db.name as delivered_by,
       tb.name as transported_by,
@@ -20552,11 +21135,9 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id
       INNER JOIN provider ON dt.provider_id = provider.id
       INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
-      INNER JOIN location ON dt.location_id = location.id
-      ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
+      ${ticketLocationSummaryJoin}
       LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
       WHERE dt.enabled = 'Y'
-      ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
       ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
       ${queryBuscar}
       ${query_from_date}
@@ -20572,7 +21153,59 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         query
-        , [start, resultsPerPage]);
+        , tableQueryParams.concat([start, resultsPerPage]));
+
+      if (rows.length > 0) {
+        const ticketIds = rows.map((row) => Number(row.id));
+        const destinationQueryParams = [...ticketIds];
+        if (cabecera.role === 'client') {
+          destinationQueryParams.push(clientId);
+        }
+        const [destinationRows] = await mysqlConnection.promise().query(
+          `SELECT
+             dtl.donation_ticket_id,
+             dtl.location_id,
+             dtl.total_weight,
+             dtl.display_order,
+             l.community_city AS location,
+             l.organization,
+             l.address
+           FROM donation_ticket_location AS dtl
+           INNER JOIN location AS l ON dtl.location_id = l.id
+           ${cabecera.role === 'client'
+            ? `INNER JOIN client_location AS cl_destination
+                 ON dtl.location_id = cl_destination.location_id`
+            : ''}
+           WHERE dtl.donation_ticket_id IN (${ticketIds.map(() => '?').join(',')})
+           ${cabecera.role === 'client' ? 'AND cl_destination.client_id = ?' : ''}
+           ORDER BY dtl.donation_ticket_id, dtl.display_order, dtl.id`,
+          destinationQueryParams
+        );
+        const destinationsByTicket = new Map();
+        destinationRows.forEach((destinationRow) => {
+          const ticketId = Number(destinationRow.donation_ticket_id);
+          if (!destinationsByTicket.has(ticketId)) {
+            destinationsByTicket.set(ticketId, []);
+          }
+          destinationsByTicket.get(ticketId).push({
+            location_id: Number(destinationRow.location_id),
+            total_weight: destinationRow.total_weight === null
+              ? null
+              : Number(destinationRow.total_weight),
+            display_order: Number(destinationRow.display_order),
+            location: destinationRow.location,
+            organization: destinationRow.organization,
+            address: destinationRow.address
+          });
+        });
+        rows.forEach((row) => {
+          row.destinations = destinationsByTicket.get(Number(row.id)) || [];
+          row.location = row.destinations
+            .map((destination) => destination.location)
+            .join(', ');
+        });
+      }
+
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
         SELECT COUNT(DISTINCT dt.id) as count
@@ -20582,11 +21215,9 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id
         INNER JOIN provider ON dt.provider_id = provider.id
         INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
-        INNER JOIN location ON dt.location_id = location.id
-        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON location.id = cl.location_id' : ''}
+        ${ticketLocationSummaryJoin}
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         WHERE dt.enabled = 'Y'
-        ${cabecera.role === 'client' ? ' AND cl.client_id = ' + cabecera.client_id : ''}
         ${cabecera.role === 'stocker' ? ' AND dt.id IN (SELECT donation_ticket_id FROM stocker_log WHERE operation_id = 5 AND user_id = ' + cabecera.id + ')' : ''}
         ${queryBuscar}
         ${query_from_date}
@@ -20596,7 +21227,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         ${query_delivered_by}
         ${query_transported_by}
         ${query_stocker_upload}
-      `);
+      `, tableQueryParams);
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
@@ -20628,6 +21259,7 @@ router.delete('/ticket/:id', verifyToken, async (req, res) => {
         WHERE id = ?`,
         [id]
       );
+      invalidateTicketMetricsCache();
       res.json('Ticket eliminado');
     } catch (error) {
       console.log(error);
@@ -20752,9 +21384,14 @@ router.post('/table/product', verifyToken, async (req, res) => {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
-    const locations = filters.locations || [];
-    const providers = filters.providers || [];
-    const product_types = filters.product_types || [];
+    const locations = normalizePositiveIntegerArray(filters.locations);
+    const providers = normalizePositiveIntegerArray(filters.providers);
+    const product_types = normalizePositiveIntegerArray(filters.product_types);
+    const filterParams = [];
+    const clientId = Number.parseInt(cabecera.client_id, 10);
+    if (cabecera.role === 'client' && (!Number.isSafeInteger(clientId) || clientId <= 0)) {
+      return res.status(400).json('Invalid client');
+    }
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -20774,20 +21411,37 @@ router.post('/table/product', verifyToken, async (req, res) => {
     }
     var query_locations = '';
     if (locations.length > 0) {
-      query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      query_locations = `AND EXISTS (
+        SELECT 1
+        FROM donation_ticket_location AS dtl_filter
+        WHERE dtl_filter.donation_ticket_id = dt.id
+          AND dtl_filter.location_id IN (${locations.map(() => '?').join(',')})
+          ${cabecera.role === 'client'
+            ? `AND EXISTS (
+                 SELECT 1
+                 FROM client_location AS cl_filter
+                 WHERE cl_filter.location_id = dtl_filter.location_id
+                   AND cl_filter.client_id = ${clientId}
+               )`
+            : ''}
+      )`;
+      filterParams.push(...locations);
     }
     var query_providers = '';
     if (providers.length > 0) {
-      query_providers = 'AND dt.provider_id IN (' + providers.join() + ')';
+      query_providers = 'AND dt.provider_id IN (' + providers.map(() => '?').join(',') + ')';
+      filterParams.push(...providers);
     }
     var query_product_types = '';
     if (product_types.length > 0) {
-      query_product_types = 'AND p.product_type_id IN (' + product_types.join() + ')';
+      query_product_types = 'AND p.product_type_id IN (' + product_types.map(() => '?').join(',') + ')';
+      filterParams.push(...product_types);
     }
 
     let buscar = req.query.search;
     let queryBuscar = '';
     let queryBuscarCount = '';
+    const searchParams = [];
 
     var page = req.query.page ? Number(req.query.page) : 1;
 
@@ -20815,8 +21469,17 @@ router.post('/table/product', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      queryBuscar = `AND (id like '${buscar}' or name like '${buscar}' or product_type like '${buscar}' or value_usd like '${buscar}' or total_quantity like '${buscar}' or DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
-      queryBuscarCount = `AND (p.id like '${buscar}' or p.name like '${buscar}' or pt.name like '${buscar}' or pt.name_es like '${buscar}' or p.value_usd like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (
+        id LIKE ? OR name LIKE ? OR product_type LIKE ? OR value_usd LIKE ?
+        OR total_quantity LIKE ?
+        OR DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') LIKE ?
+      )`;
+      queryBuscarCount = `AND (
+        p.id LIKE ? OR p.name LIKE ? OR pt.name LIKE ? OR pt.name_es LIKE ?
+        OR p.value_usd LIKE ?
+        OR DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') LIKE ?
+      )`;
+      searchParams.push(...Array(6).fill(buscar));
     }
 
     try {
@@ -20841,14 +21504,22 @@ router.post('/table/product', verifyToken, async (req, res) => {
         INNER JOIN product_type as pt ON p.product_type_id = pt.id
         LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
         LEFT JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
-        ${cabecera.role === 'client' ? 'LEFT JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
         WHERE 1=1
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
         ${query_providers}
         ${query_product_types}
-        ${cabecera.role === 'client' ? 'AND cl.client_id = ' + cabecera.client_id : ''}
+        ${cabecera.role === 'client'
+          ? `AND EXISTS (
+               SELECT 1
+               FROM donation_ticket_location AS dtl_client
+               INNER JOIN client_location AS cl_client
+                 ON dtl_client.location_id = cl_client.location_id
+               WHERE dtl_client.donation_ticket_id = dt.id
+                 AND cl_client.client_id = ${clientId}
+             )`
+          : ''}
         GROUP BY p.id
       ) as subquery
       WHERE 1=1 
@@ -20856,10 +21527,13 @@ router.post('/table/product', verifyToken, async (req, res) => {
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
-      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      const [rows] = await mysqlConnection.promise().query(
+        query,
+        filterParams.concat(searchParams, [start, resultsPerPage])
+      );
       if (rows.length > 0) {
         let countRows;
-        if (cabecera.role === 'admin') {
+        if (cabecera.role !== 'client') {
           [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(DISTINCT p.id) as count
           FROM product as p
@@ -20873,7 +21547,7 @@ router.post('/table/product', verifyToken, async (req, res) => {
           ${query_locations}
           ${query_providers}
           ${query_product_types}
-        `);
+        `, searchParams.concat(filterParams));
         } else {
           // client
           [countRows] = await mysqlConnection.promise().query(`
@@ -20881,16 +21555,22 @@ router.post('/table/product', verifyToken, async (req, res) => {
           FROM product as p
           INNER JOIN product_type as pt ON p.product_type_id = pt.id
           LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
-          LEFT JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id 
-          LEFT JOIN client_location as cl ON dt.location_id = cl.location_id
-          WHERE cl.client_id = ?
+          LEFT JOIN donation_ticket as dt ON pdt.donation_ticket_id = dt.id
+          WHERE EXISTS (
+            SELECT 1
+            FROM donation_ticket_location AS dtl_client
+            INNER JOIN client_location AS cl_client
+              ON dtl_client.location_id = cl_client.location_id
+            WHERE dtl_client.donation_ticket_id = dt.id
+              AND cl_client.client_id = ?
+          )
           ${queryBuscarCount}
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
           ${query_providers}
           ${query_product_types}
-        `, [cabecera.client_id])
+        `, [clientId].concat(searchParams, filterParams))
         }
 
         const numOfResults = countRows[0].count;
@@ -21674,7 +22354,12 @@ router.post('/table/provider', verifyToken, async (req, res) => {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
-    const locations = filters.locations || [];
+    const locations = normalizePositiveIntegerArray(filters.locations);
+    const filterParams = [];
+    const clientId = Number.parseInt(cabecera.client_id, 10);
+    if (cabecera.role === 'client' && (!Number.isSafeInteger(clientId) || clientId <= 0)) {
+      return res.status(400).json('Invalid client');
+    }
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -21694,11 +22379,45 @@ router.post('/table/provider', verifyToken, async (req, res) => {
     }
     var query_locations = '';
     if (locations.length > 0) {
-      query_locations = 'AND dt.location_id IN (' + locations.join() + ')';
+      query_locations = `AND EXISTS (
+        SELECT 1
+        FROM donation_ticket AS dt_filter
+        INNER JOIN donation_ticket_location AS dtl_filter
+          ON dt_filter.id = dtl_filter.donation_ticket_id
+        ${cabecera.role === 'client'
+          ? `INNER JOIN client_location AS cl_filter
+               ON dtl_filter.location_id = cl_filter.location_id`
+          : ''}
+        WHERE dt_filter.provider_id = p.id
+          AND dt_filter.enabled = 'Y'
+          AND dtl_filter.location_id IN (${locations.map(() => '?').join(',')})
+          ${cabecera.role === 'client' ? 'AND cl_filter.client_id = ?' : ''}
+      )`;
+      filterParams.push(...locations);
+      if (cabecera.role === 'client') {
+        filterParams.push(clientId);
+      }
+    }
+    const query_client_scope = cabecera.role === 'client' && locations.length === 0
+      ? `AND EXISTS (
+           SELECT 1
+           FROM donation_ticket AS dt_client
+           INNER JOIN donation_ticket_location AS dtl_client
+             ON dt_client.id = dtl_client.donation_ticket_id
+           INNER JOIN client_location AS cl_client
+             ON dtl_client.location_id = cl_client.location_id
+           WHERE dt_client.provider_id = p.id
+             AND dt_client.enabled = 'Y'
+             AND cl_client.client_id = ?
+         )`
+      : '';
+    if (cabecera.role === 'client' && locations.length === 0) {
+      filterParams.push(clientId);
     }
 
     let buscar = req.query.search;
     let queryBuscar = '';
+    const searchParams = [];
 
     var page = req.query.page ? Number(req.query.page) : 1;
 
@@ -21724,7 +22443,13 @@ router.post('/table/provider', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      queryBuscar = `AND (p.id like '${buscar}' or p.name like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}' or DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (
+        p.id LIKE ?
+        OR p.name LIKE ?
+        OR DATE_FORMAT(CONVERT_TZ(p.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') LIKE ?
+        OR DATE_FORMAT(CONVERT_TZ(p.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') LIKE ?
+      )`;
+      searchParams.push(...Array(4).fill(buscar));
     }
 
     try {
@@ -21740,10 +22465,15 @@ router.post('/table/provider', verifyToken, async (req, res) => {
       ${query_from_date}
       ${query_to_date}
       ${query_locations}
+      ${query_client_scope}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`;
 
-      const [rows] = await mysqlConnection.promise().query(query, [start, resultsPerPage]);
+      const providerQueryParams = searchParams.concat(filterParams);
+      const [rows] = await mysqlConnection.promise().query(
+        query,
+        providerQueryParams.concat([start, resultsPerPage])
+      );
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
@@ -21753,7 +22483,8 @@ router.post('/table/provider', verifyToken, async (req, res) => {
           ${query_from_date}
           ${query_to_date}
           ${query_locations}
-        `);
+          ${query_client_scope}
+        `, providerQueryParams);
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
@@ -22444,12 +23175,25 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
                 dt.id,
                 dt.donation_id,
                 provider.name as provider,
-                location.community_city as location,
+                COALESCE(
+                  (
+                    SELECT GROUP_CONCAT(
+                      destination_location.community_city
+                      ORDER BY dtl.display_order, dtl.id
+                      SEPARATOR ', '
+                    )
+                    FROM donation_ticket_location AS dtl
+                    INNER JOIN location AS destination_location
+                      ON destination_location.id = dtl.location_id
+                    WHERE dtl.donation_ticket_id = dt.id
+                  ),
+                  legacy_location.community_city
+                ) as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 DATE_FORMAT(CONVERT_TZ(dt.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') as creation_date
               FROM donation_ticket as dt
               INNER JOIN provider ON dt.provider_id = provider.id
-              INNER JOIN location ON dt.location_id = location.id
+              INNER JOIN location AS legacy_location ON dt.location_id = legacy_location.id
               INNER JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
               WHERE sl.user_id = ? AND dt.enabled = 'Y'`,
               [idUser]
@@ -22770,9 +23514,17 @@ router.get('/view/provider/:idProvider', verifyToken, async (req, res) => {
         FROM provider as p
         LEFT JOIN donation_ticket as t ON p.id = t.provider_id
         LEFT JOIN product_donation_ticket as pdt ON t.id = pdt.donation_ticket_id
-        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON t.location_id = cl.location_id' : ''}
         WHERE p.id = ? and t.enabled = 'Y'
-        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
+        ${cabecera.role === 'client'
+          ? ` AND EXISTS (
+                SELECT 1
+                FROM donation_ticket_location AS dtl_client
+                INNER JOIN client_location AS cl_client
+                  ON dtl_client.location_id = cl_client.location_id
+                WHERE dtl_client.donation_ticket_id = t.id
+                  AND cl_client.client_id = ?
+              )`
+          : ''}
         GROUP BY t.id
         ORDER BY t.donation_id DESC`,
         [idProvider, cabecera.client_id]
@@ -22836,9 +23588,17 @@ router.get('/view/product/:idProduct', verifyToken, async (req, res) => {
         INNER JOIN product_type as pt ON p.product_type_id = pt.id
         LEFT JOIN product_donation_ticket as pdt ON p.id = pdt.product_id
         LEFT JOIN donation_ticket as t ON pdt.donation_ticket_id = t.id
-        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON t.location_id = cl.location_id' : ''}
         WHERE p.id = ? and t.enabled = 'Y'
-        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
+        ${cabecera.role === 'client'
+          ? ` AND EXISTS (
+                SELECT 1
+                FROM donation_ticket_location AS dtl_client
+                INNER JOIN client_location AS cl_client
+                  ON dtl_client.location_id = cl_client.location_id
+                WHERE dtl_client.donation_ticket_id = t.id
+                  AND cl_client.client_id = ?
+              )`
+          : ''}
         ORDER BY t.donation_id DESC`,
         [idProduct, cabecera.client_id]
       );
@@ -23181,7 +23941,6 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
                 dt.donation_id,
                 dt.total_weight,
                 p.name as provider,
-                loc.community_city as location,
                 DATE_FORMAT(dt.date, '%m/%d/%Y') as date,
                 db.name as delivered_by,
                 tb.name as transported_by,
@@ -23197,16 +23956,23 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         INNER JOIN transported_by as tb ON dt.transported_by_id = tb.id
         INNER JOIN provider as p ON dt.provider_id = p.id
         INNER JOIN audit_status as as1 ON dt.audit_status_id = as1.id
-        INNER JOIN location as loc ON dt.location_id = loc.id
-        ${cabecera.role === 'client' ? 'INNER JOIN client_location as cl ON dt.location_id = cl.location_id' : ''}
         LEFT JOIN stocker_log as sl ON dt.id = sl.donation_ticket_id AND sl.operation_id = 5
         LEFT JOIN user as u ON sl.user_id = u.id
         LEFT JOIN product_donation_ticket as pdt ON dt.id = pdt.donation_ticket_id
         LEFT JOIN product as product ON pdt.product_id = product.id
         WHERE dt.id = ? AND dt.enabled = 'Y'
-        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
+        ${cabecera.role === 'client'
+          ? ` AND EXISTS (
+                SELECT 1
+                FROM donation_ticket_location AS dtl_access
+                INNER JOIN client_location AS cl_access
+                  ON dtl_access.location_id = cl_access.location_id
+                WHERE dtl_access.donation_ticket_id = dt.id
+                  AND cl_access.client_id = ?
+              )`
+          : ''}
         ORDER BY pdt.id ASC`,
-        [idTicket, cabecera.client_id]
+        cabecera.role === 'client' ? [idTicket, cabecera.client_id] : [idTicket]
       );
 
       if (rows.length > 0) {
@@ -23218,7 +23984,6 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
         ticket["donation_id"] = rows[0].donation_id;
         ticket["total_weight"] = rows[0].total_weight;
         ticket["provider"] = rows[0].provider;
-        ticket["location"] = rows[0].location;
         ticket["date"] = rows[0].date;
         ticket["delivered_by"] = rows[0].delivered_by;
         ticket["transported_by"] = rows[0].transported_by;
@@ -23233,6 +23998,40 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
           }
         }
         ticket["products"] = products;
+
+        const destinationQueryParams = [idTicket];
+        if (cabecera.role === 'client') {
+          destinationQueryParams.push(cabecera.client_id);
+        }
+        const [destinationRows] = await mysqlConnection.promise().query(
+          `SELECT
+             dtl.location_id,
+             dtl.total_weight,
+             dtl.display_order,
+             l.community_city AS location,
+             l.organization,
+             l.address
+           FROM donation_ticket_location AS dtl
+           INNER JOIN location AS l ON dtl.location_id = l.id
+           ${cabecera.role === 'client'
+            ? `INNER JOIN client_location AS cl_destination
+                 ON dtl.location_id = cl_destination.location_id`
+            : ''}
+           WHERE dtl.donation_ticket_id = ?
+           ${cabecera.role === 'client' ? 'AND cl_destination.client_id = ?' : ''}
+           ORDER BY dtl.display_order, dtl.id`,
+          destinationQueryParams
+        );
+        ticket["destinations"] = destinationRows.map((destinationRow) => ({
+          ...destinationRow,
+          location_id: Number(destinationRow.location_id),
+          total_weight: destinationRow.total_weight === null
+            ? null
+            : Number(destinationRow.total_weight)
+        }));
+        ticket["location"] = destinationRows
+          .map((destinationRow) => destinationRow.location)
+          .join(', ');
 
         const [rows_notes] = await mysqlConnection.promise().query(
           `SELECT dtn.id,
