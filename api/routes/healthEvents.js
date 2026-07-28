@@ -637,6 +637,80 @@ function splitFullName(fullName) {
 // PUBLIC ENDPOINTS
 // =====================================================================
 
+/**
+ * Public-home payload: events flagged by the admin as visible on the public
+ * home (cards linking to their landings) + the newest promoted event's dialog.
+ * Unauthenticated + 60s in-memory cache (high-traffic page).
+ */
+const publicHomeCache = { at: 0, data: null };
+const PUBLIC_HOME_CACHE_MS = 60 * 1000;
+
+router.get('/health-events/public-home', async (req, res) => {
+  try {
+    if (publicHomeCache.data && Date.now() - publicHomeCache.at < PUBLIC_HOME_CACHE_MS) {
+      return res.status(200).json(publicHomeCache.data);
+    }
+    const [events] = await mysqlConnection.promise().query(
+      `SELECT he.*, l.organization, l.community_city, l.address
+       FROM health_event he INNER JOIN location l ON l.id = he.location_id
+       WHERE he.enabled = 'Y' AND he.landing_enabled = 'Y' AND he.public_home_visible = 'Y'
+         AND he.end_date >= CURDATE()
+       ORDER BY he.start_date ASC`);
+
+    const list = [];
+    for (const event of events) {
+      const [heroRows] = await mysqlConnection.promise().query(
+        `SELECT * FROM health_event_image WHERE health_event_id = ? AND section_key = 'hero' AND enabled = 'Y'
+         ORDER BY display_order ASC, id ASC LIMIT 1`, [event.id]);
+      const hero = heroRows.length ? (await attachImageUrls(heroRows))[0] : null;
+      const landing = safeParseJson(event.landing_json, {}) || {};
+      const heroText = landing.hero || {};
+      list.push({
+        ...publicEventShape(event),
+        subtitle_en: heroText.subtitle_en || null,
+        subtitle_es: heroText.subtitle_es || null,
+        tagline_en: heroText.tagline_en || null,
+        tagline_es: heroText.tagline_es || null,
+        hero_image: hero ? { url: hero.url, url_small: hero.url_small, url_medium: hero.url_medium } : null
+      });
+    }
+
+    // Promo dialog: only the NEWEST promoted event (highest id = last added).
+    let promo = null;
+    const promoted = events.filter(e => e.promo_dialog_enabled === 'Y');
+    if (promoted.length) {
+      const latest = promoted.reduce((a, b) => (b.id > a.id ? b : a));
+      const promoJson = safeParseJson(latest.promo_json, {}) || {};
+      let imageUrl = null;
+      const [imageRows] = await mysqlConnection.promise().query(
+        `SELECT * FROM health_event_image WHERE health_event_id = ? AND section_key = 'promo_dialog' AND enabled = 'Y'
+         ORDER BY display_order ASC, id DESC LIMIT 1`, [latest.id]);
+      if (imageRows.length) {
+        imageUrl = await signImageUrl(imageRows[0].s3_key_medium || imageRows[0].s3_key);
+      }
+      promo = {
+        event_id: latest.id,
+        slug: latest.slug,
+        version: Number(latest.promo_dialog_version) || 1,
+        name_en: latest.name_en,
+        name_es: latest.name_es,
+        text_en: promoJson.text_en || null,
+        text_es: promoJson.text_es || null,
+        image_url: imageUrl,
+        link_url: promoJson.link_url || null
+      };
+    }
+
+    const data = { events: list, promo };
+    publicHomeCache.at = Date.now();
+    publicHomeCache.data = data;
+    res.status(200).json(data);
+  } catch (error) {
+    logger.error('GET /health-events/public-home error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
 router.get('/health-events/landing/:slug', async (req, res) => {
   try {
     const event = await getEventBySlug(String(req.params.slug).toLowerCase());
@@ -1621,16 +1695,51 @@ router.put('/health-events/:id(\\d+)', verifyToken, requireAdmin, async (req, re
     if (slugTaken.length) {
       return res.status(409).json({ error: 'SLUG_TAKEN' });
     }
+
+    // Public-home visibility + promo dialog (absent fields preserve stored values).
+    const [currentRows] = await mysqlConnection.promise().query(
+      'SELECT public_home_visible, promo_dialog_enabled, promo_dialog_version, promo_json FROM health_event WHERE id = ? LIMIT 1', [id]);
+    const current = currentRows[0] || {};
+    const publicHomeVisible = req.body.public_home_visible === undefined
+      ? (current.public_home_visible === 'Y' ? 'Y' : 'N')
+      : (req.body.public_home_visible === 'Y' ? 'Y' : 'N');
+    let promoEnabled = req.body.promo_dialog_enabled === undefined
+      ? (current.promo_dialog_enabled === 'Y' ? 'Y' : 'N')
+      : (req.body.promo_dialog_enabled === 'Y' ? 'Y' : 'N');
+    // The dialog only makes sense if the event is listed on the public home.
+    if (publicHomeVisible !== 'Y') promoEnabled = 'N';
+    let promoVersion = Number(current.promo_dialog_version) || 1;
+    if (promoEnabled === 'Y' && current.promo_dialog_enabled !== 'Y') {
+      // (Re)activation bumps the version so users who dismissed it see it again.
+      promoVersion += 1;
+    }
+    let promoJson = current.promo_json != null ? current.promo_json : null;
+    if (req.body.promo_json !== undefined) {
+      if (req.body.promo_json && typeof req.body.promo_json === 'object') {
+        const rawLink = String(req.body.promo_json.link_url || '').trim().slice(0, 500);
+        promoJson = JSON.stringify({
+          text_en: String(req.body.promo_json.text_en || '').trim().slice(0, 600) || null,
+          text_es: String(req.body.promo_json.text_es || '').trim().slice(0, 600) || null,
+          link_url: /^https?:\/\//i.test(rawLink) ? rawLink : null
+        });
+      } else {
+        promoJson = null;
+      }
+    }
+
     await mysqlConnection.promise().query(
       'UPDATE health_event SET slug = ?, name_en = ?, name_es = ?, location_id = ?, client_id = ?, start_date = ?, \
         end_date = ?, start_time = ?, end_time = ?, timezone = ?, registration_opens_at = ?, registration_closes_at = ?, \
-        enabled = ?, landing_enabled = ? WHERE id = ?',
+        enabled = ?, landing_enabled = ?, public_home_visible = ?, promo_dialog_enabled = ?, promo_dialog_version = ?, \
+        promo_json = ? WHERE id = ?',
       [slug, req.body.name_en, req.body.name_es, req.body.location_id, req.body.client_id || null,
         toSqlDateString(req.body.start_date), toSqlDateString(req.body.end_date),
         req.body.start_time || null, req.body.end_time || null,
         req.body.timezone || 'America/Los_Angeles',
         toSqlDateTimeString(req.body.registration_opens_at), toSqlDateTimeString(req.body.registration_closes_at),
-        req.body.enabled === 'N' ? 'N' : 'Y', req.body.landing_enabled === 'N' ? 'N' : 'Y', id]);
+        req.body.enabled === 'N' ? 'N' : 'Y', req.body.landing_enabled === 'N' ? 'N' : 'Y',
+        publicHomeVisible, promoEnabled, promoVersion, promoJson, id]);
+    publicHomeCache.at = 0; // public-home payload changed
     res.status(200).json({});
   } catch (error) {
     logger.error('PUT /health-events/:id error: ' + error.message);
@@ -1666,6 +1775,10 @@ router.get('/health-events/:id(\\d+)/full', verifyToken, requireAdmin, async (re
         ...publicEventShape(event),
         enabled: event.enabled,
         landing_enabled: event.landing_enabled,
+        public_home_visible: event.public_home_visible === 'Y' ? 'Y' : 'N',
+        promo_dialog_enabled: event.promo_dialog_enabled === 'Y' ? 'Y' : 'N',
+        promo_dialog_version: Number(event.promo_dialog_version) || 1,
+        promo_json: safeParseJson(event.promo_json, null),
         landing_json: safeParseJson(event.landing_json, null)
       },
       images: await attachImageUrls(images),
@@ -2129,11 +2242,28 @@ router.get('/health-events/registrations/:registrationId(\\d+)', verifyToken, re
        ORDER BY q.form_id, q.sort_order`, [registrationId]);
     const [scans] = await mysqlConnection.promise().query(
       `SELECT s.id, s.scan_type, s.scanned_at, st.name_en AS stand_en, st.name_es AS stand_es,
-              ss.name_en AS service_en, ss.name_es AS service_es
+              ss.name_en AS service_en, ss.name_es AS service_es,
+              TRIM(CONCAT(vu.firstname, ' ', COALESCE(vu.lastname, ''))) AS volunteer_name
        FROM health_event_scan s
        INNER JOIN health_event_stand st ON st.id = s.stand_id
        LEFT JOIN health_event_stand_service ss ON ss.id = s.service_id
+       LEFT JOIN user vu ON vu.id = s.volunteer_user_id
        WHERE s.registration_id = ? ORDER BY s.scanned_at`, [registrationId]);
+
+    // Volunteer movement history: every stand/service session ever started
+    // (rows are soft-ended with ended_at, never deleted).
+    let assignments = [];
+    if (registration.registration_role === 'volunteer') {
+      const [assignmentRows] = await mysqlConnection.promise().query(
+        `SELECT a.started_at, a.ended_at, st.name_en AS stand_en, st.name_es AS stand_es,
+                ss.name_en AS service_en, ss.name_es AS service_es
+         FROM health_event_volunteer_assignment a
+         INNER JOIN health_event_stand st ON st.id = a.stand_id
+         LEFT JOIN health_event_stand_service ss ON ss.id = a.service_id
+         WHERE a.health_event_id = ? AND a.user_id = ?
+         ORDER BY a.started_at`, [registration.health_event_id, registration.user_id]);
+      assignments = assignmentRows;
+    }
 
     res.status(200).json({
       registration: {
@@ -2158,7 +2288,8 @@ router.get('/health-events/registrations/:registrationId(\\d+)', verifyToken, re
       dates: dates.map(d => ({ event_date: toSqlDateString(d.event_date), priority_service: d.priority_service })),
       appointments: appointments.map(a => ({ ...a, slot_date: toSqlDateString(a.slot_date) })),
       answers,
-      scans
+      scans,
+      assignments
     });
   } catch (error) {
     logger.error('GET /health-events/registrations/:id error: ' + error.message);
