@@ -974,6 +974,85 @@ async function sendAlertEmail(subject, body, emails) {
   await transporter.sendMail(mailOptions);
 }
 
+// ---------------------------------------------------------------------------
+// Health event volunteer credentials (account created from the event form)
+// ---------------------------------------------------------------------------
+
+const HEALTH_VOLUNTEER_CREDENTIALS_I18N = {
+  en: {
+    subject: (eventName) => `Your volunteer account — ${eventName}`,
+    title: 'Welcome, volunteer!',
+    intro: (eventName) => `Thank you for registering as a volunteer for <strong>${eventName}</strong>. An account was created for you in the Bienestar Community system — you will use it on the day of the event to scan participants at your assigned service point.`,
+    usernameLabel: 'Username',
+    passwordLabel: 'Password',
+    loginHint: 'Sign in at',
+    keepSafe: 'Please keep these credentials safe. You can change your password from My Account after signing in.',
+    pendingApproval: 'Your request is pending review: you will be able to sign in with these credentials once our team approves your volunteer application. We will be in touch soon!',
+    footer: 'Bienestar is Wellbeing — Community Health Events'
+  },
+  es: {
+    subject: (eventName) => `Tu cuenta de voluntario — ${eventName}`,
+    title: '¡Bienvenido/a, voluntario/a!',
+    intro: (eventName) => `Gracias por registrarte como voluntario/a para <strong>${eventName}</strong>. Se creó una cuenta para ti en el sistema de Bienestar Community: la usarás el día del evento para escanear participantes en tu punto de servicio asignado.`,
+    usernameLabel: 'Usuario',
+    passwordLabel: 'Contraseña',
+    loginHint: 'Inicia sesión en',
+    keepSafe: 'Guarda estas credenciales en un lugar seguro. Puedes cambiar tu contraseña desde Mi Cuenta después de iniciar sesión.',
+    pendingApproval: 'Tu solicitud está pendiente de revisión: podrás iniciar sesión con estas credenciales cuando nuestro equipo apruebe tu solicitud de voluntariado. ¡Te contactaremos pronto!',
+    footer: 'Bienestar is Wellbeing — Eventos Comunitarios de Salud'
+  }
+};
+
+async function sendHealthEventVolunteerCredentials({ to, language, eventNameEn, eventNameEs, username, password, pendingApproval = false }) {
+  try {
+    const lang = language === 'es' ? 'es' : 'en';
+    const t = HEALTH_VOLUNTEER_CREDENTIALS_I18N[lang];
+    const B = VOLUNTEER_NOTIFICATION_BRAND;
+    const eventName = lang === 'es' ? (eventNameEs || eventNameEn) : (eventNameEn || eventNameEs);
+    const loginUrl = 'https://bienestarcommunity.org/home';
+
+    const html = `
+      <div style="background:${B.pageBg};padding:24px;font-family:'Segoe UI',Arial,sans-serif;color:${B.textDark};">
+        <div style="max-width:560px;margin:0 auto;background:#ffffff;border:2px solid ${B.border};border-radius:12px;overflow:hidden;">
+          <div style="background:${B.lightCyan};padding:20px 24px;">
+            <h1 style="margin:0;color:${B.rose};font-size:24px;">${t.title}</h1>
+          </div>
+          <div style="padding:24px;">
+            <p style="margin:0 0 16px;font-size:15px;line-height:1.5;">${t.intro(eventName)}</p>
+            <div style="background:${B.pageBg};border:2px solid ${B.border};border-radius:10px;padding:16px 20px;margin:0 0 16px;">
+              <p style="margin:0 0 8px;font-size:14px;"><strong>${t.usernameLabel}:</strong>
+                <span style="font-family:monospace;font-size:16px;color:${B.rose};">${username}</span></p>
+              <p style="margin:0;font-size:14px;"><strong>${t.passwordLabel}:</strong>
+                <span style="font-family:monospace;font-size:16px;color:${B.rose};">${password}</span></p>
+            </div>
+            ${pendingApproval ? `<div style="background:#fff7e6;border:2px solid #f0c36d;border-radius:10px;padding:12px 16px;margin:0 0 16px;">
+              <p style="margin:0;font-size:14px;color:#8a5a00;">${t.pendingApproval}</p>
+            </div>` : ''}
+            <p style="margin:0 0 8px;font-size:14px;">${t.loginHint}: <a href="${loginUrl}" style="color:${B.sky};">${loginUrl}</a></p>
+            <p style="margin:0;font-size:13px;color:#6b7280;">${t.keepSafe}</p>
+          </div>
+          <div style="border-top:2px solid ${B.border};padding:14px 24px;font-size:12px;color:#6b7280;">${t.footer}</div>
+        </div>
+      </div>`;
+    const text = `${t.title}\n\n${t.intro(eventName).replace(/<[^>]+>/g, '')}\n\n` +
+      `${t.usernameLabel}: ${username}\n${t.passwordLabel}: ${password}\n\n` +
+      (pendingApproval ? `${t.pendingApproval}\n\n` : '') +
+      `${t.loginHint}: ${loginUrl}\n\n${t.keepSafe}`;
+
+    await transporter.sendMail({
+      from: 'bienestarcommunity@gmail.com',
+      to,
+      subject: t.subject(eventName),
+      text,
+      html
+    });
+  } catch (error) {
+    console.log('Error sending health event volunteer credentials email:', error);
+  }
+}
+
+module.exports.sendHealthEventVolunteerCredentials = sendHealthEventVolunteerCredentials;
+
 module.exports.sendVolunteerConfirmation = sendVolunteerConfirmation;
 
 module.exports.sendVolunteerRegistrationNotification = sendVolunteerRegistrationNotification;

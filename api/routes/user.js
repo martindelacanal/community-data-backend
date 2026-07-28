@@ -68,9 +68,12 @@ const secretAccessKey = process.env.SECRET_ACCESS_KEY;
 const crypto = require("crypto");
 const randomImageName = (bytes = 32) =>
   crypto.randomBytes(bytes).toString("hex");
-const BENEFICIARY_PIN_TTL_SECONDS = 60;
-const BENEFICIARY_PIN_LENGTH = 4;
-const BENEFICIARY_PIN_MAX_ATTEMPTS = 200;
+// Shared PIN system (alphanumeric short-lived tokens) — also used by health events.
+const {
+  normalizeBeneficiaryPin,
+  cleanupExpiredBeneficiaryPins,
+  createBeneficiaryPin
+} = require('../utils/beneficiaryPin');
 
 const s3 = new S3Client({
   credentials: {
@@ -317,7 +320,7 @@ router.post('/signin', (req, res) => {
 router.get('/refresh-token', verifyToken, (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager' || cabecera.role === 'eventvolunteer') {
     jwt.sign({ data: req.data.data }, process.env.JWT_SECRET, { expiresIn: '6h' }, (err, token) => {
       res.status(200).json({ token: token });
     });
@@ -3814,98 +3817,6 @@ router.put('/new/user/:id', verifyToken, async (req, res) => {
 function parsePositiveInteger(value) {
   const parsedValue = parseInt(value, 10);
   return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
-}
-
-function normalizeBeneficiaryPin(pin) {
-  const normalizedPin = pin == null ? '' : String(pin).trim();
-  const pinPattern = new RegExp(`^\\d{${BENEFICIARY_PIN_LENGTH}}$`);
-  return pinPattern.test(normalizedPin) ? normalizedPin : null;
-}
-
-function formatBeneficiaryPin(pinNumber) {
-  return pinNumber.toString().padStart(BENEFICIARY_PIN_LENGTH, '0');
-}
-
-function mapBeneficiaryPinResponse(row) {
-  return {
-    pin: row.pin,
-    expires_at_ms: Number(row.expires_at_ms),
-    server_time_ms: Number(row.server_time_ms),
-    ttl_seconds: BENEFICIARY_PIN_TTL_SECONDS,
-    pin_length: BENEFICIARY_PIN_LENGTH
-  };
-}
-
-async function cleanupExpiredBeneficiaryPins() {
-  await mysqlConnection.promise().query(
-    'delete from beneficiary_delivery_pin where expires_at <= UTC_TIMESTAMP()'
-  );
-}
-
-async function getActiveBeneficiaryPin(userId) {
-  const [rows] = await mysqlConnection.promise().query(
-    `select
-        pin,
-        TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', expires_at) / 1000 as expires_at_ms,
-        TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', UTC_TIMESTAMP(3)) / 1000 as server_time_ms
-      from beneficiary_delivery_pin
-      where user_id = ?
-        and expires_at > UTC_TIMESTAMP()
-      order by expires_at desc
-      limit 1`,
-    [userId]
-  );
-
-  return rows.length > 0 ? mapBeneficiaryPinResponse(rows[0]) : null;
-}
-
-async function getBeneficiaryPinById(pinId) {
-  const [rows] = await mysqlConnection.promise().query(
-    `select
-        pin,
-        TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', expires_at) / 1000 as expires_at_ms,
-        TIMESTAMPDIFF(MICROSECOND, '1970-01-01 00:00:00', UTC_TIMESTAMP(3)) / 1000 as server_time_ms
-      from beneficiary_delivery_pin
-      where id = ?`,
-    [pinId]
-  );
-
-  return rows.length > 0 ? mapBeneficiaryPinResponse(rows[0]) : null;
-}
-
-async function createBeneficiaryPin(userId, locationId) {
-  await cleanupExpiredBeneficiaryPins();
-
-  const activePin = await getActiveBeneficiaryPin(userId);
-  if (activePin) {
-    return activePin;
-  }
-
-  await mysqlConnection.promise().query(
-    'delete from beneficiary_delivery_pin where user_id = ?',
-    [userId]
-  );
-
-  for (let attempt = 0; attempt < BENEFICIARY_PIN_MAX_ATTEMPTS; attempt++) {
-    const candidatePin = formatBeneficiaryPin(crypto.randomInt(0, 10 ** BENEFICIARY_PIN_LENGTH));
-
-    try {
-      const [insertResult] = await mysqlConnection.promise().query(
-        `insert into beneficiary_delivery_pin(user_id, location_id, pin, expires_at)
-         values(?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
-        [userId, locationId, candidatePin, BENEFICIARY_PIN_TTL_SECONDS]
-      );
-
-      return await getBeneficiaryPinById(insertResult.insertId);
-    } catch (error) {
-      if (error && error.code === 'ER_DUP_ENTRY') {
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  throw new Error('Could not allocate a unique beneficiary PIN');
 }
 
 router.post('/beneficiary/pin/:locationId', verifyToken, async (req, res) => {

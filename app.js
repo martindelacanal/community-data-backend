@@ -29,4 +29,7 @@ app.use('/api',alertsRoute);
 const pushNotificationsRoute = require('./api/routes/pushNotifications');
 app.use('/api', pushNotificationsRoute);
 
+const healthEventsRoute = require('./api/routes/healthEvents');
+app.use('/api', healthEventsRoute);
+
 module.exports = app;
