@@ -56,14 +56,15 @@ const DEFAULT_PROMO = {
     log('WARN: banning event not found — flags not set');
   } else {
     const event = events[0];
-    const promoJson = event.promo_json ? event.promo_json : JSON.stringify(DEFAULT_PROMO);
-    if (event.public_home_visible === 'Y' && event.promo_dialog_enabled === 'Y') {
-      log('banning already visible + promoted');
+    // Only initialize on the FIRST run (promo_json empty). After that the
+    // flags belong to the admin panel — a re-run must never re-enable them.
+    if (event.promo_json) {
+      log(`banning already initialized (flags untouched: visible=${event.public_home_visible}, dialog=${event.promo_dialog_enabled})`);
     } else {
       await c.query(
         `UPDATE health_event SET public_home_visible = 'Y', promo_dialog_enabled = 'Y', promo_json = ? WHERE id = ?`,
-        [promoJson, event.id]);
-      log('banning set: public_home_visible=Y, promo_dialog_enabled=Y, promo text', event.promo_json ? '(kept)' : '(default)');
+        [JSON.stringify(DEFAULT_PROMO), event.id]);
+      log('banning initialized: public_home_visible=Y, promo_dialog_enabled=Y, default promo text');
     }
   }
 
