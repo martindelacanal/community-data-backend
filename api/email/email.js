@@ -1030,6 +1030,7 @@ async function sendHealthEventVolunteerCredentials({ to, language, eventNameEn, 
             </div>` : ''}
             <p style="margin:0 0 8px;font-size:14px;">${t.loginHint}: <a href="${loginUrl}" style="color:${B.sky};">${loginUrl}</a></p>
             <p style="margin:0;font-size:13px;color:#6b7280;">${t.keepSafe}</p>
+            ${buildAppDownloadSectionHtml(lang)}
           </div>
           <div style="border-top:2px solid ${B.border};padding:14px 24px;font-size:12px;color:#6b7280;">${t.footer}</div>
         </div>
@@ -1037,7 +1038,8 @@ async function sendHealthEventVolunteerCredentials({ to, language, eventNameEn, 
     const text = `${t.title}\n\n${t.intro(eventName).replace(/<[^>]+>/g, '')}\n\n` +
       `${t.usernameLabel}: ${username}\n${t.passwordLabel}: ${password}\n\n` +
       (pendingApproval ? `${t.pendingApproval}\n\n` : '') +
-      `${t.loginHint}: ${loginUrl}\n\n${t.keepSafe}`;
+      `${t.loginHint}: ${loginUrl}\n\n${t.keepSafe}\n` +
+      buildAppDownloadSectionText(lang);
 
     await transporter.sendMail({
       from: 'bienestarcommunity@gmail.com',
@@ -1050,6 +1052,461 @@ async function sendHealthEventVolunteerCredentials({ to, language, eventNameEn, 
     console.log('Error sending health event volunteer credentials email:', error);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Mobile app download invitation (shared block for registrant-facing emails)
+// ---------------------------------------------------------------------------
+
+const MOBILE_APP_LINKS = {
+  android: 'https://play.google.com/store/apps/details?id=com.bienestarcommunity.app',
+  ios: 'https://apps.apple.com/ar/app/bienestar-community/id6761124586'
+};
+
+const MOBILE_APP_I18N = {
+  en: {
+    title: 'Take Bienestar Community with you!',
+    text: 'Carry your event QR code, appointments and services in your pocket. Everything is faster and easier from our free mobile app.',
+    playTag: 'Get it on',
+    appTag: 'Download on the',
+    playName: 'Google Play',
+    appName: 'App Store',
+    hint: 'Free for Android and iPhone.',
+    textIntro: 'Download our free mobile app:'
+  },
+  es: {
+    title: '¡Lleva Bienestar Community contigo!',
+    text: 'Ten tu código QR del evento, tus citas y servicios en el bolsillo. Todo es más rápido y fácil desde nuestra app móvil gratuita.',
+    playTag: 'Disponible en',
+    appTag: 'Descárgala en',
+    playName: 'Google Play',
+    appName: 'App Store',
+    hint: 'Gratis para Android y iPhone.',
+    textIntro: 'Descarga nuestra app móvil gratuita:'
+  }
+};
+
+/**
+ * Email-safe "download our app" card: brand cyan card, two store badges built
+ * with pure HTML/CSS (no remote images, so nothing gets blocked by clients).
+ */
+function buildAppDownloadSectionHtml(language) {
+  const t = MOBILE_APP_I18N[language === 'es' ? 'es' : 'en'];
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const badge = (href, tag, name) => `
+    <a href="${href}" target="_blank" rel="noopener"
+       style="display:inline-block;background:#1c1e21;border:1px solid #3a3d40;border-radius:12px;padding:10px 22px;text-decoration:none;text-align:left;min-width:150px;">
+      <span style="display:block;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:10px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#9fe8f5;">${escapeHtmlValue(tag)}</span>
+      <span style="display:block;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:17px;font-weight:700;color:#ffffff;line-height:1.3;">${escapeHtmlValue(name)}</span>
+    </a>`;
+
+  return `
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:24px 0 8px 0;">
+    <tr>
+      <td style="background:${B.lightCyan};background:linear-gradient(160deg,${B.lightCyan} 0%,#e9fbfb 100%);border:1px solid ${B.border};border-radius:14px;padding:26px 22px;text-align:center;">
+        <div style="font-size:34px;line-height:1;margin-bottom:10px;">📱</div>
+        <h3 style="margin:0 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:19px;font-weight:700;color:${B.textDark};">${escapeHtmlValue(t.title)}</h3>
+        <p style="margin:0 0 18px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#5c6a6a;">${escapeHtmlValue(t.text)}</p>
+        <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:0 auto;">
+          <tr>
+            <td style="padding:0 6px 8px 6px;">${badge(MOBILE_APP_LINKS.android, t.playTag, t.playName)}</td>
+            <td style="padding:0 6px 8px 6px;">${badge(MOBILE_APP_LINKS.ios, t.appTag, t.appName)}</td>
+          </tr>
+        </table>
+        <p style="margin:8px 0 0 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:12px;color:#7c8a8a;">${escapeHtmlValue(t.hint)}</p>
+      </td>
+    </tr>
+  </table>`;
+}
+
+function buildAppDownloadSectionText(language) {
+  const t = MOBILE_APP_I18N[language === 'es' ? 'es' : 'en'];
+  return `\n${t.title}\n${t.textIntro}\n- Android (${t.playName}): ${MOBILE_APP_LINKS.android}\n- iPhone (${t.appName}): ${MOBILE_APP_LINKS.ios}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// Health event — beneficiary registration confirmation (sent to the registrant)
+// ---------------------------------------------------------------------------
+
+const HEALTH_BENEFICIARY_CONFIRMATION_I18N = {
+  en: {
+    subject: (eventName) => `You're registered! — ${eventName}`,
+    eyebrow: 'Bienestar Community',
+    title: 'Registration confirmed!',
+    subtitle: (eventName) => eventName,
+    preheader: 'Your spot is saved. Here are your event details.',
+    intro: (firstname, eventName) => `Hi${firstname ? ' ' + firstname : ''}! Thank you for registering for <strong>${eventName}</strong>. Your spot is saved — we can't wait to see you there.`,
+    whereLabel: 'Where',
+    datesLabel: 'Your date(s)',
+    timeLabel: 'Hours',
+    appointmentsLabel: 'Your appointments',
+    qrHint: 'On the day of the event, sign in with your account from our app or website and show your QR code at the entrance — that\'s your ticket to every service.',
+    footer: 'Questions? Just reply to this email — we are happy to help. With love, the Bienestar Community team.'
+  },
+  es: {
+    subject: (eventName) => `¡Registro confirmado! — ${eventName}`,
+    eyebrow: 'Bienestar Community',
+    title: '¡Registro confirmado!',
+    subtitle: (eventName) => eventName,
+    preheader: 'Tu lugar está reservado. Aquí tienes los detalles del evento.',
+    intro: (firstname, eventName) => `¡Hola${firstname ? ' ' + firstname : ''}! Gracias por registrarte en <strong>${eventName}</strong>. Tu lugar está reservado, ¡te esperamos!`,
+    whereLabel: 'Dónde',
+    datesLabel: 'Tu(s) fecha(s)',
+    timeLabel: 'Horario',
+    appointmentsLabel: 'Tus citas',
+    qrHint: 'El día del evento, inicia sesión con tu cuenta desde nuestra app o el sitio web y muestra tu código QR en la entrada: es tu pase para todos los servicios.',
+    footer: '¿Preguntas? Simplemente responde a este correo, estamos para ayudarte. Con cariño, el equipo de Bienestar Community.'
+  }
+};
+
+function formatHealthEventDate(dateStr, language) {
+  if (!dateStr) return '';
+  const m = moment(String(dateStr).slice(0, 10), 'YYYY-MM-DD', true);
+  if (!m.isValid()) return String(dateStr);
+  return language === 'es'
+    ? m.locale('es').format('dddd D [de] MMMM [de] YYYY')
+    : m.locale('en').format('dddd, MMMM D, YYYY');
+}
+
+function buildHealthBeneficiaryConfirmationContent({
+  language, eventNameEn, eventNameEs, firstname,
+  locationName, address, startTime, endTime,
+  eventStartDate, eventEndDate, dates = [], appointments = []
+}) {
+  {
+    const lang = language === 'es' ? 'es' : 'en';
+    const t = HEALTH_BENEFICIARY_CONFIRMATION_I18N[lang];
+    const B = VOLUNTEER_NOTIFICATION_BRAND;
+    const eventName = lang === 'es' ? (eventNameEs || eventNameEn) : (eventNameEn || eventNameEs);
+
+    const chosenDates = (dates || []).map(d => {
+      const label = formatHealthEventDate(d.event_date || d, lang);
+      const priority = d && d.priority_service ? ` · ${d.priority_service}` : '';
+      return `${label}${priority}`;
+    });
+    const dateLines = chosenDates.length
+      ? chosenDates
+      : [ [formatHealthEventDate(eventStartDate, lang), formatHealthEventDate(eventEndDate, lang)]
+          .filter((v, i, arr) => v && arr.indexOf(v) === i).join(' — ') ].filter(Boolean);
+    const timeLine = startTime && endTime ? `${startTime} — ${endTime}` : (startTime || endTime || null);
+    // service_key is a machine key ('dental', 'vision'); capitalize for the registrant-facing email.
+    const appointmentLines = (appointments || []).map(a => {
+      const rawKey = String(a.service_key || '');
+      const service = rawKey ? rawKey.charAt(0).toUpperCase() + rawKey.slice(1) : '';
+      return `${service} · ${formatHealthEventDate(a.slot_date, lang)} · ${a.start_time}`;
+    });
+
+    const detailRow = (label, valueHtml) => `
+      <tr>
+        <td style="padding:7px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:${B.sky};vertical-align:top;width:34%;">${escapeHtmlValue(label)}</td>
+        <td style="padding:7px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:${B.textDark};font-weight:600;">${valueHtml}</td>
+      </tr>`;
+
+    let detailRows = '';
+    detailRows += detailRow(t.whereLabel,
+      `${escapeHtmlValue(locationName || '')}${address ? `<br><span style="font-weight:500;color:#5c6a6a;">${escapeHtmlValue(address)}</span>` : ''}`);
+    if (dateLines.length) {
+      detailRows += detailRow(t.datesLabel, dateLines.map(escapeHtmlValue).join('<br>'));
+    }
+    if (timeLine) {
+      detailRows += detailRow(t.timeLabel, escapeHtmlValue(timeLine));
+    }
+    if (appointmentLines.length) {
+      detailRows += detailRow(t.appointmentsLabel, appointmentLines.map(escapeHtmlValue).join('<br>'));
+    }
+
+    const bodyHtml = `
+      <p style="margin:0 0 18px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.7;color:${B.textDark};">${t.intro(escapeHtmlValue(firstname || ''), escapeHtmlValue(eventName))}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.lightCyan};border-radius:12px;margin:0 0 20px 0;">
+        <tr>
+          <td style="padding:18px 22px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${detailRows}</table>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 4px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;">${escapeHtmlValue(t.qrHint)}</p>
+      ${buildAppDownloadSectionHtml(lang)}
+    `;
+
+    const html = wrapBrandedEmail({
+      lang,
+      eyebrow: t.eyebrow,
+      title: t.title,
+      subtitle: t.subtitle(eventName),
+      preheader: t.preheader,
+      bodyHtml,
+      footerHtml: escapeHtmlValue(t.footer)
+    });
+
+    let text = `${t.title} — ${eventName}\n\n`;
+    text += `${t.intro(firstname || '', eventName).replace(/<[^>]+>/g, '')}\n\n`;
+    text += `${t.whereLabel}: ${locationName || ''}${address ? ' — ' + address : ''}\n`;
+    if (dateLines.length) text += `${t.datesLabel}: ${dateLines.join(' | ')}\n`;
+    if (timeLine) text += `${t.timeLabel}: ${timeLine}\n`;
+    if (appointmentLines.length) text += `${t.appointmentsLabel}: ${appointmentLines.join(' | ')}\n`;
+    text += `\n${t.qrHint}\n`;
+    text += buildAppDownloadSectionText(lang);
+    text += `\n${t.footer}\n`;
+
+    return { subject: t.subject(eventName), html, text };
+  }
+}
+
+/**
+ * Confirmation sent to the beneficiary right after registering to a health
+ * event (web form, logged-in flow or self-register). Includes the event
+ * details, the chosen dates/appointments and the app download invitation.
+ */
+async function sendHealthEventBeneficiaryConfirmation(params) {
+  try {
+    if (!params || !params.to) return;
+    const { subject, html, text } = buildHealthBeneficiaryConfirmationContent(params);
+    await transporter.sendMail({
+      from: 'bienestarcommunity@gmail.com',
+      to: params.to,
+      subject,
+      text,
+      html
+    });
+  } catch (error) {
+    console.log('Error sending health event beneficiary confirmation email:', error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Health event — new registration notification (sent to the per-event,
+// per-audience recipient lists configured by the admin). Independent from the
+// global food-distribution volunteer list (sendVolunteerRegistrationNotification).
+// ---------------------------------------------------------------------------
+
+const HEALTH_REGISTRATION_NOTIFICATION_I18N = {
+  en: {
+    subject: (roleWord, name, eventName) => `New ${roleWord} registration: ${name} — ${eventName}`,
+    roleWord: { beneficiary: 'beneficiary', volunteer: 'volunteer' },
+    title: { beneficiary: 'New Beneficiary Registration', volunteer: 'New Volunteer Registration' },
+    preheader: 'A new registration form was just submitted.',
+    intro: (eventName) => `A new registration form was just submitted for <strong>${eventName}</strong>. These are the details:`,
+    sectionEvent: 'Event',
+    sectionPerson: 'Registrant',
+    sectionAttendance: 'Attendance',
+    sectionAnswers: 'Form answers',
+    labels: {
+      event: 'Event', location: 'Location', source: 'Source', submittedOn: 'Submitted on',
+      firstname: 'First name', lastname: 'Last name', email: 'Email', phone: 'Phone',
+      dateOfBirth: 'Date of birth', zipcode: 'ZIP code', username: 'Username',
+      dates: 'Chosen date(s)', appointments: 'Appointments'
+    },
+    consentAccepted: 'Accepted',
+    notProvided: 'Not provided',
+    noAnswers: 'This registration has no form answers.',
+    footer: (eventName) => `You are receiving this email because you are configured as a recipient of new registrations for "${eventName}" in Bienestar Community.`
+  },
+  es: {
+    subject: (roleWord, name, eventName) => `Nuevo registro de ${roleWord}: ${name} — ${eventName}`,
+    roleWord: { beneficiary: 'beneficiario', volunteer: 'voluntario' },
+    title: { beneficiary: 'Nuevo registro de beneficiario', volunteer: 'Nuevo registro de voluntario' },
+    preheader: 'Se acaba de enviar un nuevo formulario de registro.',
+    intro: (eventName) => `Se acaba de enviar un nuevo formulario de registro para <strong>${eventName}</strong>. Estos son los datos:`,
+    sectionEvent: 'Evento',
+    sectionPerson: 'Persona inscripta',
+    sectionAttendance: 'Asistencia',
+    sectionAnswers: 'Respuestas del formulario',
+    labels: {
+      event: 'Evento', location: 'Locación', source: 'Origen', submittedOn: 'Enviado el',
+      firstname: 'Nombre', lastname: 'Apellido', email: 'Correo electrónico', phone: 'Teléfono',
+      dateOfBirth: 'Fecha de nacimiento', zipcode: 'Código postal', username: 'Usuario',
+      dates: 'Fecha(s) elegida(s)', appointments: 'Citas'
+    },
+    consentAccepted: 'Aceptado',
+    notProvided: 'No proporcionado',
+    noAnswers: 'Este registro no tiene respuestas de formulario.',
+    footer: (eventName) => `Recibes este correo porque estás configurado como destinatario de los nuevos registros de "${eventName}" en Bienestar Community.`
+  }
+};
+
+function formatHealthAnswerValue(answer, language, t) {
+  if (answer.question_type === 'consent') return t.consentAccepted;
+  if (answer.answer_text != null && String(answer.answer_text).trim() !== '') return String(answer.answer_text);
+  if (answer.answer_number != null) return String(answer.answer_number);
+  if (answer.answer_date != null && String(answer.answer_date) !== '') {
+    // Defensive: mysql2 DATE columns arrive as JS Date objects unless normalized upstream.
+    const value = answer.answer_date instanceof Date
+      ? moment(answer.answer_date).format('YYYY-MM-DD')
+      : String(answer.answer_date).slice(0, 10);
+    return value;
+  }
+  const options = language === 'es' ? (answer.options_es || answer.options_en) : (answer.options_en || answer.options_es);
+  if (options) return answer.other_text ? `${options} (${answer.other_text})` : String(options);
+  return answer.other_text || null;
+}
+
+function buildHealthRegistrationNotificationContent(data, language) {
+  const lang = language === 'es' ? 'es' : 'en';
+  const t = HEALTH_REGISTRATION_NOTIFICATION_I18N[lang];
+  const B = VOLUNTEER_NOTIFICATION_BRAND;
+  const audience = data.audience === 'volunteer' ? 'volunteer' : 'beneficiary';
+  const eventName = lang === 'es' ? (data.eventNameEs || data.eventNameEn) : (data.eventNameEn || data.eventNameEs);
+  const user = data.user || {};
+  const fullName = `${user.firstname || ''} ${user.lastname || ''}`.trim() || data.contactEmail || '-';
+
+  const dateLines = (data.dates || []).map(d =>
+    `${formatHealthEventDate(d.event_date, lang)}${d.priority_service ? ` · ${d.priority_service}` : ''}`);
+  const appointmentLines = (data.appointments || []).map(a =>
+    `${a.service_key} · ${formatHealthEventDate(a.slot_date, lang)} · ${a.start_time}`);
+
+  const rows = [
+    { section: t.sectionEvent },
+    { label: t.labels.event, value: eventName },
+    { label: t.labels.location, value: data.locationName },
+    { label: t.labels.source, value: data.source },
+    { label: t.labels.submittedOn, value: data.submittedOn },
+    { section: t.sectionPerson },
+    { label: t.labels.firstname, value: user.firstname },
+    { label: t.labels.lastname, value: user.lastname },
+    { label: t.labels.email, value: user.email || data.contactEmail },
+    { label: t.labels.phone, value: user.phone },
+    { label: t.labels.dateOfBirth, value: user.date_of_birth },
+    { label: t.labels.zipcode, value: user.zipcode }
+  ];
+  if (audience === 'volunteer' && user.username) {
+    rows.push({ label: t.labels.username, value: user.username });
+  }
+  if (dateLines.length || appointmentLines.length) {
+    rows.push({ section: t.sectionAttendance });
+    if (dateLines.length) rows.push({ label: t.labels.dates, value: dateLines.join('\n') });
+    if (appointmentLines.length) rows.push({ label: t.labels.appointments, value: appointmentLines.join('\n') });
+  }
+
+  const rowHtml = (row) => {
+    if (row.section) {
+      return `<tr><td colspan="2" style="padding:20px 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${B.sky};">${escapeHtmlValue(row.section)}</td></tr>`;
+    }
+    const empty = row.value === null || row.value === undefined || String(row.value).trim() === '';
+    const displayValue = empty
+      ? `<span style="color:#9aa6a6;font-style:italic;">${escapeHtmlValue(t.notProvided)}</span>`
+      : escapeHtmlValue(String(row.value)).replace(/\n/g, '<br>');
+    return `<tr>
+      <td style="padding:9px 0;border-top:1px solid ${B.border};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:#7c8a8a;width:40%;vertical-align:top;">${escapeHtmlValue(row.label)}</td>
+      <td style="padding:9px 0;border-top:1px solid ${B.border};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;color:${B.textDark};vertical-align:top;">${displayValue}</td>
+    </tr>`;
+  };
+
+  const answers = data.answers || [];
+  const answersHtml = answers.length
+    ? answers.map(answer => {
+        const question = lang === 'es' ? (answer.question_es || answer.question_en) : (answer.question_en || answer.question_es);
+        const value = formatHealthAnswerValue(answer, lang, t);
+        const displayValue = value == null || String(value).trim() === ''
+          ? `<span style="color:#9aa6a6;font-style:italic;">${escapeHtmlValue(t.notProvided)}</span>`
+          : escapeHtmlValue(String(value));
+        return `<tr>
+          <td style="padding:9px 0;border-top:1px solid ${B.border};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;color:#7c8a8a;width:55%;vertical-align:top;line-height:1.5;">${escapeHtmlValue(question || '')}</td>
+          <td style="padding:9px 0;border-top:1px solid ${B.border};font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;color:${B.textDark};vertical-align:top;">${displayValue}</td>
+        </tr>`;
+      }).join('')
+    : `<tr><td style="padding:9px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:#9aa6a6;font-style:italic;">${escapeHtmlValue(t.noAnswers)}</td></tr>`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 12px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.7;color:${B.textDark};">${t.intro(escapeHtmlValue(eventName))}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      ${rows.map(rowHtml).join('')}
+      <tr><td colspan="2" style="padding:20px 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:${B.sky};">${escapeHtmlValue(t.sectionAnswers)}</td></tr>
+      ${answersHtml}
+    </table>
+  `;
+
+  const html = wrapBrandedEmail({
+    lang,
+    eyebrow: 'Bienestar Community',
+    title: t.title[audience],
+    subtitle: fullName,
+    preheader: t.preheader,
+    bodyHtml,
+    footerHtml: escapeHtmlValue(t.footer(eventName))
+  });
+
+  let text = `${t.title[audience]} — ${eventName}\n\n`;
+  for (const row of rows) {
+    if (row.section) {
+      text += `\n${String(row.section).toUpperCase()}\n`;
+    } else {
+      const value = (row.value === null || row.value === undefined || String(row.value).trim() === '') ? t.notProvided : row.value;
+      text += `${row.label}: ${value}\n`;
+    }
+  }
+  text += `\n${t.sectionAnswers.toUpperCase()}\n`;
+  if (answers.length) {
+    for (const answer of answers) {
+      const question = lang === 'es' ? (answer.question_es || answer.question_en) : (answer.question_en || answer.question_es);
+      const value = formatHealthAnswerValue(answer, lang, t);
+      text += `${question}: ${value == null || String(value).trim() === '' ? t.notProvided : value}\n`;
+    }
+  } else {
+    text += `${t.noAnswers}\n`;
+  }
+  text += `\n${t.footer(eventName)}\n`;
+
+  const safeSubjectName = fullName.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const safeSubjectEvent = String(eventName || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return { subject: t.subject(t.roleWord[audience], safeSubjectName, safeSubjectEvent), html, text };
+}
+
+/**
+ * Sends the "new health event registration" notification to the per-event
+ * recipient list configured by the admin (health_event_notification_recipient).
+ * Recipients are grouped by preferred language. Never throws.
+ *
+ * @param {Object} data       { audience, eventNameEn, eventNameEs, locationName, source,
+ *                              submittedOn, contactEmail, user, dates, appointments, answers }
+ * @param {Array}  recipients [{ email, language }]
+ */
+async function sendHealthEventRegistrationNotification(data, recipients) {
+  try {
+    const validRecipients = (recipients || []).filter(
+      (r) => r && typeof r.email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.email.trim())
+    );
+    if (validRecipients.length === 0) {
+      return { sent: 0 };
+    }
+
+    const groups = {};
+    const seenEmails = new Set();
+    validRecipients.forEach((r) => {
+      const normalizedEmail = r.email.trim();
+      const key = normalizedEmail.toLowerCase();
+      if (seenEmails.has(key)) return;
+      seenEmails.add(key);
+      const lang = r.language === 'es' ? 'es' : 'en';
+      if (!groups[lang]) groups[lang] = [];
+      groups[lang].push(normalizedEmail);
+    });
+
+    let sent = 0;
+    for (const lang of Object.keys(groups)) {
+      const content = buildHealthRegistrationNotificationContent(data, lang);
+      try {
+        const info = await transporter.sendMail({
+          from: 'bienestarcommunity@gmail.com',
+          to: groups[lang].join(', '),
+          subject: content.subject,
+          text: content.text,
+          html: content.html
+        });
+        sent += Array.isArray(info.accepted) ? info.accepted.length : groups[lang].length;
+        console.log(`Health event registration notification (${lang}) sent to ${groups[lang].join(', ')}: ` + info.response);
+      } catch (err) {
+        console.log(`error sending health event registration notification (${lang}) to ${groups[lang].join(', ')}: `, err);
+      }
+    }
+    return { sent };
+  } catch (error) {
+    console.log('Error in sendHealthEventRegistrationNotification: ', error);
+    return { sent: 0, error };
+  }
+}
+
+module.exports.sendHealthEventBeneficiaryConfirmation = sendHealthEventBeneficiaryConfirmation;
+
+module.exports.sendHealthEventRegistrationNotification = sendHealthEventRegistrationNotification;
 
 module.exports.sendHealthEventVolunteerCredentials = sendHealthEventVolunteerCredentials;
 
@@ -1066,5 +1523,8 @@ module.exports.sendReportEmailWithSeparateAttachments = sendReportEmailWithSepar
 // Exposed for previewing/testing the report email rendering without sending.
 module.exports.buildReportEmailHtml = buildReportEmailHtml;
 module.exports.buildReportEmailText = buildReportEmailText;
+module.exports.buildHealthBeneficiaryConfirmationContent = buildHealthBeneficiaryConfirmationContent;
+module.exports.buildHealthRegistrationNotificationContent = buildHealthRegistrationNotificationContent;
+module.exports.buildAppDownloadSectionHtml = buildAppDownloadSectionHtml;
 
 module.exports.sendAlertEmail = sendAlertEmail;

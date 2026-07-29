@@ -633,6 +633,124 @@ function splitFullName(fullName) {
   return { firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1] };
 }
 
+/** Registration + user + dates + appointments + answers, shaped for the registration emails. */
+async function loadRegistrationEmailData(registrationId) {
+  const [regRows] = await mysqlConnection.promise().query(
+    `SELECT r.id, r.health_event_id, r.registration_role, r.status, r.source, r.contact_email, r.submitted_at,
+            u.id AS user_id, u.firstname, u.lastname, u.email, u.username, u.phone, u.date_of_birth, u.zipcode,
+            u.language AS user_language
+     FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
+     WHERE r.id = ? LIMIT 1`, [registrationId]);
+  if (!regRows.length) return null;
+  const registration = regRows[0];
+  const [dates] = await mysqlConnection.promise().query(
+    'SELECT event_date, priority_service FROM health_event_registration_date WHERE registration_id = ? ORDER BY event_date',
+    [registrationId]);
+  const [appointments] = await mysqlConnection.promise().query(
+    `SELECT sl.service_key, sl.slot_date, TIME_FORMAT(sl.start_time, '%H:%i') AS start_time,
+            TIME_FORMAT(sl.end_time, '%H:%i') AS end_time, a.status
+     FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
+     WHERE a.registration_id = ? AND a.status = 'booked' ORDER BY sl.slot_date, sl.start_time`, [registrationId]);
+  const [answers] = await mysqlConnection.promise().query(
+    `SELECT a.question_id, q.name_en AS question_en, q.name_es AS question_es, q.question_type,
+            a.answer_text, a.answer_number, a.answer_date, a.other_text,
+            (SELECT GROUP_CONCAT(o.name_en ORDER BY o.sort_order SEPARATOR ' | ')
+               FROM health_event_answer_option ao INNER JOIN health_event_question_option o ON o.id = ao.option_id
+               WHERE ao.answer_id = a.id) AS options_en,
+            (SELECT GROUP_CONCAT(o.name_es ORDER BY o.sort_order SEPARATOR ' | ')
+               FROM health_event_answer_option ao INNER JOIN health_event_question_option o ON o.id = ao.option_id
+               WHERE ao.answer_id = a.id) AS options_es
+     FROM health_event_answer a INNER JOIN health_event_question q ON q.id = a.question_id
+     WHERE a.registration_id = ?
+     ORDER BY q.form_id, q.sort_order`, [registrationId]);
+  return {
+    registration: {
+      id: registration.id,
+      source: registration.source,
+      contact_email: registration.contact_email,
+      submitted_at: registration.submitted_at
+    },
+    user: {
+      firstname: registration.firstname,
+      lastname: registration.lastname,
+      email: registration.email,
+      username: registration.username,
+      phone: registration.phone,
+      date_of_birth: toSqlDateString(registration.date_of_birth),
+      zipcode: registration.zipcode,
+      language: registration.user_language === 'es' ? 'es' : 'en'
+    },
+    dates: dates.map(d => ({ event_date: toSqlDateString(d.event_date), priority_service: d.priority_service })),
+    appointments: appointments.map(a => ({ ...a, slot_date: toSqlDateString(a.slot_date) })),
+    // mysql2 returns DATE columns as JS Date objects; emails need 'YYYY-MM-DD'.
+    answers: answers.map(a => ({ ...a, answer_date: a.answer_date != null ? toSqlDateString(a.answer_date) : null }))
+  };
+}
+
+/**
+ * Post-commit registration emails, fired and forgotten (never blocks the response):
+ *  - notification to the per-event recipient list for the audience
+ *    (health_event_notification_recipient, independent from the global
+ *    food-distribution volunteer list), and
+ *  - optional confirmation to the registrant (confirmation = {to, language, firstname}).
+ */
+function dispatchRegistrationEmails(event, registrationId, audience, confirmation = null) {
+  (async () => {
+    const emailModule = require('../email/email');
+    const [recipients] = await mysqlConnection.promise().query(
+      'SELECT email, language FROM health_event_notification_recipient \
+       WHERE health_event_id = ? AND audience = ? AND enabled = "Y"',
+      [event.id, audience]);
+    const wantsConfirmation = !!(confirmation && confirmation.to);
+    if (!recipients.length && !wantsConfirmation) return;
+
+    const data = await loadRegistrationEmailData(registrationId);
+    if (!data) return;
+    const locationName = [event.organization, event.community_city].filter(Boolean).join(' — ');
+
+    if (recipients.length && typeof emailModule.sendHealthEventRegistrationNotification === 'function') {
+      await emailModule.sendHealthEventRegistrationNotification({
+        audience,
+        eventNameEn: event.name_en,
+        eventNameEs: event.name_es,
+        locationName,
+        source: data.registration.source,
+        submittedOn: toSqlDateTimeString(data.registration.submitted_at),
+        contactEmail: data.registration.contact_email,
+        user: data.user,
+        dates: data.dates,
+        appointments: data.appointments,
+        answers: data.answers
+      }, recipients);
+    }
+
+    // Strict single-address validation: the address comes from a public form,
+    // so anything not matching (including comma-separated lists) is dropped.
+    const confirmationTo = wantsConfirmation ? String(confirmation.to).trim() : '';
+    if (wantsConfirmation && confirmationTo.length <= 255 && NOTIFICATION_EMAIL_REGEX.test(confirmationTo) &&
+        typeof emailModule.sendHealthEventBeneficiaryConfirmation === 'function') {
+      const language = confirmation.language || data.user.language;
+      await emailModule.sendHealthEventBeneficiaryConfirmation({
+        to: confirmationTo,
+        language: language === 'es' ? 'es' : 'en',
+        firstname: confirmation.firstname || data.user.firstname,
+        eventNameEn: event.name_en,
+        eventNameEs: event.name_es,
+        locationName,
+        address: event.address || null,
+        startTime: event.start_time || null,
+        endTime: event.end_time || null,
+        eventStartDate: toSqlDateString(event.start_date),
+        eventEndDate: toSqlDateString(event.end_date),
+        dates: data.dates,
+        appointments: data.appointments
+      });
+    }
+  })().catch((error) => {
+    logger.error('healthEvents dispatchRegistrationEmails error: ' + error.message);
+  });
+}
+
 // =====================================================================
 // PUBLIC ENDPOINTS
 // =====================================================================
@@ -866,6 +984,18 @@ router.post('/health-events/:slug/register', async (req, res) => {
 
     await connection.commit();
 
+    // Post-commit emails (best effort): confirmation to the beneficiary +
+    // notification to the admin-configured beneficiary recipient list.
+    // Token fallbacks apply only when the registrant IS the token holder
+    // (logged-in beneficiary); a logged-in volunteer/admin registering a
+    // walk-in must never receive the walk-in's confirmation.
+    const tokenIsRegistrant = !createdAccount && !!authUser;
+    dispatchRegistrationEmails(event, registrationId, 'beneficiary', {
+      to: (account.email && String(account.email).trim()) || (tokenIsRegistrant ? authUser.email : null) || null,
+      language: account.uiLanguage || (tokenIsRegistrant ? authUser.language : null) || null,
+      firstname: account.firstName || (tokenIsRegistrant ? authUser.firstname : null) || null
+    });
+
     let token = null;
     if (createdAccount) {
       try {
@@ -972,6 +1102,9 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     } catch (emailError) {
       logger.error('healthEvents volunteer credentials email error: ' + emailError.message);
     }
+
+    // Notification to the admin-configured volunteer recipient list (best effort).
+    dispatchRegistrationEmails(event, registrationId, 'volunteer');
 
     res.status(200).json({ registration_id: registrationId, credentials: { username, password }, pending_approval: true });
   } catch (error) {
@@ -1150,6 +1283,16 @@ router.post('/health-events/:eventId(\\d+)/self-register', verifyToken, requireB
       'INSERT INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, submitted_at) \
        VALUES (?,?,?,?,?,NOW())',
       [eventId, req.currentUser.id, 'beneficiary', req.currentUser.email || null, 'web']);
+
+    // Post-commit emails (best effort): confirmation + beneficiary list notification.
+    // language falls back to the user row inside dispatchRegistrationEmails when
+    // the token was minted without it.
+    dispatchRegistrationEmails(event, inserted.insertId, 'beneficiary', {
+      to: req.currentUser.email || null,
+      language: req.currentUser.language || null,
+      firstname: req.currentUser.firstname || null
+    });
+
     res.status(200).json({ registration_id: inserted.insertId, already_registered: false });
   } catch (error) {
     logger.error('POST /health-events/:id/self-register error: ' + error.message);
@@ -2312,18 +2455,15 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
     connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
 
-    const [emailTaken] = await connection.query('SELECT id, role_id FROM user WHERE email = ? LIMIT 1', [String(email).trim()]);
+    const [emailTaken] = await connection.query('SELECT id, role_id, enabled FROM user WHERE email = ? LIMIT 1', [String(email).trim()]);
     let userId;
     let credentials = null;
+    // Self-registered volunteers stay enabled='N' until approved: the
+    // credentials email must keep saying "pending approval" in that case.
+    let pendingApproval = false;
     if (emailTaken.length) {
-      // Existing user: attach registration; reset credentials only for role-11 users.
       userId = emailTaken[0].id;
-      if (emailTaken[0].role_id === 11) {
-        const password = generateReadablePassword();
-        await connection.query('UPDATE user SET password = ? WHERE id = ?', [await bcryptjs.hash(password, 8), userId]);
-        const [userRow] = await connection.query('SELECT username FROM user WHERE id = ?', [userId]);
-        credentials = { username: userRow[0].username, password };
-      }
+      pendingApproval = emailTaken[0].role_id === 11 && emailTaken[0].enabled !== 'Y';
     } else {
       const username = await generateUniqueUsername(connection, firstName, lastName);
       const password = generateReadablePassword();
@@ -2343,10 +2483,45 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
       credentials = { username, password };
     }
 
-    await connection.query(
+    const [regResult] = await connection.query(
       'INSERT IGNORE INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, submitted_at) \
        VALUES (?,?,?,?,?,NOW())', [id, userId, 'volunteer', String(email).trim(), 'admin']);
+
+    // Existing role-11 user: rotate credentials only when this call actually
+    // attached them to a new event — a duplicate add must not silently break
+    // a password that may already be in use.
+    if (emailTaken.length && emailTaken[0].role_id === 11 && regResult.affectedRows > 0) {
+      const password = generateReadablePassword();
+      await connection.query('UPDATE user SET password = ? WHERE id = ?', [await bcryptjs.hash(password, 8), userId]);
+      const [userRow] = await connection.query('SELECT username FROM user WHERE id = ?', [userId]);
+      credentials = { username: userRow[0].username, password };
+    }
     await connection.commit();
+
+    // Best-effort emails after commit: credentials to the volunteer (when fresh
+    // ones were generated) + the per-event volunteer notification list.
+    if (credentials) {
+      try {
+        const emailModule = require('../email/email');
+        if (typeof emailModule.sendHealthEventVolunteerCredentials === 'function') {
+          emailModule.sendHealthEventVolunteerCredentials({
+            to: String(email).trim(),
+            language: 'en',
+            eventNameEn: event.name_en,
+            eventNameEs: event.name_es,
+            username: credentials.username,
+            password: credentials.password,
+            pendingApproval
+          }).catch(() => { /* logged inside */ });
+        }
+      } catch (emailError) {
+        logger.error('healthEvents admin volunteer credentials email error: ' + emailError.message);
+      }
+    }
+    if (regResult.affectedRows > 0) {
+      dispatchRegistrationEmails(event, regResult.insertId, 'volunteer');
+    }
+
     res.status(200).json({ user_id: userId, credentials });
   } catch (error) {
     if (connection) {
@@ -2389,6 +2564,95 @@ router.put('/health-events/volunteers/:userId(\\d+)/reset-password', verifyToken
   } catch (error) {
     logger.error('PUT /health-events/volunteers/:id/reset-password error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+// =====================================================================
+// ADMIN — PER-EVENT NOTIFICATION RECIPIENT LISTS (beneficiary / volunteer)
+// Independent from the global food-distribution volunteer list
+// (/volunteer/notification-recipients): these emails receive each new
+// registration form of THIS health event.
+// =====================================================================
+
+const NOTIFICATION_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const NOTIFICATION_AUDIENCES = ['beneficiary', 'volunteer'];
+const MAX_NOTIFICATION_RECIPIENTS = 100;
+
+/** Trims, validates and case-insensitively de-duplicates one recipient list. */
+function normalizeNotificationList(rawList) {
+  if (rawList == null) return { list: [] };
+  if (!Array.isArray(rawList)) return { error: 'INVALID_LIST' };
+  const seen = new Set();
+  const list = [];
+  for (const item of rawList) {
+    const email = item && typeof item.email === 'string' ? item.email.trim() : '';
+    if (!email) continue;
+    if (email.length > 255 || !NOTIFICATION_EMAIL_REGEX.test(email)) {
+      return { error: 'INVALID_EMAIL', email };
+    }
+    const key = email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    list.push({ email, language: item.language === 'es' ? 'es' : 'en' });
+    if (list.length > MAX_NOTIFICATION_RECIPIENTS) return { error: 'TOO_MANY' };
+  }
+  return { list };
+}
+
+router.get('/health-events/:id(\\d+)/notification-recipients', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const [rows] = await mysqlConnection.promise().query(
+      'SELECT id, audience, email, language FROM health_event_notification_recipient \
+       WHERE health_event_id = ? AND enabled = "Y" ORDER BY audience ASC, id ASC', [id]);
+    const shape = (audience) => rows
+      .filter(r => r.audience === audience)
+      .map(r => ({ id: r.id, email: r.email, language: r.language === 'es' ? 'es' : 'en' }));
+    res.status(200).json({ beneficiary: shape('beneficiary'), volunteer: shape('volunteer') });
+  } catch (error) {
+    logger.error('GET /health-events/:id/notification-recipients error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+/** Full replace of both lists: body { beneficiary: [{email, language}], volunteer: [...] }. */
+router.put('/health-events/:id(\\d+)/notification-recipients', verifyToken, requireAdmin, async (req, res) => {
+  let connection;
+  try {
+    const id = Number(req.params.id);
+    const event = await getEventById(id);
+    if (!event) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    const normalized = {};
+    for (const audience of NOTIFICATION_AUDIENCES) {
+      const result = normalizeNotificationList(req.body ? req.body[audience] : null);
+      if (result.error) {
+        return res.status(400).json({ error: 'VALIDATION', audience, detail: result.error, email: result.email || null });
+      }
+      normalized[audience] = result.list;
+    }
+
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+    await connection.query('DELETE FROM health_event_notification_recipient WHERE health_event_id = ?', [id]);
+    for (const audience of NOTIFICATION_AUDIENCES) {
+      for (const recipient of normalized[audience]) {
+        await connection.query(
+          'INSERT INTO health_event_notification_recipient(health_event_id, audience, email, language) VALUES (?,?,?,?)',
+          [id, audience, recipient.email, recipient.language]);
+      }
+    }
+    await connection.commit();
+    res.status(200).json(normalized);
+  } catch (error) {
+    if (connection) {
+      try { await connection.rollback(); } catch (e) { /* noop */ }
+    }
+    logger.error('PUT /health-events/:id/notification-recipients error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
