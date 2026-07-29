@@ -1529,6 +1529,10 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       'SELECT * FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" AND status = "registered" LIMIT 1',
       [eventId, scannedUserId]);
     let registration = regRows.length ? regRows[0] : null;
+    // Walk-ins (registration created right here) skip the pending-questions
+    // confirmation below: they obviously haven't answered anything yet and the
+    // entry line must keep moving.
+    const preExistingRegistration = !!registration;
     if (!registration) {
       if (stand.is_entry === 'Y') {
         const [regInsert] = await connection.query(
@@ -1557,6 +1561,22 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       if (openCheckins.length) {
         scanType = 'checkout';
         pairedScanId = openCheckins[0].id;
+      }
+    }
+
+    // Confirmación en dos fases: si la persona (ya registrada) todavía debe
+    // preguntas requeridas del evento, avisar al voluntario ANTES de registrar
+    // el check-in y dejar que decida (clientes nuevos mandan confirmed=false en
+    // el primer intento; los viejos no mandan el campo y conservan el flujo directo).
+    if (scanType === 'checkin' && preExistingRegistration && req.body.confirmed === false) {
+      const pendingRequired = await countPendingRequiredQuestions(eventId, registration.id);
+      if (pendingRequired > 0) {
+        await connection.rollback();
+        return res.status(200).json({
+          requires_confirmation: true,
+          pending_required_questions: pendingRequired,
+          person
+        });
       }
     }
 

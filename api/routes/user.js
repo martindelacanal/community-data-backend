@@ -3896,13 +3896,34 @@ router.post('/upload/beneficiaryPIN/:locationId/:clientId', verifyToken, async (
       return res.status(200).json({ error: 'pin_invalid' });
     }
 
-    return res.status(200).json({
+    const ticket = {
       id: rows[0].user_id,
       role: 'beneficiary',
       date: new Date().toISOString(),
       location_id: rows[0].location_id,
       approved: 'N'
+    };
+
+    // Resolución + validación en una sola llamada: antes el cliente hacía un
+    // segundo request a /upload/beneficiaryQR con approved = 'N'. Clientes
+    // viejos siguen funcionando: reciben el mismo objeto ticket (con campos
+    // extra que ignoran) y su segunda llamada cae en la rama "ya reclamado".
+    const result = await processDeliveryTicket({
+      deliveringUserId: cabecera.id,
+      receivingUserId: ticket.id,
+      approved: 'N',
+      locationId: delivery_location_id,
+      clientId: req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id
     });
+
+    if (result.status !== 200) {
+      return res.status(200).json({ error: 'pin_error' });
+    }
+    if (result.body && result.body.error) {
+      return res.status(200).json(result.body);
+    }
+
+    return res.status(200).json({ ...ticket, ...result.body });
   } catch (error) {
     console.log(error);
     logger.error(error);
@@ -3910,159 +3931,164 @@ router.post('/upload/beneficiaryPIN/:locationId/:clientId', verifyToken, async (
   }
 });
 
+/**
+ * Núcleo del check-in de comida (flujos QR y PIN) contra delivery_beneficiary.
+ * Devuelve { status, body } para que /upload/beneficiaryQR y
+ * /upload/beneficiaryPIN compartan una sola implementación.
+ * En pasadas de validación (approved !== 'Y') el body incluye
+ * pending_questions + beneficiary para que la app del delivery pueda avisar
+ * antes de aprobar (no bloquea: la decisión queda en el voluntario).
+ */
+async function processDeliveryTicket({ deliveringUserId, receivingUserId, approved, locationId, clientId }) {
+  if (!receivingUserId) {
+    return { status: 200, body: { error: 'receiving_user_null' } };
+  }
+
+  // Aviso no bloqueante: preguntas del onboarding sin responder en esta location.
+  let pending_questions = 0;
+  let beneficiary = null;
+  if (approved !== 'Y') {
+    const [beneficiaryRows] = await mysqlConnection.promise().query(
+      'select firstname, lastname from user where id = ?', [receivingUserId]
+    );
+    beneficiary = beneficiaryRows.length > 0 ? beneficiaryRows[0] : null;
+    pending_questions = await countPendingOnboardQuestions(receivingUserId, locationId);
+  }
+
+  // actualizar location_id y client_id del user beneficiary
+  // Verificar si el usuario se registró hoy y no tiene delivery aprobado
+  const [check_user_conditions] = await mysqlConnection.promise().query(
+    `SELECT
+        DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
+        (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
+      FROM user WHERE id = ?`,
+    [receivingUserId, receivingUserId]
+  );
+
+  let update_query = 'update user set location_id = ?, client_id = ?';
+  let update_params = [locationId, clientId];
+
+  // Si se registró hoy y no tiene delivery aprobado, también actualizar first_location_id
+  if (check_user_conditions.length > 0 &&
+    check_user_conditions[0].registered_today === 1 &&
+    check_user_conditions[0].has_approved_delivery === 0) {
+    update_query += ', first_location_id = ?';
+    update_params.push(locationId);
+  }
+
+  update_query += ' where id = ?';
+  update_params.push(receivingUserId);
+
+  await mysqlConnection.promise().query(update_query, update_params);
+
+  // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
+  // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N',
+  // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
+  const [rows_client_user] = await mysqlConnection.promise().query(
+    'select * from client_user where user_id = ? and (client_id = ? or (client_id <> ? and date(creation_date) = curdate() and checked = "N"))',
+    [receivingUserId, clientId, clientId]
+  );
+  let insertarClientUser = true;
+  if (rows_client_user.length > 0) {
+    for (let i = 0; i < rows_client_user.length; i++) {
+      if (rows_client_user[i].client_id === clientId) {
+        insertarClientUser = false;
+        if (rows_client_user[i].checked === 'N') {
+          await mysqlConnection.promise().query(
+            'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receivingUserId, clientId]
+          );
+        }
+      } else {
+        // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
+        if (rows_client_user[i].checked === 'N') {
+          await mysqlConnection.promise().query(
+            'delete from client_user where user_id = ? and client_id = ?', [receivingUserId, rows_client_user[i].client_id]
+          );
+        }
+      }
+    }
+    if (insertarClientUser) {
+      await mysqlConnection.promise().query(
+        'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receivingUserId, clientId, 'Y']
+      );
+    }
+  } else {
+    await mysqlConnection.promise().query(
+      'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receivingUserId, clientId, 'Y']
+    );
+  }
+
+  // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
+  const [rows] = await mysqlConnection.promise().query(
+    'select id, approved, delivering_user_id, location_id, client_id \
+      from delivery_beneficiary \
+      where location_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
+      order by creation_date desc limit 1',
+    [locationId, receivingUserId]
+  );
+
+  // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
+  if (rows.length > 0 && rows[0].delivering_user_id === null) {
+    const [rows2] = await mysqlConnection.promise().query(
+      'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?',
+      [clientId, deliveringUserId, locationId, rows[0].id]
+    );
+
+    if (rows2.affectedRows > 0) {
+      return { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } };
+    }
+    console.log('error qr 501: ' + new Date() + ' delivery_user_id: ' + deliveringUserId + ' receiving_user_id: ' + receivingUserId + ' location_id: ' + locationId + ' client_id: ' + clientId);
+    return { status: 501, body: 'Could not update delivering_user_id' };
+  }
+
+  // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
+  if (rows.length > 0 && rows[0].approved === 'N') {
+    if (approved === 'Y') {
+      const [rows2] = await mysqlConnection.promise().query(
+        'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
+      );
+      if (rows2.affectedRows > 0) {
+        return { status: 200, body: 'Beneficiary approved successfully' };
+      }
+      console.log('error qr 502: ' + new Date() + ' delivery_user_id: ' + deliveringUserId + ' receiving_user_id: ' + receivingUserId + ' location_id: ' + locationId + ' client_id: ' + clientId);
+      return { status: 502, body: 'Could not approve beneficiary' };
+    }
+    return { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } };
+  }
+
+  // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
+  const [rows3] = await mysqlConnection.promise().query(
+    'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
+    [clientId, deliveringUserId, receivingUserId, locationId]
+  );
+
+  if (rows3.affectedRows > 0) {
+    return { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } };
+  }
+  console.log('error qr 503: ' + new Date() + ' delivery_user_id: ' + deliveringUserId + ' receiving_user_id: ' + receivingUserId + ' location_id: ' + locationId + ' client_id: ' + clientId);
+  return { status: 503, body: 'Could not create delivery_beneficiary' };
+}
+
 router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'delivery') {
     if (req.body && req.body.role === 'beneficiary') {
       try {
-        const delivering_user_id = cabecera.id;
-        // QR
-        const receiving_user_id = req.body.id;
-        const approved = req.body.approved;
-        const receiving_location_id = req.body.location_id ? parseInt(req.body.location_id) : null;
-        const location_id = req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null;
-        const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
-        if (receiving_user_id) {
-          // if (receiving_location_id === location_id) {
-          // actualizar location_id y client_id del user beneficiary
-          // Verificar si el usuario se registró hoy y no tiene delivery aprobado
-          const [check_user_conditions] = await mysqlConnection.promise().query(
-            `SELECT 
-                DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
-                (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
-              FROM user WHERE id = ?`,
-            [receiving_user_id, receiving_user_id]
-          );
-
-          let update_query = 'update user set location_id = ?, client_id = ?';
-          let update_params = [location_id, client_id];
-
-          // Si se registró hoy y no tiene delivery aprobado, también actualizar first_location_id
-          if (check_user_conditions.length > 0 &&
-            check_user_conditions[0].registered_today === 1 &&
-            check_user_conditions[0].has_approved_delivery === 0) {
-            update_query += ', first_location_id = ?';
-            update_params.push(location_id);
-          }
-
-          update_query += ' where id = ?';
-          update_params.push(receiving_user_id);
-
-          const [rows2_update_user] = await mysqlConnection.promise().query(update_query, update_params);
-          // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
-          // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
-          // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
-          const [rows_client_user] = await mysqlConnection.promise().query(
-            'select * from client_user where user_id = ? and (client_id = ? or (client_id <> ? and date(creation_date) = curdate() and checked = "N"))',
-            [receiving_user_id, client_id, client_id]
-          );
-          let insertarClientUser = true;
-          if (rows_client_user.length > 0) {
-            // recorrer el array de rows_client_user y si el client_id es el mismo que el de hoy y tiene checked 'N', actualizarlo, sino eliminarlo y crear uno nuevo
-            for (let i = 0; i < rows_client_user.length; i++) {
-              if (rows_client_user[i].client_id === client_id) {
-                insertarClientUser = false;
-                if (rows_client_user[i].checked === 'N') {
-                  // actualizar el campo checked de client_user por 'Y'
-                  const [rows_checked] = await mysqlConnection.promise().query(
-                    'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receiving_user_id, client_id]
-                  );
-                }
-              } else {
-                // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
-                if (rows_client_user[i].checked === 'N') {
-                  const [rows_delete] = await mysqlConnection.promise().query(
-                    'delete from client_user where user_id = ? and client_id = ?', [receiving_user_id, rows_client_user[i].client_id]
-                  );
-                }
-              }
-            }
-            if (insertarClientUser) {
-              // insertar en client_user
-              const [rows_insert] = await mysqlConnection.promise().query(
-                'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
-              );
-            }
-          } else {
-            // insertar en client_user
-            const [rows_insert] = await mysqlConnection.promise().query(
-              'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
-            );
-          }
-          // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
-          const [rows] = await mysqlConnection.promise().query(
-            'select id, approved, delivering_user_id, location_id, client_id \
-              from delivery_beneficiary \
-              where location_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
-              order by creation_date desc limit 1',
-            [location_id, receiving_user_id]
-          );
-          // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
-          if (rows.length > 0 && rows[0].delivering_user_id === null) {
-            // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
-
-            // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
-            const [rows2] = await mysqlConnection.promise().query(
-              'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?', [client_id, delivering_user_id, location_id, rows[0].id]
-            );
-
-            if (rows2.affectedRows > 0) {
-              return res.status(200).json({ could_approve: 'Y' });
-            } else {
-              console.log('error qr 501: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows[0].id: ' + rows[0].id);
-              return res.status(501).json('Could not update delivering_user_id');
-            }
-          } else {
-            // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
-            if (rows.length > 0 && rows[0].approved === 'N') {
-              if (approved === 'Y') {
-                // actualizar el campo approved a 'Y'
-                const [rows2] = await mysqlConnection.promise().query(
-                  'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
-                );
-                if (rows2.affectedRows > 0) {
-                  res.json('Beneficiary approved successfully');
-                } else {
-                  console.log('error qr 502: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows[0].id: ' + rows[0].id);
-                  res.status(502).json('Could not approve beneficiary');
-                }
-              } else {
-                res.json({ could_approve: 'Y' });
-              }
-            } else {
-              // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
-
-              // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
-              const [rows3] = await mysqlConnection.promise().query(
-                'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
-                [client_id, delivering_user_id, receiving_user_id, location_id]
-              );
-
-              if (rows3.affectedRows > 0) {
-                return res.status(200).json({ could_approve: 'Y' });
-              } else {
-                console.log('error qr 503: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows: ' + rows);
-                return res.status(503).json('Could not create delivery_beneficiary');
-              }
-
-            }
-          }
-          // } else {
-          // error si la locacion del beneficiario es distinta del delivery
-          // res.status(200).json({ error: 'receiving_location' });
-          // }
-        } else {
-          res.status(200).json({ error: 'receiving_user_null' });
-          // error si no viene receiving_location_id
-          // res.status(200).json({ error: 'receiving_location_null' });
-        }
+        const result = await processDeliveryTicket({
+          deliveringUserId: cabecera.id,
+          receivingUserId: req.body.id,
+          approved: req.body.approved,
+          locationId: req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null,
+          clientId: req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id
+        });
+        res.status(result.status).json(result.body);
       } catch (error) {
-        console.log(error + 'error qr 500: ' + new Date() + 'delivery_user_id: ' + delivering_user_id + 'receiving_user_id: ' + receiving_user_id + 'location_id: ' + location_id + 'client_id: ' + client_id + 'approved: ' + approved + 'rows[0].id: ' + rows[0].id);
+        console.log(error + ' error qr 500: ' + new Date());
         logger.error(error);
         res.status(500).json('Internal server error');
       }
     } else {
-      console.log(json.stringify(req.body) + 'error qr 401: ' + new Date());
+      console.log('error qr 402: ' + new Date());
       res.status(402).json('Unauthorized');
     }
   } else {
@@ -4082,14 +4108,40 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
       const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
       let receiving_user_id = null;
       if (user_id_from_phone_list === 0) {
+        // Mismos filtros y orden que /phone/exists/search (la lista que vio el
+        // voluntario) + deleted='N': solo beneficiarios visibles pueden recibir.
         const [row_receiving_user_id] = await mysqlConnection.promise().query(
-          'select id from user where phone = ?', [receiving_user_phone]
+          "select id from user where phone = ? and role_id = 5 and enabled = 'Y' and deleted = 'N' order by id desc limit 1",
+          [receiving_user_phone]
         );
         receiving_user_id = row_receiving_user_id.length > 0 ? row_receiving_user_id[0].id : null;
       } else {
-        receiving_user_id = user_id_from_phone_list;
+        // No confiar a ciegas en el user_id del cliente: tiene que corresponder
+        // al teléfono tipeado y ser un beneficiario visible.
+        const [row_receiving_user_id] = await mysqlConnection.promise().query(
+          "select id from user where id = ? and phone = ? and role_id = 5 and enabled = 'Y' and deleted = 'N' limit 1",
+          [user_id_from_phone_list, receiving_user_phone]
+        );
+        receiving_user_id = row_receiving_user_id.length > 0 ? row_receiving_user_id[0].id : null;
       }
       if (receiving_user_phone && receiving_user_id) {
+        // Confirmación en dos fases (clientes nuevos mandan confirmed=false en el
+        // primer intento; los viejos no mandan el campo y conservan el flujo directo):
+        // si el beneficiario tiene preguntas sin responder en esta location, avisar
+        // ANTES de registrar nada y dejar la decisión en manos del delivery.
+        if (req.body.confirmed === false) {
+          const pending_questions = await countPendingOnboardQuestions(receiving_user_id, location_id);
+          if (pending_questions > 0) {
+            const [beneficiaryRows] = await mysqlConnection.promise().query(
+              'select firstname, lastname from user where id = ?', [receiving_user_id]
+            );
+            return res.status(200).json({
+              requires_confirmation: true,
+              pending_questions,
+              beneficiary: beneficiaryRows.length > 0 ? beneficiaryRows[0] : null
+            });
+          }
+        }
         // actualizar location_id y client_id del user beneficiary
         // Verificar si el usuario se registró hoy y no tiene delivery aprobado
         const [check_user_conditions] = await mysqlConnection.promise().query(
@@ -9743,14 +9795,13 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/onBoard/questions', verifyToken, async (req, res) => {
-  const cabecera = JSON.parse(req.data.data);
-
-  if (cabecera.role === 'beneficiary') {
-    const language = req.query.language || 'en';
-    const location_id = req.query.location_id || null;
-    const includeGenealogy = String(req.query.include_genealogy || 'false').toLowerCase() === 'true';
-    try {
+/**
+ * Pending onboarding-survey questions for a user at a location.
+ * Extracted from GET /onBoard/questions so the delivery check-in flows
+ * (QR/PIN/phone) can also ask "does this beneficiary still owe answers at this
+ * location?" for an arbitrary user id (the volunteer's JWT is not the beneficiary's).
+ */
+async function buildOnboardPendingQuestions(userId, locationId, includeGenealogy) {
       const [rows] = await mysqlConnection.promise().query(
         `SELECT
           q.id as question_id,
@@ -9774,7 +9825,7 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
         LEFT JOIN answer as a ON q.id = a.question_id AND a.enabled = 'Y'
         WHERE q.enabled = 'Y' AND (ql.location_id = ? AND ql.enabled = 'Y')
         ORDER BY q.\`order\` ASC, q.id ASC, a.\`order\` ASC, a.id ASC`,
-        [location_id]
+        [locationId]
       );
 
       const questionById = new Map();
@@ -9834,7 +9885,7 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
              from user_question uq2
              where uq2.user_id = uq.user_id and uq2.question_id = uq.question_id
            )`,
-        [cabecera.id]
+        [userId]
       );
       const respondedQuestionIds = new Set();
       const answeredQuestionIds = new Set();
@@ -9923,7 +9974,7 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
                FROM user_question uq2
                WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
              )`,
-            [cabecera.id, ...ancestorIdArr]
+            [userId, ...ancestorIdArr]
           );
           for (let i = 0; i < userAnswerRows.length; i++) {
             const row = userAnswerRows[i];
@@ -10148,8 +10199,40 @@ router.get('/onBoard/questions', verifyToken, async (req, res) => {
           };
         });
 
-      res.json(questions);
+      return questions;
+}
 
+/**
+ * Cheap wrapper used by the delivery flows: how many onboarding questions does
+ * this beneficiary still need to answer at this location? Mirrors the gate the
+ * beneficiary app applies before showing the QR/PIN (include_genealogy = true).
+ * Never throws: a failed check must not block a food delivery.
+ */
+async function countPendingOnboardQuestions(userId, locationId) {
+  if (!userId || !locationId) {
+    return 0;
+  }
+  try {
+    const questions = await buildOnboardPendingQuestions(userId, locationId, true);
+    return questions.filter(
+      question => question.requires_reanswer === true || question.previously_answered !== true
+    ).length;
+  } catch (error) {
+    console.log(error);
+    logger.error(error);
+    return 0;
+  }
+}
+
+router.get('/onBoard/questions', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+
+  if (cabecera.role === 'beneficiary') {
+    const location_id = req.query.location_id || null;
+    const includeGenealogy = String(req.query.include_genealogy || 'false').toLowerCase() === 'true';
+    try {
+      const questions = await buildOnboardPendingQuestions(cabecera.id, location_id, includeGenealogy);
+      res.json(questions);
     } catch (error) {
       console.log(error);
       res.status(500).json('Internal server error');
