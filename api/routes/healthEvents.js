@@ -41,7 +41,9 @@ const imageUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
-    const ok = ['image/jpeg', 'image/png', 'image/webp'].includes(String(file.mimetype).toLowerCase());
+    // Keep Health Event originals decodable by every supported WKWebView.
+    // Responsive variants remain available to clients that can use them.
+    const ok = ['image/jpeg', 'image/png'].includes(String(file.mimetype).toLowerCase());
     cb(ok ? null : new Error('INVALID_IMAGE_TYPE'), ok);
   }
 }).single('image');
