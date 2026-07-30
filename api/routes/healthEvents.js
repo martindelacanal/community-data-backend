@@ -45,7 +45,7 @@ const imageUpload = multer({
   }
 }).single('image');
 
-const QUESTION_TYPES = new Set(['text', 'number', 'single', 'multiple', 'date', 'consent', 'appointment']);
+const QUESTION_TYPES = new Set(['text', 'number', 'single', 'multiple', 'date', 'consent', 'appointment', 'notice']);
 const SLUG_REGEX = /^[a-z0-9]([a-z0-9-]{0,78}[a-z0-9])?$/;
 const RESERVED_SLUGS = new Set([
   'home', 'login', 'register', 'survey', 'settings', 'calendar', 'contact', 'articles', 'article',
@@ -908,7 +908,7 @@ router.post('/health-events/:slug/register', async (req, res) => {
       })
       .map(a => a.question_id));
     const missingRequired = allQuestions.filter(q =>
-      q.required === 'Y' && q.question_type !== 'appointment' &&
+      q.required === 'Y' && q.question_type !== 'appointment' && q.question_type !== 'notice' &&
       visibleIds.has(q.id) && !answeredIds.has(q.id));
     if (missingRequired.length) {
       return res.status(400).json({
@@ -933,6 +933,20 @@ router.post('/health-events/:slug/register', async (req, res) => {
       }
       const email = account.email ? String(account.email).trim() : null;
       const phone = String(account.phone).trim();
+
+      // Same phone rules as the general signup form: exactly 10 digits and not
+      // already in use by a visible beneficiary (mirrors /phone/exists/search,
+      // which is what the frontend checks against while typing).
+      if (!/^[0-9]{10}$/.test(phone)) {
+        await connection.rollback();
+        return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
+      }
+      const [phoneTaken] = await connection.query(
+        'SELECT id FROM user WHERE phone = ? AND enabled = "Y" AND role_id = 5 LIMIT 1', [phone]);
+      if (phoneTaken.length) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'PHONE_TAKEN' });
+      }
 
       const [userTaken] = await connection.query('SELECT id FROM user WHERE username = ? LIMIT 1', [username]);
       if (userTaken.length) {
@@ -1040,6 +1054,9 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
     const email = account.email ? String(account.email).trim() : null;
     if (!account.firstName || !account.phone || !email) {
+      return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
+    }
+    if (!/^[0-9]{10}$/.test(String(account.phone).trim())) {
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
 
@@ -1168,13 +1185,18 @@ async function countPendingRequiredQuestions(eventId, registrationId) {
   const forms = await fetchForms(eventId, 'beneficiary');
   const gatingForms = forms.filter(f => f.required_before_qr === 'Y');
   if (!gatingForms.length) return 0;
-  const questions = gatingForms.flatMap(f => f.questions).filter(q => q.question_type !== 'appointment');
-  if (!questions.length) return 0;
+  // Visibility is computed over the FULL list (a child depending on a filtered
+  // parent must resolve the same way everywhere); appointments and notices are
+  // excluded from the count itself — neither ever produces an answer row.
+  const allQuestions = gatingForms.flatMap(f => f.questions);
+  if (!allQuestions.length) return 0;
 
   const answersByQuestion = await fetchExistingAnswerOptions(registrationId);
   const answeredIds = await fetchAnsweredQuestionIds(registrationId);
-  const visible = computeVisibleQuestionIds(questions, answersByQuestion);
-  return questions.filter(q => visible.has(q.id) && q.required === 'Y' && !answeredIds.has(q.id)).length;
+  const visible = computeVisibleQuestionIds(allQuestions, answersByQuestion);
+  return allQuestions.filter(q =>
+    q.question_type !== 'appointment' && q.question_type !== 'notice' &&
+    visible.has(q.id) && q.required === 'Y' && !answeredIds.has(q.id)).length;
 }
 
 async function fetchExistingAnswerOptions(registrationId) {
@@ -1217,8 +1239,10 @@ router.get('/health-events/:eventId(\\d+)/pending-questions', verifyToken, requi
     const answeredIds = await fetchAnsweredQuestionIds(registration.id);
 
     const resultForms = gatingForms.map(form => {
-      const questions = form.questions.filter(q => q.question_type !== 'appointment');
-      const visible = computeVisibleQuestionIds(questions, answersByQuestion);
+      // Visibility over the FULL list (same dependency resolution as the count);
+      // notices carry no answer, so they can never be "pending".
+      const visible = computeVisibleQuestionIds(form.questions, answersByQuestion);
+      const questions = form.questions.filter(q => q.question_type !== 'appointment' && q.question_type !== 'notice');
       // Return unanswered questions plus their (possibly answered) parents so the
       // client can evaluate dependencies; mark answered ones.
       const unanswered = questions.filter(q => !answeredIds.has(q.id));
@@ -2210,7 +2234,8 @@ router.put('/health-events/:id(\\d+)/forms/:audience', verifyToken, requireAdmin
           questionType,
           String(question.name_en || '').slice(0, 1000), String(question.name_es || '').slice(0, 1000),
           question.help_en || null, question.help_es || null,
-          question.required === 'N' ? 'N' : 'Y',
+          // A notice is never answerable — required='Y' would block registration.
+          (questionType === 'notice' || question.required === 'N') ? 'N' : 'Y',
           question.allow_other === 'Y' ? 'Y' : 'N',
           question.maps_to ? String(question.maps_to).slice(0, 40) : null,
           question.config_json != null ? JSON.stringify(question.config_json) : null,

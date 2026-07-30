@@ -122,7 +122,10 @@ function priorityKey(raw) {
 
   const Q = {
     biw: findQ('Are you currently registered as a Bienestar Program participant?'),
-    consentReg: findQ('Do you consent for your registration information to be entered into the Bienestar participant system for record keeping and follow-up?'),
+    // 2026-07-29: this consent question became a non-answerable 'notice' (new
+    // text, type 'notice') — optional lookup so the import still runs on
+    // adjusted databases; when absent/notice the terms answer is simply skipped.
+    consentReg: qByName.get('Do you consent for your registration information to be entered into the Bienestar participant system for record keeping and follow-up?') || null,
     previous: findQ('Have you attended a previous Bienestar or D5 Community Health Fair event?'),
     who: findQ('Are you registering yourself or someone else?'),
     relationship: findQ('If registering someone else, relationship to participant'),
@@ -320,7 +323,9 @@ function priorityKey(raw) {
     };
 
     await answerSingle(Q.biw, primary.biw_participant, {}, false);
-    if (primary.terms) await insertAnswer(Q.consentReg, { number: 1 });
+    if (primary.terms && Q.consentReg && Q.consentReg.question_type !== 'notice') {
+      await insertAnswer(Q.consentReg, { number: 1 });
+    }
     await answerSingle(Q.previous, primary.previous_event, {}, false);
     // who: 'Myself' vs anything else
     const whoOptions = optionsByQuestion.get(Q.who.id);
