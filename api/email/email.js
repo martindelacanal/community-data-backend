@@ -1526,5 +1526,6 @@ module.exports.buildReportEmailText = buildReportEmailText;
 module.exports.buildHealthBeneficiaryConfirmationContent = buildHealthBeneficiaryConfirmationContent;
 module.exports.buildHealthRegistrationNotificationContent = buildHealthRegistrationNotificationContent;
 module.exports.buildAppDownloadSectionHtml = buildAppDownloadSectionHtml;
+module.exports.buildVolunteerConfirmationContent = buildVolunteerConfirmationContent;
 
 module.exports.sendAlertEmail = sendAlertEmail;

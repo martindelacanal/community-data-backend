@@ -24,6 +24,7 @@ const mysqlConnection = require('../connection/connection');
 const logger = require('../utils/logger.js');
 const { uploadImageWithVariants, deleteS3Objects } = require('../services/imageVariants');
 const { createBeneficiaryPin, resolveBeneficiaryPin } = require('../utils/beneficiaryPin');
+const { LEGAL_CONSENT_VERSION, isLegalConsentAccepted } = require('../utils/legalConsent');
 
 const router = express.Router();
 
@@ -619,7 +620,7 @@ async function createHealthEventUser(connection, {
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     [username || null, passwordHash, email || null, roleId, clientId, firstName || null, lastName || null,
       dateOfBirth || null, phone || null, zipcode || null, locationId, locationId, 1,
-      uiLanguage === 'es' ? 'es' : 'en', 1, new Date(), '2026-03-02', enabled === 'N' ? 'N' : 'Y']);
+      uiLanguage === 'es' ? 'es' : 'en', 1, new Date(), LEGAL_CONSENT_VERSION, enabled === 'N' ? 'N' : 'Y']);
   const userId = inserted.insertId;
   if (clientId) {
     await connection.query('INSERT IGNORE INTO client_user(client_id, user_id) VALUES (?,?)', [clientId, userId]);
@@ -1056,6 +1057,12 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     if (!account.firstName || !account.phone || !email) {
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
+    if (!isLegalConsentAccepted(account.legalConsentAccepted)) {
+      return res.status(400).json({
+        error: 'LEGAL_CONSENT_REQUIRED',
+        message: 'Legal consent must be accepted to register as a volunteer'
+      });
+    }
     if (!/^[0-9]{10}$/.test(String(account.phone).trim())) {
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
@@ -1102,13 +1109,15 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     await upsertAnswers(connection, registrationId, answers, questionsById, 'web-register');
     await connection.commit();
 
-    // Credentials email (best effort, after commit).
+    // Registrant emails (best effort, after commit): credentials plus the same
+    // signed Terms & Conditions copy sent by the general volunteer form.
     try {
       const emailModule = require('../email/email');
+      const language = account.uiLanguage === 'es' ? 'es' : 'en';
       if (typeof emailModule.sendHealthEventVolunteerCredentials === 'function') {
         emailModule.sendHealthEventVolunteerCredentials({
           to: email,
-          language: account.uiLanguage === 'es' ? 'es' : 'en',
+          language,
           eventNameEn: event.name_en,
           eventNameEs: event.name_es,
           username,
@@ -1116,8 +1125,16 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
           pendingApproval: true
         }).catch(() => { /* logged inside */ });
       }
+      if (typeof emailModule.sendVolunteerConfirmation === 'function') {
+        const locationName = [event.organization, event.community_city].filter(Boolean).join(' — ')
+          || event.name_en
+          || event.name_es
+          || '';
+        emailModule.sendVolunteerConfirmation(email, locationName, language)
+          .catch(() => { /* logged inside */ });
+      }
     } catch (emailError) {
-      logger.error('healthEvents volunteer credentials email error: ' + emailError.message);
+      logger.error('healthEvents volunteer registrant email error: ' + emailError.message);
     }
 
     // Notification to the admin-configured volunteer recipient list (best effort).
