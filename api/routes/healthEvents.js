@@ -25,6 +25,10 @@ const logger = require('../utils/logger.js');
 const { uploadImageWithVariants, deleteS3Objects } = require('../services/imageVariants');
 const { createBeneficiaryPin, resolveBeneficiaryPin } = require('../utils/beneficiaryPin');
 const { LEGAL_CONSENT_VERSION, isLegalConsentAccepted } = require('../utils/legalConsent');
+const {
+  isCurrentDailyBeneficiaryQr,
+  parseDailyBeneficiaryQr
+} = require('../utils/dailyBeneficiaryQr');
 
 const router = express.Router();
 
@@ -206,20 +210,6 @@ function safeParseJson(value, fallback) {
     return JSON.parse(value);
   } catch (error) {
     return fallback;
-  }
-}
-
-function parseQrPayload(raw) {
-  if (raw == null) return null;
-  if (typeof raw === 'object') return raw;
-  const text = String(raw).trim();
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    // Plain numeric QR (just a user id) is tolerated.
-    const numeric = Number.parseInt(text, 10);
-    if (Number.isInteger(numeric) && numeric > 0) return { id: numeric };
-    return null;
   }
 }
 
@@ -1499,7 +1489,10 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
     }
 
     const [standRows] = await mysqlConnection.promise().query(
-      'SELECT * FROM health_event_stand WHERE id = ? AND health_event_id = ? AND enabled = "Y" LIMIT 1',
+      `SELECT s.*, he.timezone AS event_timezone
+       FROM health_event_stand s
+       INNER JOIN health_event he ON he.id = s.health_event_id
+       WHERE s.id = ? AND s.health_event_id = ? AND s.enabled = "Y" LIMIT 1`,
       [standId, eventId]);
     if (!standRows.length) {
       return res.status(404).json({ error: 'STAND_NOT_FOUND' });
@@ -1509,10 +1502,13 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
     // ---- Identity resolution: QR (primary) | PIN | phone (manual fallbacks) ----
     let scannedUserId = NaN;
     if (req.body.qr != null) {
-      const qr = parseQrPayload(req.body.qr);
+      const qr = parseDailyBeneficiaryQr(req.body.qr);
       scannedUserId = qr ? Number.parseInt(qr.id, 10) : NaN;
       if (!Number.isInteger(scannedUserId) || scannedUserId <= 0) {
         return res.status(400).json({ error: 'INVALID_QR' });
+      }
+      if (!isCurrentDailyBeneficiaryQr(qr, stand.event_timezone)) {
+        return res.status(400).json({ error: 'INVALID_QR', reason: 'expired' });
       }
     } else if (req.body.pin != null) {
       const resolved = await resolveBeneficiaryPin(req.body.pin);

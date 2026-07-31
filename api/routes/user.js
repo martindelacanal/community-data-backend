@@ -40,6 +40,14 @@ const { resolveInteractionGeoFromIp } = require('../services/interactionGeo');
 const {
   getParticipantRegisterSummary: getSharedParticipantRegisterSummary
 } = require('../services/participantRegistrationMetrics');
+const {
+  getLatestSameDayDelivery,
+  getSameDayApprovedDeliveries
+} = require('../services/sameDayDelivery');
+const {
+  isCurrentDailyBeneficiaryQr,
+  parseDailyBeneficiaryQr
+} = require('../utils/dailyBeneficiaryQr');
 const storage = multer.memoryStorage();
 
 // Client logo upload (single image)
@@ -4019,13 +4027,10 @@ async function processDeliveryTicket({ deliveringUserId, receivingUserId, approv
   }
 
   // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
-  const [rows] = await mysqlConnection.promise().query(
-    'select id, approved, delivering_user_id, location_id, client_id \
-      from delivery_beneficiary \
-      where location_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
-      order by creation_date desc limit 1',
-    [locationId, receivingUserId]
-  );
+  const rows = await getLatestSameDayDelivery(mysqlConnection, {
+    locationId,
+    receivingUserId
+  });
 
   // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
   if (rows.length > 0 && rows[0].delivering_user_id === null) {
@@ -4072,12 +4077,19 @@ async function processDeliveryTicket({ deliveringUserId, receivingUserId, approv
 router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'delivery') {
-    if (req.body && req.body.role === 'beneficiary') {
+    const approvalRequested = req.body && req.body.approved === 'Y';
+    const qr = parseDailyBeneficiaryQr(req.body);
+    if (qr) {
+      if (!isCurrentDailyBeneficiaryQr(qr)) {
+        return res.status(200).json({ error: 'qr_expired' });
+      }
       try {
         const result = await processDeliveryTicket({
           deliveringUserId: cabecera.id,
-          receivingUserId: req.body.id,
-          approved: req.body.approved,
+          receivingUserId: qr.id,
+          // Only the authenticated second phase can request approval. The QR
+          // identity parser itself always normalizes this field to N.
+          approved: approvalRequested ? 'Y' : 'N',
           locationId: req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null,
           clientId: req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id
         });
@@ -4127,17 +4139,22 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
       if (receiving_user_phone && receiving_user_id) {
         // Confirmación en dos fases (clientes nuevos mandan confirmed=false en el
         // primer intento; los viejos no mandan el campo y conservan el flujo directo):
-        // si el beneficiario tiene preguntas sin responder en esta location, avisar
-        // ANTES de registrar nada y dejar la decisión en manos del delivery.
+        // Antes de escribir, avisar por preguntas pendientes o entregas aprobadas
+        // durante el día de California. Este chequeo vive solo en el endpoint de
+        // teléfono; QR/PIN y los check-ins de salud usan otros flujos.
         if (req.body.confirmed === false) {
-          const pending_questions = await countPendingOnboardQuestions(receiving_user_id, location_id);
-          if (pending_questions > 0) {
+          const [pending_questions, same_day_deliveries] = await Promise.all([
+            countPendingOnboardQuestions(receiving_user_id, location_id),
+            getSameDayApprovedDeliveries(mysqlConnection, receiving_user_id)
+          ]);
+          if (pending_questions > 0 || same_day_deliveries.length > 0) {
             const [beneficiaryRows] = await mysqlConnection.promise().query(
               'select firstname, lastname from user where id = ?', [receiving_user_id]
             );
             return res.status(200).json({
               requires_confirmation: true,
               pending_questions,
+              same_day_deliveries,
               beneficiary: beneficiaryRows.length > 0 ? beneficiaryRows[0] : null
             });
           }
@@ -4208,13 +4225,10 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
           );
         }
         // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
-        const [rows] = await mysqlConnection.promise().query(
-          'select id, approved, delivering_user_id, location_id, client_id \
-              from delivery_beneficiary \
-              where location_id = ? and receiving_user_id = ? and date(creation_date) = curdate() \
-              order by creation_date desc limit 1',
-          [location_id, receiving_user_id]
-        );
+        const rows = await getLatestSameDayDelivery(mysqlConnection, {
+          locationId: location_id,
+          receivingUserId: receiving_user_id
+        });
         // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
         if (rows.length > 0 && rows[0].delivering_user_id === null) {
           // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
