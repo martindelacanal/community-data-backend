@@ -9,6 +9,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const mysqlConnection = require('../connection/connection');
 const logger = require('../utils/logger.js');
+const { canManagePushNotifications } = require('../utils/pushNotificationAccess');
 
 const router = express.Router();
 const MAX_NOTIFICATION_IMAGE_SIZE_BYTES = 1 * 1024 * 1024;
@@ -109,17 +110,17 @@ function verifyToken(req, res, next) {
   });
 }
 
-function verifyAdmin(req, res, next) {
+function verifyPushNotificationManager(req, res, next) {
   try {
     const user = JSON.parse(req.data.data);
-    if (user.role !== 'admin') {
+    if (!canManagePushNotifications(user)) {
       return res.status(403).json({ error: 'Forbidden', message: 'Insufficient permissions' });
     }
 
     req.currentUser = user;
     next();
   } catch (error) {
-    logger.error('Error verifying admin for push notifications:', error);
+    logger.error('Error verifying push notification permissions:', error);
     return res.status(403).json({ error: 'Forbidden', message: 'Insufficient permissions' });
   }
 }
@@ -1171,7 +1172,7 @@ router.post('/push-notifications/inbox/:id/read', verifyToken, async (req, res) 
   }
 });
 
-router.get('/push-notifications', verifyToken, verifyAdmin, async (req, res) => {
+router.get('/push-notifications', verifyToken, verifyPushNotificationManager, async (req, res) => {
   try {
     const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 10, 1), 100);
@@ -1210,7 +1211,7 @@ router.get('/push-notifications', verifyToken, verifyAdmin, async (req, res) => 
   }
 });
 
-router.get('/push-notifications/:id', verifyToken, verifyAdmin, async (req, res) => {
+router.get('/push-notifications/:id', verifyToken, verifyPushNotificationManager, async (req, res) => {
   const notificationId = normalizePositiveInteger(req.params.id);
   if (!notificationId) {
     return res.status(400).json({
@@ -1238,7 +1239,7 @@ router.get('/push-notifications/:id', verifyToken, verifyAdmin, async (req, res)
   }
 });
 
-router.post('/push-notifications', verifyToken, verifyAdmin, (req, res) => {
+router.post('/push-notifications', verifyToken, verifyPushNotificationManager, (req, res) => {
   upload(req, res, async (uploadError) => {
     if (uploadError) {
       return res.status(400).json({
@@ -1316,7 +1317,7 @@ router.post('/push-notifications', verifyToken, verifyAdmin, (req, res) => {
   });
 });
 
-router.put('/push-notifications/:id', verifyToken, verifyAdmin, (req, res) => {
+router.put('/push-notifications/:id', verifyToken, verifyPushNotificationManager, (req, res) => {
   upload(req, res, async (uploadError) => {
     if (uploadError) {
       return res.status(400).json({
@@ -1428,7 +1429,7 @@ router.put('/push-notifications/:id', verifyToken, verifyAdmin, (req, res) => {
   });
 });
 
-router.delete('/push-notifications/:id', verifyToken, verifyAdmin, async (req, res) => {
+router.delete('/push-notifications/:id', verifyToken, verifyPushNotificationManager, async (req, res) => {
   const notificationId = normalizePositiveInteger(req.params.id);
   if (!notificationId) {
     return res.status(400).json({
@@ -1476,7 +1477,7 @@ router.delete('/push-notifications/:id', verifyToken, verifyAdmin, async (req, r
   }
 });
 
-router.post('/push-notifications/:id/execute', verifyToken, verifyAdmin, async (req, res) => {
+router.post('/push-notifications/:id/execute', verifyToken, verifyPushNotificationManager, async (req, res) => {
   const notificationId = normalizePositiveInteger(req.params.id);
   if (!notificationId) {
     return res.status(400).json({
