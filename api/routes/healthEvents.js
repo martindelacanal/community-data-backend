@@ -22,6 +22,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const mysqlConnection = require('../connection/connection');
 const logger = require('../utils/logger.js');
+const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const { uploadImageWithVariants, deleteS3Objects } = require('../services/imageVariants');
 const { createBeneficiaryPin, resolveBeneficiaryPin } = require('../utils/beneficiaryPin');
 const { LEGAL_CONSENT_VERSION, isLegalConsentAccepted } = require('../utils/legalConsent');
@@ -62,6 +63,12 @@ const RESERVED_SLUGS = new Set([
   'health-events', 'health-volunteer', 'api', 'assets', 'search-results', 'system'
 ]);
 const DUPLICATE_SCAN_WINDOW_SECONDS = 30;
+
+// Shared default password for every health-event account the system hands out
+// (self-registrations, admin-created volunteers, password resets). Matches the
+// Jotform import default so on-site staff can always tell people one password.
+// Accounts created with it get reset_password='Y' → first-login change prompt.
+const DEFAULT_HEALTH_PASSWORD = 'bienestarcommunity';
 
 // ============ AUTH MIDDLEWARE ============
 
@@ -602,17 +609,18 @@ async function findClientIdForLocation(connection, locationId) {
 
 async function createHealthEventUser(connection, {
   username, passwordHash, email, roleId, firstName, lastName, dateOfBirth, phone,
-  zipcode, locationId, uiLanguage, enabled = 'Y'
+  zipcode, locationId, uiLanguage, enabled = 'Y', resetPassword = 'N'
 }) {
   const clientId = await findClientIdForLocation(connection, locationId);
   const [inserted] = await connection.query(
     'INSERT INTO user(username, password, email, role_id, client_id, firstname, lastname, date_of_birth, phone, \
        zipcode, first_location_id, location_id, household_size, language, legal_consent_accepted, \
-       legal_consent_accepted_at, legal_consent_version, enabled) \
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+       legal_consent_accepted_at, legal_consent_version, enabled, reset_password) \
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     [username || null, passwordHash, email || null, roleId, clientId, firstName || null, lastName || null,
       dateOfBirth || null, phone || null, zipcode || null, locationId, locationId, 1,
-      uiLanguage === 'es' ? 'es' : 'en', 1, new Date(), LEGAL_CONSENT_VERSION, enabled === 'N' ? 'N' : 'Y']);
+      uiLanguage === 'es' ? 'es' : 'en', 1, new Date(), LEGAL_CONSENT_VERSION, enabled === 'N' ? 'N' : 'Y',
+      resetPassword === 'Y' ? 'Y' : 'N']);
   const userId = inserted.insertId;
   if (clientId) {
     await connection.query('INSERT IGNORE INTO client_user(client_id, user_id) VALUES (?,?)', [clientId, userId]);
@@ -736,7 +744,8 @@ function dispatchRegistrationEmails(event, registrationId, audience, confirmatio
         eventStartDate: toSqlDateString(event.start_date),
         eventEndDate: toSqlDateString(event.end_date),
         dates: data.dates,
-        appointments: data.appointments
+        appointments: data.appointments,
+        credentials: confirmation.credentials || null
       });
     }
   })().catch((error) => {
@@ -915,13 +924,20 @@ router.post('/health-events/:slug/register', async (req, res) => {
 
     let userId;
     let createdAccount = false;
+    let createdWithDefaultPassword = false;
+    let createdUsername = null;
     if (authUser && authUser.role === 'beneficiary') {
       userId = authUser.id;
     } else {
       const username = String(account.username || '').trim();
-      const password = String(account.password || '');
-      if (!username || password.length < 4 || !account.firstName || !account.phone) {
+      // Password is optional since 2026-08: when the form does not send one the
+      // account gets the shared default and a first-login change prompt. Old
+      // bundles / native apps that still send a user-chosen password keep it.
+      const providedPassword = String(account.password || '');
+      const password = providedPassword || DEFAULT_HEALTH_PASSWORD;
+      if (!username || (providedPassword && providedPassword.length < 4) || !account.firstName || !account.phone) {
         await connection.rollback();
+        logger.error('POST /health-events/:slug/register 400 INVALID_ACCOUNT_DATA (missing username/name/phone or short password)');
         return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
       }
       const email = account.email ? String(account.email).trim() : null;
@@ -932,6 +948,7 @@ router.post('/health-events/:slug/register', async (req, res) => {
       // which is what the frontend checks against while typing).
       if (!/^[0-9]{10}$/.test(phone)) {
         await connection.rollback();
+        logger.error('POST /health-events/:slug/register 400 INVALID_ACCOUNT_DATA (phone not 10 digits)');
         return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
       }
       const [phoneTaken] = await connection.query(
@@ -966,9 +983,12 @@ router.post('/health-events/:slug/register', async (req, res) => {
         phone,
         zipcode: account.zipcode || null,
         locationId: event.location_id,
-        uiLanguage: account.uiLanguage
+        uiLanguage: account.uiLanguage,
+        resetPassword: providedPassword ? 'N' : 'Y'
       });
       createdAccount = true;
+      createdWithDefaultPassword = !providedPassword;
+      createdUsername = username;
     }
 
     const [existingReg] = await connection.query(
@@ -1000,7 +1020,12 @@ router.post('/health-events/:slug/register', async (req, res) => {
     dispatchRegistrationEmails(event, registrationId, 'beneficiary', {
       to: (account.email && String(account.email).trim()) || (tokenIsRegistrant ? authUser.email : null) || null,
       language: account.uiLanguage || (tokenIsRegistrant ? authUser.language : null) || null,
-      firstname: account.firstName || (tokenIsRegistrant ? authUser.firstname : null) || null
+      firstname: account.firstName || (tokenIsRegistrant ? authUser.firstname : null) || null,
+      // Accounts created with the shared default password get their credentials
+      // in the confirmation email so people can sign in later at the event.
+      credentials: createdWithDefaultPassword
+        ? { username: createdUsername, password: DEFAULT_HEALTH_PASSWORD }
+        : null
     });
 
     let token = null;
@@ -1011,7 +1036,11 @@ router.post('/health-events/:slug/register', async (req, res) => {
         logger.error('healthEvents auto-login token error: ' + tokenError.message);
       }
     }
-    res.status(200).json({ registration_id: registrationId, token, reset_password: 'N' });
+    res.status(200).json({
+      registration_id: registrationId,
+      token,
+      reset_password: createdWithDefaultPassword ? 'Y' : 'N'
+    });
   } catch (error) {
     if (connection) {
       try { await connection.rollback(); } catch (e) { /* noop */ }
@@ -1047,15 +1076,18 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
     const email = account.email ? String(account.email).trim() : null;
     if (!account.firstName || !account.phone || !email) {
+      logger.error('POST /health-events/:slug/register/volunteer 400 INVALID_ACCOUNT_DATA (missing firstName/phone/email)');
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
     if (!isLegalConsentAccepted(account.legalConsentAccepted)) {
+      logger.error('POST /health-events/:slug/register/volunteer 400 LEGAL_CONSENT_REQUIRED (payload did not send legalConsentAccepted=true)');
       return res.status(400).json({
         error: 'LEGAL_CONSENT_REQUIRED',
         message: 'Legal consent must be accepted to register as a volunteer'
       });
     }
     if (!/^[0-9]{10}$/.test(String(account.phone).trim())) {
+      logger.error('POST /health-events/:slug/register/volunteer 400 INVALID_ACCOUNT_DATA (phone not 10 digits)');
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
 
@@ -1073,7 +1105,7 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     }
 
     const username = await generateUniqueUsername(connection, account.firstName, account.lastName);
-    const password = generateReadablePassword();
+    const password = DEFAULT_HEALTH_PASSWORD;
     const passwordHash = await bcryptjs.hash(password, 8);
 
     // Security: self-registered volunteer accounts start DISABLED and cannot
@@ -1090,7 +1122,8 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
       zipcode: account.zipcode || null,
       locationId: event.location_id,
       uiLanguage: account.uiLanguage,
-      enabled: 'N'
+      enabled: 'N',
+      resetPassword: 'Y'
     });
 
     const [regInsert] = await connection.query(
@@ -1812,6 +1845,137 @@ router.get('/health-events/volunteer/recent-scans', verifyToken, requireVoluntee
   }
 });
 
+/**
+ * Entry-desk permission: the requester must hold an ACTIVE assignment on an
+ * entry stand of the event (admins always pass). The entry desk helps people
+ * find their registration and hands out sign-in credentials, so it may browse
+ * the event's beneficiary list — other stands may not.
+ */
+async function hasActiveEntryAssignment(userId, eventId) {
+  const [rows] = await mysqlConnection.promise().query(
+    `SELECT a.id
+     FROM health_event_volunteer_assignment a
+     INNER JOIN health_event_stand st ON st.id = a.stand_id
+     WHERE a.user_id = ? AND a.health_event_id = ? AND a.ended_at IS NULL AND st.is_entry = 'Y'
+     LIMIT 1`, [userId, eventId]);
+  return rows.length > 0;
+}
+
+/**
+ * Assignments are self-service (volunteers pick their stand), so an assignment
+ * alone is not a permission boundary. The entry desk additionally requires an
+ * APPROVED volunteer registration for THIS event — a volunteer from another
+ * event cannot self-assign here and browse/reset this event's registrants.
+ */
+async function canOperateEntryDesk(currentUser, eventId) {
+  if (currentUser.role === 'admin') return true;
+  const [registered] = await mysqlConnection.promise().query(
+    `SELECT r.id
+     FROM health_event_registration r
+     INNER JOIN user u ON u.id = r.user_id
+     WHERE r.health_event_id = ? AND r.user_id = ? AND r.registration_role = 'volunteer'
+       AND r.status = 'registered' AND u.enabled = 'Y'
+     LIMIT 1`, [eventId, currentUser.id]);
+  if (!registered.length) return false;
+  return hasActiveEntryAssignment(currentUser.id, eventId);
+}
+
+/** Paged beneficiary registrant list for entry-stand volunteers (search included). */
+router.get('/health-events/:id(\\d+)/registrants', verifyToken, requireVolunteer, async (req, res) => {
+  try {
+    const eventId = Number(req.params.id);
+    if (!(await canOperateEntryDesk(req.currentUser, eventId))) {
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'Entry stand assignment required' });
+    }
+
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 25, 1), 100);
+    const search = String(req.query.search || '').trim();
+
+    const params = [eventId];
+    let searchFilter = '';
+    if (search) {
+      searchFilter = ' AND (u.firstname LIKE ? OR u.lastname LIKE ? OR u.email LIKE ? OR r.contact_email LIKE ? OR u.phone LIKE ? OR u.username LIKE ?)';
+      const like = `%${search}%`;
+      params.push(like, like, like, like, like, like);
+    }
+
+    const [countRows] = await mysqlConnection.promise().query(
+      `SELECT COUNT(*) AS total
+       FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
+       WHERE r.health_event_id = ? AND r.registration_role = 'beneficiary'${searchFilter}`, params);
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT r.id AS registration_id, r.user_id, u.firstname, u.lastname, u.email, u.username, u.phone,
+              u.reset_password, u.password AS password_hash, r.source, r.submitted_at,
+              (SELECT GROUP_CONCAT(DATE_FORMAT(d.event_date, '%Y-%m-%d') ORDER BY d.event_date SEPARATOR ', ')
+                 FROM health_event_registration_date d WHERE d.registration_id = r.id) AS dates,
+              (SELECT COUNT(*) FROM health_event_scan s
+                 WHERE s.registration_id = r.id AND s.scan_type = 'checkin') AS checkins,
+              (SELECT GROUP_CONCAT(CONCAT(sl.service_key, ' ', DATE_FORMAT(sl.slot_date, '%m/%d'), ' ',
+                      TIME_FORMAT(sl.start_time, '%H:%i')) ORDER BY sl.slot_date, sl.start_time SEPARATOR ' | ')
+                 FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
+                 WHERE a.registration_id = r.id AND a.status = 'booked') AS appointment_summary
+       FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
+       WHERE r.health_event_id = ? AND r.registration_role = 'beneficiary'${searchFilter}
+       ORDER BY u.firstname ASC, u.lastname ASC, r.id DESC
+       LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+
+    // Page-sized bcrypt checks only (≤100): tells the desk whether the person
+    // can sign in with the shared default password or has set their own.
+    const mapped = [];
+    for (const row of rows) {
+      const hasDefault = row.reset_password === 'Y' && await hasDefaultHealthPassword(row.password_hash);
+      mapped.push({
+        registration_id: row.registration_id,
+        user_id: row.user_id,
+        firstname: row.firstname,
+        lastname: row.lastname,
+        email: row.email,
+        username: row.username,
+        phone: row.phone,
+        source: row.source,
+        submitted_at: row.submitted_at,
+        dates: row.dates,
+        checkins: row.checkins,
+        appointment_summary: row.appointment_summary,
+        has_default_password: hasDefault
+      });
+    }
+
+    res.status(200).json({ total: countRows[0].total, page, pageSize, rows: mapped });
+  } catch (error) {
+    logger.error('GET /health-events/:id/registrants error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+/** Entry-stand volunteers can hand a registrant back the default password. */
+router.put('/health-events/:id(\\d+)/registrants/:userId(\\d+)/reset-password', verifyToken, requireVolunteer, async (req, res) => {
+  try {
+    const eventId = Number(req.params.id);
+    const userId = Number(req.params.userId);
+    if (!(await canOperateEntryDesk(req.currentUser, eventId))) {
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'Entry stand assignment required' });
+    }
+    const [registered] = await mysqlConnection.promise().query(
+      `SELECT id FROM health_event_registration
+       WHERE health_event_id = ? AND user_id = ? AND registration_role = 'beneficiary' LIMIT 1`,
+      [eventId, userId]);
+    if (!registered.length) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    const credentials = await resetUserToDefaultPassword(userId, 5);
+    if (!credentials) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    res.status(200).json({ credentials });
+  } catch (error) {
+    logger.error('PUT /health-events/:id/registrants/:userId/reset-password error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
 // =====================================================================
 // ADMIN ENDPOINTS
 // =====================================================================
@@ -2412,6 +2576,153 @@ router.get('/health-events/:id(\\d+)/registrations', verifyToken, requireAdmin, 
   }
 });
 
+/** answer row → display text, mirrors the admin UI's answerDisplay() precedence. */
+function answerToCsvText(answer, lang) {
+  if (answer.answer_text != null && answer.answer_text !== '') return String(answer.answer_text);
+  if (answer.answer_number != null) return String(answer.answer_number);
+  if (answer.answer_date != null) return toSqlDateString(answer.answer_date) || '';
+  const options = lang === 'es' ? (answer.options_es || answer.options_en) : (answer.options_en || answer.options_es);
+  if (options) return answer.other_text ? `${options} (${answer.other_text})` : options;
+  return answer.other_text || '';
+}
+
+/**
+ * True when the stored hash is the shared default password. Only called for
+ * rows flagged reset_password='Y' (cheap gate): the flag alone is not enough
+ * because older admin tools set it with a different default ('communitydata').
+ */
+async function hasDefaultHealthPassword(passwordHash) {
+  if (!passwordHash) return false;
+  try {
+    return await bcryptjs.compare(DEFAULT_HEALTH_PASSWORD, passwordHash);
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Full CSV export of one audience's registrations: profile + credentials
+ * status + dates/appointments/check-ins + one column per form question.
+ */
+router.get('/health-events/:id(\\d+)/registrations/csv', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const role = req.query.role === 'volunteer' ? 'volunteer' : 'beneficiary';
+    const lang = req.query.lang === 'es' ? 'es' : 'en';
+    const event = await getEventById(id);
+    if (!event) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+
+    const forms = await fetchForms(id, role);
+    const questions = forms.flatMap(f => f.questions).filter(q => q.question_type !== 'notice');
+
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT r.id AS registration_id, r.user_id, u.firstname, u.lastname, u.email, u.username, u.phone,
+              u.date_of_birth, u.zipcode, u.enabled AS user_enabled, u.reset_password, u.password AS password_hash,
+              r.contact_email, r.source, r.status, r.submitted_at,
+              (SELECT GROUP_CONCAT(CONCAT(DATE_FORMAT(d.event_date, '%Y-%m-%d'),
+                      COALESCE(CONCAT(' (', d.priority_service, ')'), '')) ORDER BY d.event_date SEPARATOR ', ')
+                 FROM health_event_registration_date d WHERE d.registration_id = r.id) AS dates,
+              (SELECT COUNT(*) FROM health_event_scan s
+                 WHERE s.registration_id = r.id AND s.scan_type = 'checkin') AS checkins,
+              (SELECT GROUP_CONCAT(CONCAT(sl.service_key, ' ', DATE_FORMAT(sl.slot_date, '%m/%d'), ' ',
+                      TIME_FORMAT(sl.start_time, '%H:%i')) ORDER BY sl.slot_date, sl.start_time SEPARATOR ' | ')
+                 FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
+                 WHERE a.registration_id = r.id AND a.status = 'booked') AS appointment_summary
+       FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
+       WHERE r.health_event_id = ? AND r.registration_role = ?
+       ORDER BY r.id DESC`, [id, role]);
+
+    const [answerRows] = await mysqlConnection.promise().query(
+      `SELECT a.registration_id, a.question_id, a.answer_text, a.answer_number, a.answer_date, a.other_text,
+              (SELECT GROUP_CONCAT(o.name_en ORDER BY o.sort_order SEPARATOR ' | ')
+                 FROM health_event_answer_option ao INNER JOIN health_event_question_option o ON o.id = ao.option_id
+                 WHERE ao.answer_id = a.id) AS options_en,
+              (SELECT GROUP_CONCAT(o.name_es ORDER BY o.sort_order SEPARATOR ' | ')
+                 FROM health_event_answer_option ao INNER JOIN health_event_question_option o ON o.id = ao.option_id
+                 WHERE ao.answer_id = a.id) AS options_es
+       FROM health_event_answer a
+       INNER JOIN health_event_registration r ON r.id = a.registration_id
+       WHERE r.health_event_id = ? AND r.registration_role = ?`, [id, role]);
+
+    const answersByRegistration = new Map();
+    for (const answer of answerRows) {
+      if (!answersByRegistration.has(answer.registration_id)) {
+        answersByRegistration.set(answer.registration_id, new Map());
+      }
+      answersByRegistration.get(answer.registration_id).set(answer.question_id, answer);
+    }
+
+    const ownPasswordLabel = lang === 'es' ? 'Tiene contraseña propia' : 'Has their own password';
+    const header = [
+      { id: 'registration_id', title: 'Registration ID' },
+      { id: 'firstname', title: 'First name' },
+      { id: 'lastname', title: 'Last name' },
+      { id: 'email', title: 'Email' },
+      { id: 'phone', title: 'Phone' },
+      { id: 'date_of_birth', title: 'Date of birth' },
+      { id: 'zipcode', title: 'Zipcode' },
+      { id: 'username', title: 'Username' },
+      { id: 'password', title: 'Password' },
+      ...(role === 'volunteer' ? [{ id: 'approved', title: 'Approved' }] : []),
+      { id: 'source', title: 'Source' },
+      { id: 'status', title: 'Status' },
+      { id: 'submitted_at', title: 'Submitted at' },
+      { id: 'dates', title: 'Attendance dates' },
+      { id: 'appointment_summary', title: 'Appointments' },
+      { id: 'checkins', title: 'Check-ins' },
+      ...questions.map(q => ({
+        id: `q_${q.id}`,
+        title: (lang === 'es' ? (q.name_es || q.name_en) : (q.name_en || q.name_es)) || `Question ${q.id}`
+      }))
+    ];
+
+    const records = [];
+    for (const row of rows) {
+      const record = {
+        registration_id: row.registration_id,
+        firstname: row.firstname || '',
+        lastname: row.lastname || '',
+        email: row.email || row.contact_email || '',
+        phone: row.phone || '',
+        date_of_birth: row.date_of_birth ? toSqlDateString(row.date_of_birth) : '',
+        zipcode: row.zipcode || '',
+        username: row.username || '',
+        password: (row.reset_password === 'Y' && await hasDefaultHealthPassword(row.password_hash))
+          ? DEFAULT_HEALTH_PASSWORD
+          : ownPasswordLabel,
+        source: row.source || '',
+        status: row.status || '',
+        submitted_at: toSqlDateTimeString(row.submitted_at) || '',
+        dates: row.dates || '',
+        appointment_summary: row.appointment_summary || '',
+        checkins: row.checkins || 0
+      };
+      if (role === 'volunteer') {
+        record.approved = row.user_enabled === 'Y' ? 'Yes' : 'No';
+      }
+      const registrationAnswers = answersByRegistration.get(row.registration_id);
+      for (const question of questions) {
+        const answer = registrationAnswers ? registrationAnswers.get(question.id) : null;
+        record[`q_${question.id}`] = answer ? answerToCsvText(answer, lang) : '';
+      }
+      records.push(record);
+    }
+
+    const csvStringifier = createCsvStringifier({ header, fieldDelimiter: ';' });
+    // BOM so Excel opens the UTF-8 file with accents intact.
+    const csvData = '\ufeff' + csvStringifier.getHeaderString() + csvStringifier.stringifyRecords(records);
+    const fileSlug = role === 'volunteer' ? 'volunteers' : 'beneficiaries';
+    res.setHeader('Content-disposition', `attachment; filename=health-event-${id}-${fileSlug}.csv`);
+    res.setHeader('Content-type', 'text/csv; charset=utf-8');
+    res.send(csvData);
+  } catch (error) {
+    logger.error('GET /health-events/:id/registrations/csv error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
 router.get('/health-events/registrations/:registrationId(\\d+)', verifyToken, requireAdmin, async (req, res) => {
   try {
     const registrationId = Number(req.params.registrationId);
@@ -2526,7 +2837,7 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
       pendingApproval = emailTaken[0].role_id === 11 && emailTaken[0].enabled !== 'Y';
     } else {
       const username = await generateUniqueUsername(connection, firstName, lastName);
-      const password = generateReadablePassword();
+      const password = DEFAULT_HEALTH_PASSWORD;
       userId = await createHealthEventUser(connection, {
         username,
         passwordHash: await bcryptjs.hash(password, 8),
@@ -2538,7 +2849,8 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
         phone: phone || null,
         zipcode: null,
         locationId: event.location_id,
-        uiLanguage: 'en'
+        uiLanguage: 'en',
+        resetPassword: 'Y'
       });
       credentials = { username, password };
     }
@@ -2551,8 +2863,9 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
     // attached them to a new event — a duplicate add must not silently break
     // a password that may already be in use.
     if (emailTaken.length && emailTaken[0].role_id === 11 && regResult.affectedRows > 0) {
-      const password = generateReadablePassword();
-      await connection.query('UPDATE user SET password = ? WHERE id = ?', [await bcryptjs.hash(password, 8), userId]);
+      const password = DEFAULT_HEALTH_PASSWORD;
+      await connection.query('UPDATE user SET password = ?, reset_password = "Y" WHERE id = ?',
+        [await bcryptjs.hash(password, 8), userId]);
       const [userRow] = await connection.query('SELECT username FROM user WHERE id = ?', [userId]);
       credentials = { username: userRow[0].username, password };
     }
@@ -2609,20 +2922,43 @@ router.put('/health-events/volunteers/:userId(\\d+)/approve', verifyToken, requi
   }
 });
 
+/**
+ * Shared reset: sets the account back to the default health-event password and
+ * flags reset_password='Y' so the first-login change prompt appears. roleId
+ * scopes which accounts each endpoint may touch (11 volunteers, 5 beneficiaries).
+ */
+async function resetUserToDefaultPassword(userId, roleId) {
+  const [rows] = await mysqlConnection.promise().query(
+    'SELECT id, username FROM user WHERE id = ? AND role_id = ? LIMIT 1', [userId, roleId]);
+  if (!rows.length) return null;
+  await mysqlConnection.promise().query(
+    'UPDATE user SET password = ?, reset_password = "Y" WHERE id = ?',
+    [await bcryptjs.hash(DEFAULT_HEALTH_PASSWORD, 8), userId]);
+  return { username: rows[0].username, password: DEFAULT_HEALTH_PASSWORD };
+}
+
 router.put('/health-events/volunteers/:userId(\\d+)/reset-password', verifyToken, requireAdmin, async (req, res) => {
   try {
-    const userId = Number(req.params.userId);
-    const [rows] = await mysqlConnection.promise().query(
-      'SELECT id, username FROM user WHERE id = ? AND role_id = 11 LIMIT 1', [userId]);
-    if (!rows.length) {
+    const credentials = await resetUserToDefaultPassword(Number(req.params.userId), 11);
+    if (!credentials) {
       return res.status(404).json({ error: 'NOT_FOUND' });
     }
-    const password = generateReadablePassword();
-    await mysqlConnection.promise().query('UPDATE user SET password = ? WHERE id = ?',
-      [await bcryptjs.hash(password, 8), userId]);
-    res.status(200).json({ credentials: { username: rows[0].username, password } });
+    res.status(200).json({ credentials });
   } catch (error) {
     logger.error('PUT /health-events/volunteers/:id/reset-password error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+router.put('/health-events/beneficiaries/:userId(\\d+)/reset-password', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const credentials = await resetUserToDefaultPassword(Number(req.params.userId), 5);
+    if (!credentials) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    res.status(200).json({ credentials });
+  } catch (error) {
+    logger.error('PUT /health-events/beneficiaries/:id/reset-password error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
   }
 });

@@ -472,7 +472,8 @@ function wrapBrandedEmail({ lang = 'en', eyebrow = 'Bienestar Community', title 
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.pageBg};padding:24px 12px;">
     <tr>
       <td align="center">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(67,69,67,0.08);">
+        <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(67,69,67,0.08);">
           <tr>
             <td style="background:${B.rose};background:linear-gradient(135deg,${B.rose} 0%,${B.roseDark} 100%);padding:32px 28px;">
               <p style="margin:0 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.85);">${escapeHtmlValue(eyebrow)}</p>
@@ -489,6 +490,7 @@ function wrapBrandedEmail({ lang = 'en', eyebrow = 'Bienestar Community', title 
             </td>
           </tr>
         </table>
+        <!--[if mso]></td></tr></table><![endif]-->
       </td>
     </tr>
   </table>
@@ -826,7 +828,8 @@ function buildVolunteerNotificationContent(volunteerData, language, signatureCid
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${B.pageBg};padding:24px 12px;">
     <tr>
       <td align="center">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(67,69,67,0.08);">
+        <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px rgba(67,69,67,0.08);">
           <!-- Header -->
           <tr>
             <td style="background:linear-gradient(135deg,${B.rose} 0%,${B.roseDark} 100%);padding:32px 28px;">
@@ -855,6 +858,7 @@ function buildVolunteerNotificationContent(volunteerData, language, signatureCid
             </td>
           </tr>
         </table>
+        <!--[if mso]></td></tr></table><![endif]-->
       </td>
     </tr>
   </table>
@@ -1012,8 +1016,8 @@ async function sendHealthEventVolunteerCredentials({ to, language, eventNameEn, 
     const loginUrl = 'https://bienestarcommunity.org/home';
 
     const html = `
-      <div style="background:${B.pageBg};padding:24px;font-family:'Segoe UI',Arial,sans-serif;color:${B.textDark};">
-        <div style="max-width:560px;margin:0 auto;background:#ffffff;border:2px solid ${B.border};border-radius:12px;overflow:hidden;">
+      <div style="background:${B.pageBg};padding:24px 12px;font-family:'Segoe UI',Arial,sans-serif;color:${B.textDark};">
+        <div style="width:100%;max-width:560px;margin:0 auto;background:#ffffff;border:2px solid ${B.border};border-radius:12px;overflow:hidden;box-sizing:border-box;">
           <div style="background:${B.lightCyan};padding:20px 24px;">
             <h1 style="margin:0;color:${B.rose};font-size:24px;">${t.title}</h1>
           </div>
@@ -1092,13 +1096,17 @@ const MOBILE_APP_I18N = {
 function buildAppDownloadSectionHtml(language) {
   const t = MOBILE_APP_I18N[language === 'es' ? 'es' : 'en'];
   const B = VOLUNTEER_NOTIFICATION_BRAND;
+  // Elastic badge: no fixed min-width, so narrow clients (Outlook mobile) can
+  // shrink it instead of overflowing the viewport sideways.
   const badge = (href, tag, name) => `
     <a href="${href}" target="_blank" rel="noopener"
-       style="display:inline-block;background:#1c1e21;border:1px solid #3a3d40;border-radius:12px;padding:10px 22px;text-decoration:none;text-align:left;min-width:150px;">
+       style="display:inline-block;box-sizing:border-box;width:100%;max-width:220px;background:#1c1e21;border:1px solid #3a3d40;border-radius:12px;padding:10px 22px;text-decoration:none;text-align:left;">
       <span style="display:block;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:10px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#9fe8f5;">${escapeHtmlValue(tag)}</span>
       <span style="display:block;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:17px;font-weight:700;color:#ffffff;line-height:1.3;">${escapeHtmlValue(name)}</span>
     </a>`;
 
+  // Badges stacked one per row: two side-by-side cells have an irreducible
+  // combined width (~420px) that horizontally overflowed Outlook mobile.
   return `
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:24px 0 8px 0;">
     <tr>
@@ -1106,11 +1114,9 @@ function buildAppDownloadSectionHtml(language) {
         <div style="font-size:34px;line-height:1;margin-bottom:10px;">📱</div>
         <h3 style="margin:0 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:19px;font-weight:700;color:${B.textDark};">${escapeHtmlValue(t.title)}</h3>
         <p style="margin:0 0 18px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#5c6a6a;">${escapeHtmlValue(t.text)}</p>
-        <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:0 auto;">
-          <tr>
-            <td style="padding:0 6px 8px 6px;">${badge(MOBILE_APP_LINKS.android, t.playTag, t.playName)}</td>
-            <td style="padding:0 6px 8px 6px;">${badge(MOBILE_APP_LINKS.ios, t.appTag, t.appName)}</td>
-          </tr>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0;">
+          <tr><td align="center" style="padding:0 0 10px 0;">${badge(MOBILE_APP_LINKS.android, t.playTag, t.playName)}</td></tr>
+          <tr><td align="center" style="padding:0;">${badge(MOBILE_APP_LINKS.ios, t.appTag, t.appName)}</td></tr>
         </table>
         <p style="margin:8px 0 0 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:12px;color:#7c8a8a;">${escapeHtmlValue(t.hint)}</p>
       </td>
@@ -1140,6 +1146,10 @@ const HEALTH_BENEFICIARY_CONFIRMATION_I18N = {
     timeLabel: 'Hours',
     appointmentsLabel: 'Your appointments',
     qrHint: 'On the day of the event, sign in with your account from our app or website and show your QR code at the entrance — that\'s your ticket to every service.',
+    credentialsTitle: 'Your sign-in details',
+    credentialsHint: 'Use them to sign in from our app or website. You will be asked to choose your own password the first time you sign in.',
+    usernameLabel: 'Username',
+    passwordLabel: 'Password',
     footer: 'Questions? Just reply to this email — we are happy to help. With love, the Bienestar Community team.'
   },
   es: {
@@ -1154,6 +1164,10 @@ const HEALTH_BENEFICIARY_CONFIRMATION_I18N = {
     timeLabel: 'Horario',
     appointmentsLabel: 'Tus citas',
     qrHint: 'El día del evento, inicia sesión con tu cuenta desde nuestra app o el sitio web y muestra tu código QR en la entrada: es tu pase para todos los servicios.',
+    credentialsTitle: 'Tus datos para iniciar sesión',
+    credentialsHint: 'Úsalos para iniciar sesión desde nuestra app o el sitio web. La primera vez que inicies sesión te pediremos que elijas tu propia contraseña.',
+    usernameLabel: 'Usuario',
+    passwordLabel: 'Contraseña',
     footer: '¿Preguntas? Simplemente responde a este correo, estamos para ayudarte. Con cariño, el equipo de Bienestar Community.'
   }
 };
@@ -1170,7 +1184,7 @@ function formatHealthEventDate(dateStr, language) {
 function buildHealthBeneficiaryConfirmationContent({
   language, eventNameEn, eventNameEs, firstname,
   locationName, address, startTime, endTime,
-  eventStartDate, eventEndDate, dates = [], appointments = []
+  eventStartDate, eventEndDate, dates = [], appointments = [], credentials = null
 }) {
   {
     const lang = language === 'es' ? 'es' : 'en';
@@ -1224,6 +1238,19 @@ function buildHealthBeneficiaryConfirmationContent({
         </tr>
       </table>
       <p style="margin:0 0 4px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;">${escapeHtmlValue(t.qrHint)}</p>
+      ${credentials && credentials.username && credentials.password ? `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0 0 0;">
+        <tr>
+          <td style="background:${B.pageBg};border:2px solid ${B.border};border-radius:12px;padding:16px 20px;">
+            <p style="margin:0 0 4px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:${B.sky};">${escapeHtmlValue(t.credentialsTitle)}</p>
+            <p style="margin:0 0 6px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:${B.textDark};"><strong>${escapeHtmlValue(t.usernameLabel)}:</strong>
+              <span style="font-family:monospace;font-size:16px;color:${B.rose};">${escapeHtmlValue(credentials.username)}</span></p>
+            <p style="margin:0 0 8px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;color:${B.textDark};"><strong>${escapeHtmlValue(t.passwordLabel)}:</strong>
+              <span style="font-family:monospace;font-size:16px;color:${B.rose};">${escapeHtmlValue(credentials.password)}</span></p>
+            <p style="margin:0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#7c8a8a;">${escapeHtmlValue(t.credentialsHint)}</p>
+          </td>
+        </tr>
+      </table>` : ''}
       ${buildAppDownloadSectionHtml(lang)}
     `;
 
@@ -1244,6 +1271,9 @@ function buildHealthBeneficiaryConfirmationContent({
     if (timeLine) text += `${t.timeLabel}: ${timeLine}\n`;
     if (appointmentLines.length) text += `${t.appointmentsLabel}: ${appointmentLines.join(' | ')}\n`;
     text += `\n${t.qrHint}\n`;
+    if (credentials && credentials.username && credentials.password) {
+      text += `\n${t.credentialsTitle}\n${t.usernameLabel}: ${credentials.username}\n${t.passwordLabel}: ${credentials.password}\n${t.credentialsHint}\n`;
+    }
     text += buildAppDownloadSectionText(lang);
     text += `\n${t.footer}\n`;
 

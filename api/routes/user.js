@@ -2579,10 +2579,15 @@ router.put('/beneficiary/reset-password', async (req, res) => {
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager' || cabecera.role === 'eventvolunteer') {
     try {
       const { idUser } = req.params;
       const { password } = req.body;
+
+      // Only admins may change someone else's password.
+      if (cabecera.role !== 'admin' && Number(idUser) !== Number(cabecera.id)) {
+        return res.status(401).json('Unauthorized');
+      }
 
       let passwordHash = await bcryptjs.hash(password, 8);
 
@@ -11757,7 +11762,7 @@ ${language === 'en' ? 'Date' : 'Fecha'}: ${new Date().toLocaleString()}
 router.put('/settings/password', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
+  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'delivery' || cabecera.role === 'stocker' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager' || cabecera.role === 'eventvolunteer') {
     try {
       const user_id = cabecera.id;
       const { actual_password, new_password } = req.body;
@@ -11792,6 +11797,9 @@ router.put('/settings/password', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    // Without this branch, requests from unlisted roles used to hang forever.
+    res.status(401).json('Unauthorized');
   }
 });
 
