@@ -207,7 +207,15 @@ function isRegistrationOpen(event) {
   const closes = toSqlDateTimeString(event.registration_closes_at);
   if (opens && now < opens) return false;
   if (closes && now > closes) return false;
-  return event.enabled === 'Y';
+  return event.enabled === 'Y' && !hasEventEnded(event);
+}
+
+/** True once the event's last day is over in the event's own timezone. */
+function hasEventEnded(event) {
+  const endDate = toSqlDateString(event.end_date);
+  if (!endDate) return false;
+  const today = nowInTimezone(event.timezone).slice(0, 10);
+  return today > endDate;
 }
 
 function safeParseJson(value, fallback) {
@@ -255,6 +263,7 @@ function publicEventShape(event) {
     end_time: event.end_time,
     timezone: event.timezone,
     registration_open: isRegistrationOpen(event),
+    event_ended: hasEventEnded(event),
     registration_opens_at: toSqlDateTimeString(event.registration_opens_at),
     registration_closes_at: toSqlDateTimeString(event.registration_closes_at)
   };
@@ -874,6 +883,9 @@ router.post('/health-events/:slug/register', async (req, res) => {
     if (!event || event.enabled !== 'Y') {
       return res.status(404).json({ error: 'NOT_FOUND' });
     }
+    if (hasEventEnded(event)) {
+      return res.status(410).json({ error: 'EVENT_ENDED' });
+    }
     if (!isRegistrationOpen(event)) {
       return res.status(410).json({
         error: 'REGISTRATION_CLOSED',
@@ -1064,6 +1076,9 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     const event = await getEventBySlug(String(req.params.slug).toLowerCase());
     if (!event || event.enabled !== 'Y') {
       return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    if (hasEventEnded(event)) {
+      return res.status(410).json({ error: 'EVENT_ENDED' });
     }
     if (!isRegistrationOpen(event)) {
       return res.status(410).json({
