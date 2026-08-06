@@ -1055,7 +1055,12 @@ router.post('/health-events/:slug/register', async (req, res) => {
     res.status(200).json({
       registration_id: registrationId,
       token,
-      reset_password: createdWithDefaultPassword ? 'Y' : 'N'
+      reset_password: createdWithDefaultPassword ? 'Y' : 'N',
+      // Recordatorio en pantalla: hay gente que no deja email, así que el
+      // formulario muestra estas credenciales al terminar el registro.
+      credentials: createdWithDefaultPassword
+        ? { username: createdUsername, password: DEFAULT_HEALTH_PASSWORD }
+        : null
     });
   } catch (error) {
     if (connection) {
