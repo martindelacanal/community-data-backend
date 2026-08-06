@@ -779,12 +779,16 @@ router.get('/health-events/public-home', async (req, res) => {
     if (publicHomeCache.data && Date.now() - publicHomeCache.at < PUBLIC_HOME_CACHE_MS) {
       return res.status(200).json(publicHomeCache.data);
     }
-    const [events] = await mysqlConnection.promise().query(
+    // CURDATE() corre en hora del SERVIDOR (UTC): un evento en Los Ángeles
+    // desaparecería ~7 horas antes de terminar su último día. El SQL trae un
+    // día de margen y el corte exacto se decide por zona horaria del evento.
+    const [eventRows] = await mysqlConnection.promise().query(
       `SELECT he.*, l.organization, l.community_city, l.address
        FROM health_event he INNER JOIN location l ON l.id = he.location_id
        WHERE he.enabled = 'Y' AND he.landing_enabled = 'Y' AND he.public_home_visible = 'Y'
-         AND he.end_date >= CURDATE()
+         AND he.end_date >= (CURDATE() - INTERVAL 1 DAY)
        ORDER BY he.start_date ASC`);
+    const events = eventRows.filter(event => !hasEventEnded(event));
 
     const list = [];
     for (const event of events) {
@@ -1214,6 +1218,9 @@ router.get('/health-events/mine', verifyToken, requireBeneficiary, async (req, r
 
     const result = [];
     for (const event of events) {
+      // Evento terminado: desaparece de la home del beneficiario (aunque haya
+      // estado registrado) — la sección se oculta sola si era el único.
+      if (hasEventEnded(event)) continue;
       const open = isRegistrationOpen(event);
       const registered = !!event.registration_id;
       if (!registered && !open) continue;
@@ -1486,10 +1493,16 @@ router.post('/health-events/volunteer/assignment', verifyToken, requireVolunteer
       return res.status(400).json({ error: 'INVALID_DATA' });
     }
     const [standRows] = await mysqlConnection.promise().query(
-      'SELECT id FROM health_event_stand WHERE id = ? AND health_event_id = ? AND enabled = "Y" LIMIT 1',
+      `SELECT s.id, he.timezone AS event_timezone, he.end_date AS event_end_date
+       FROM health_event_stand s
+       INNER JOIN health_event he ON he.id = s.health_event_id
+       WHERE s.id = ? AND s.health_event_id = ? AND s.enabled = "Y" LIMIT 1`,
       [standId, eventId]);
     if (!standRows.length) {
       return res.status(404).json({ error: 'STAND_NOT_FOUND' });
+    }
+    if (hasEventEnded({ timezone: standRows[0].event_timezone, end_date: standRows[0].event_end_date })) {
+      return res.status(410).json({ error: 'EVENT_ENDED' });
     }
     await mysqlConnection.promise().query(
       'UPDATE health_event_volunteer_assignment SET ended_at = NOW() WHERE user_id = ? AND ended_at IS NULL',
@@ -1537,7 +1550,7 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
     }
 
     const [standRows] = await mysqlConnection.promise().query(
-      `SELECT s.*, he.timezone AS event_timezone
+      `SELECT s.*, he.timezone AS event_timezone, he.end_date AS event_end_date
        FROM health_event_stand s
        INNER JOIN health_event he ON he.id = s.health_event_id
        WHERE s.id = ? AND s.health_event_id = ? AND s.enabled = "Y" LIMIT 1`,
@@ -1546,6 +1559,12 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       return res.status(404).json({ error: 'STAND_NOT_FOUND' });
     }
     const stand = standRows[0];
+
+    // Evento terminado (zona horaria del evento): la consola queda de solo
+    // lectura — no se registran más check-ins/check-outs.
+    if (hasEventEnded({ timezone: stand.event_timezone, end_date: stand.event_end_date })) {
+      return res.status(410).json({ error: 'EVENT_ENDED' });
+    }
 
     // ---- Identity resolution: QR (primary) | PIN | phone (manual fallbacks) ----
     let scannedUserId = NaN;
@@ -1745,6 +1764,15 @@ router.post('/health-events/scan/:scanId(\\d+)/answers', verifyToken, requireVol
     const scan = scanRows[0];
     if (scan.volunteer_user_id !== req.currentUser.id && req.currentUser.role !== 'admin') {
       return res.status(403).json({ error: 'FORBIDDEN' });
+    }
+
+    // Evento terminado: los voluntarios ya no cargan respuestas de checkout;
+    // los admins conservan la corrección posterior de datos.
+    if (req.currentUser.role !== 'admin') {
+      const scanEvent = await getEventById(scan.health_event_id);
+      if (scanEvent && hasEventEnded(scanEvent)) {
+        return res.status(410).json({ error: 'EVENT_ENDED' });
+      }
     }
 
     const forms = await fetchForms(scan.health_event_id, 'checkout', scan.stand_id);
@@ -1972,6 +2000,14 @@ router.put('/health-events/:id(\\d+)/registrants/:userId(\\d+)/reset-password', 
     const userId = Number(req.params.userId);
     if (!(await canOperateEntryDesk(req.currentUser, eventId))) {
       return res.status(403).json({ error: 'FORBIDDEN', message: 'Entry stand assignment required' });
+    }
+    // Evento terminado: el entry desk queda de solo lectura para voluntarios
+    // (los admins conservan sus resets desde el panel del evento).
+    if (req.currentUser.role !== 'admin') {
+      const endedEvent = await getEventById(eventId);
+      if (endedEvent && hasEventEnded(endedEvent)) {
+        return res.status(410).json({ error: 'EVENT_ENDED' });
+      }
     }
     const [registered] = await mysqlConnection.promise().query(
       `SELECT id FROM health_event_registration
