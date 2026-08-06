@@ -347,14 +347,17 @@ async function fetchForms(eventId, audience, standId = null) {
   }));
 }
 
-async function fetchSlotsWithBooked(eventId) {
+// includeDisabled: el admin necesita ver TAMBIÉN los horarios deshabilitados
+// (si se ocultan, "desaparecen" de la pantalla y parecen borrados — incidente
+// 06-ago-2026); el formulario público sigue recibiendo solo los habilitados.
+async function fetchSlotsWithBooked(eventId, includeDisabled = false) {
   const [slots] = await mysqlConnection.promise().query(
     `SELECT s.id, s.service_key, s.slot_date, TIME_FORMAT(s.start_time, '%H:%i') AS start_time,
             TIME_FORMAT(s.end_time, '%H:%i') AS end_time, s.capacity, s.enabled,
             (SELECT COUNT(*) FROM health_event_appointment a
              WHERE a.slot_id = s.id AND a.status = 'booked') AS booked
      FROM health_event_slot s
-     WHERE s.health_event_id = ? AND s.enabled = 'Y'
+     WHERE s.health_event_id = ? ${includeDisabled ? '' : 'AND s.enabled = "Y"'}
      ORDER BY s.slot_date ASC, s.start_time ASC`, [eventId]);
   return slots.map(s => ({ ...s, slot_date: toSqlDateString(s.slot_date) }));
 }
@@ -2190,7 +2193,7 @@ router.get('/health-events/:id(\\d+)/full', verifyToken, requireAdmin, async (re
     const beneficiaryForms = await fetchForms(id, 'beneficiary');
     const volunteerForms = await fetchForms(id, 'volunteer');
     const checkoutForms = await fetchForms(id, 'checkout');
-    const slots = await fetchSlotsWithBooked(id);
+    const slots = await fetchSlotsWithBooked(id, true);
 
     res.status(200).json({
       event: {
@@ -3151,7 +3154,7 @@ router.put('/health-events/:id(\\d+)/slots', verifyToken, requireAdmin, async (r
     }
 
     await connection.commit();
-    res.status(200).json({ slots: await fetchSlotsWithBooked(id) });
+    res.status(200).json({ slots: await fetchSlotsWithBooked(id, true) });
   } catch (error) {
     if (connection) {
       try { await connection.rollback(); } catch (e) { /* noop */ }
