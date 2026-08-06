@@ -124,9 +124,12 @@ function requireRoles(...roles) {
   };
 }
 
-const requireAdmin = requireRoles('admin');
+// Roles con permisos administrativos plenos sobre el módulo de health events
+// (opsmanager tiene paridad total con admin aquí).
+const ADMIN_ROLES = ['admin', 'opsmanager'];
+const requireAdmin = requireRoles(...ADMIN_ROLES);
 const requireBeneficiary = requireRoles('beneficiary');
-const requireVolunteer = requireRoles('eventvolunteer', 'admin');
+const requireVolunteer = requireRoles('eventvolunteer', ...ADMIN_ROLES);
 
 // ============ HELPERS ============
 
@@ -1770,13 +1773,13 @@ router.post('/health-events/scan/:scanId(\\d+)/answers', verifyToken, requireVol
       return res.status(404).json({ error: 'SCAN_NOT_FOUND' });
     }
     const scan = scanRows[0];
-    if (scan.volunteer_user_id !== req.currentUser.id && req.currentUser.role !== 'admin') {
+    if (scan.volunteer_user_id !== req.currentUser.id && !ADMIN_ROLES.includes(req.currentUser.role)) {
       return res.status(403).json({ error: 'FORBIDDEN' });
     }
 
     // Evento terminado: los voluntarios ya no cargan respuestas de checkout;
     // los admins conservan la corrección posterior de datos.
-    if (req.currentUser.role !== 'admin') {
+    if (!ADMIN_ROLES.includes(req.currentUser.role)) {
       const scanEvent = await getEventById(scan.health_event_id);
       if (scanEvent && hasEventEnded(scanEvent)) {
         return res.status(410).json({ error: 'EVENT_ENDED' });
@@ -1919,7 +1922,7 @@ async function hasActiveEntryAssignment(userId, eventId) {
  * event cannot self-assign here and browse/reset this event's registrants.
  */
 async function canOperateEntryDesk(currentUser, eventId) {
-  if (currentUser.role === 'admin') return true;
+  if (ADMIN_ROLES.includes(currentUser.role)) return true;
   const [registered] = await mysqlConnection.promise().query(
     `SELECT r.id
      FROM health_event_registration r
@@ -2011,7 +2014,7 @@ router.put('/health-events/:id(\\d+)/registrants/:userId(\\d+)/reset-password', 
     }
     // Evento terminado: el entry desk queda de solo lectura para voluntarios
     // (los admins conservan sus resets desde el panel del evento).
-    if (req.currentUser.role !== 'admin') {
+    if (!ADMIN_ROLES.includes(req.currentUser.role)) {
       const endedEvent = await getEventById(eventId);
       if (endedEvent && hasEventEnded(endedEvent)) {
         return res.status(410).json({ error: 'EVENT_ENDED' });
