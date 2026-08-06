@@ -673,15 +673,21 @@ router.post('/signup', async (req, res) => {
             }
             break;
           case 4: // opcion multiple
-            if (answer.length > 0) {
+            // Dedup: las apps nativas publicadas pueden enviar el mismo answer_id
+            // repetido (checkboxes recreados al navegar entre steps sin [checked]);
+            // sin esto el PK (user_question_id, answer_id) tiraba ER_DUP_ENTRY y el
+            // registro completo fallaba con 500 (incidente 05-ago-2026).
+            const uniqueAnswerIds = [...new Set((Array.isArray(answer) ? answer : []).map(Number))]
+              .filter(Number.isInteger);
+            if (uniqueAnswerIds.length > 0) {
               const [rows5] = await connection.query('insert into user_question(user_id, question_id, answer_type_id) values(?,?,?)',
                 [user_id, question_id, answer_type_id]);
               if (rows5.affectedRows === 0) {
                 throw new Error(`No se pudo insertar la pregunta múltiple ${question_id}`);
               }
               user_question_id = rows5.insertId;
-              for (let j = 0; j < answer.length; j++) {
-                const answer_id = answer[j];
+              for (let j = 0; j < uniqueAnswerIds.length; j++) {
+                const answer_id = uniqueAnswerIds[j];
                 const [rows6] = await connection.query('insert into user_question_answer(user_question_id, answer_id) values(?,?)',
                   [user_question_id, answer_id]);
                 if (rows6.affectedRows === 0) {
