@@ -30,6 +30,12 @@ const {
   isCurrentDailyBeneficiaryQr,
   parseDailyBeneficiaryQr
 } = require('../utils/dailyBeneficiaryQr');
+const {
+  HEALTH_QR_SLIDING_DEBOUNCE_MS,
+  SlidingHealthQrDebounce,
+  buildHealthScanDebounceKey,
+  findRecentHealthScan
+} = require('../utils/healthScanGuard');
 
 const router = express.Router();
 
@@ -62,7 +68,13 @@ const RESERVED_SLUGS = new Set([
   'admin', 'system-manual', 'key-figures', 'home-cards', 'mobile-onboarding', 'health-event',
   'health-events', 'health-volunteer', 'api', 'assets', 'search-results', 'system'
 ]);
-const DUPLICATE_SCAN_WINDOW_SECONDS = 30;
+const DUPLICATE_SCAN_WINDOW_SECONDS = HEALTH_QR_SLIDING_DEBOUNCE_MS / 1000;
+const healthQrSlidingDebounce = new SlidingHealthQrDebounce();
+const healthQrSlidingDebounceCleanup = setInterval(
+  () => healthQrSlidingDebounce.pruneExpired(),
+  60 * 1000
+);
+healthQrSlidingDebounceCleanup.unref();
 
 // Shared default password for every health-event account the system hands out
 // (self-registrations, admin-created volunteers, password resets). Matches the
@@ -1579,7 +1591,9 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
 
     // ---- Identity resolution: QR (primary) | PIN | phone (manual fallbacks) ----
     let scannedUserId = NaN;
+    let identityMethod = null;
     if (req.body.qr != null) {
+      identityMethod = 'qr';
       const qr = parseDailyBeneficiaryQr(req.body.qr);
       scannedUserId = qr ? Number.parseInt(qr.id, 10) : NaN;
       if (!Number.isInteger(scannedUserId) || scannedUserId <= 0) {
@@ -1589,12 +1603,14 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
         return res.status(400).json({ error: 'INVALID_QR', reason: 'expired' });
       }
     } else if (req.body.pin != null) {
+      identityMethod = 'pin';
       const resolved = await resolveBeneficiaryPin(req.body.pin);
       if (!resolved) {
         return res.status(404).json({ error: 'PIN_INVALID' });
       }
       scannedUserId = resolved.user_id;
     } else if (req.body.phone != null) {
+      identityMethod = 'phone';
       const digits = normalizePhoneDigits(req.body.phone);
       if (digits.length < 7) {
         return res.status(400).json({ error: 'INVALID_PHONE' });
@@ -1631,19 +1647,23 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       return res.status(400).json({ error: 'INVALID_QR' });
     }
 
-    const [userRows] = await mysqlConnection.promise().query(
-      'SELECT id, firstname, lastname, enabled FROM user WHERE id = ? AND deleted = "N" LIMIT 1', [scannedUserId]);
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+
+    // Serialize every scan for this beneficiary. This closes the race where
+    // two cameras/requests could both observe the same open state and insert.
+    const [userRows] = await connection.query(
+      'SELECT id, firstname, lastname, enabled FROM user WHERE id = ? AND deleted = "N" LIMIT 1 FOR UPDATE',
+      [scannedUserId]);
     if (!userRows.length || userRows[0].enabled !== 'Y') {
+      await connection.rollback();
       return res.status(404).json({ error: 'USER_NOT_FOUND' });
     }
     const person = { firstname: userRows[0].firstname, lastname: userRows[0].lastname };
 
-    connection = await mysqlConnection.promise().getConnection();
-    await connection.beginTransaction();
-
     // Registration lookup / walk-in auto-registration at the entry stand.
     let [regRows] = await connection.query(
-      'SELECT * FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" AND status = "registered" LIMIT 1',
+      'SELECT * FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" AND status = "registered" LIMIT 1 FOR UPDATE',
       [eventId, scannedUserId]);
     let registration = regRows.length ? regRows[0] : null;
     // Walk-ins (registration created right here) skip the pending-questions
@@ -1665,61 +1685,72 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       }
     }
 
-    // Determine scan type: checkout when the stand supports it and an open checkin exists.
-    let scanType = 'checkin';
-    let pairedScanId = null;
-    if (stand.has_checkout === 'Y') {
-      const [openCheckins] = await connection.query(
-        `SELECT s.id FROM health_event_scan s
-         WHERE s.stand_id = ? AND s.scanned_user_id = ? AND s.scan_type = 'checkin'
-           AND DATE(s.scanned_at) = CURDATE()
-           AND NOT EXISTS (SELECT 1 FROM health_event_scan c WHERE c.paired_scan_id = s.id)
-         ORDER BY s.scanned_at DESC LIMIT 1 FOR UPDATE`, [standId, scannedUserId]);
-      if (openCheckins.length) {
-        scanType = 'checkout';
-        pairedScanId = openCheckins[0].id;
-      }
+    // Idempotency MUST run before selecting check-in/checkout. QR decoding is
+    // continuous, so a process-local sliding window also remains alive while
+    // the same paper stays in frame. The DB window is the durable fallback.
+    const debounceKey = buildHealthScanDebounceKey(eventId, standId, scannedUserId);
+    let recentScan = identityMethod === 'qr' ? healthQrSlidingDebounce.take(debounceKey) : null;
+    if (!recentScan) {
+      recentScan = await findRecentHealthScan(connection, {
+        eventId,
+        standId,
+        userId: scannedUserId,
+        windowSeconds: DUPLICATE_SCAN_WINDOW_SECONDS
+      });
     }
 
-    // Confirmación en dos fases: si la persona (ya registrada) todavía debe
-    // preguntas requeridas del evento, avisar al voluntario ANTES de registrar
-    // el check-in y dejar que decida (clientes nuevos mandan confirmed=false en
-    // el primer intento; los viejos no mandan el campo y conservan el flujo directo).
-    if (scanType === 'checkin' && preExistingRegistration && req.body.confirmed === false) {
-      const pendingRequired = await countPendingRequiredQuestions(eventId, registration.id);
-      if (pendingRequired > 0) {
-        await connection.rollback();
-        return res.status(200).json({
-          requires_confirmation: true,
-          pending_required_questions: pendingRequired,
-          person
-        });
-      }
-    }
-
-    // Anti-double-scan: same user+stand+type within the window returns the last scan.
-    const [recentSame] = await connection.query(
-      `SELECT id, scan_type FROM health_event_scan
-       WHERE stand_id = ? AND scanned_user_id = ? AND scan_type = ?
-         AND scanned_at >= (NOW(3) - INTERVAL ? SECOND)
-       ORDER BY scanned_at DESC LIMIT 1`,
-      [standId, scannedUserId, scanType, DUPLICATE_SCAN_WINDOW_SECONDS]);
-
-    let scanId;
+    let scanId = null;
+    let scanType = null;
     let duplicate = false;
-    if (recentSame.length) {
+    if (recentScan) {
       duplicate = true;
-      scanId = recentSame[0].id;
-      await connection.commit();
+      scanId = recentScan.scanId;
+      scanType = recentScan.scanType;
     } else {
+      // Determine scan type only after both duplicate guards have passed.
+      scanType = 'checkin';
+      let pairedScanId = null;
+      if (stand.has_checkout === 'Y') {
+        const [openCheckins] = await connection.query(
+          `SELECT s.id FROM health_event_scan s
+           WHERE s.stand_id = ? AND s.scanned_user_id = ? AND s.scan_type = 'checkin'
+             AND DATE(s.scanned_at) = CURDATE()
+             AND NOT EXISTS (SELECT 1 FROM health_event_scan c WHERE c.paired_scan_id = s.id)
+           ORDER BY s.scanned_at DESC LIMIT 1 FOR UPDATE`, [standId, scannedUserId]);
+        if (openCheckins.length) {
+          scanType = 'checkout';
+          pairedScanId = openCheckins[0].id;
+        }
+      }
+
+      // Confirmación en dos fases: si la persona (ya registrada) todavía debe
+      // preguntas requeridas del evento, avisar al voluntario ANTES de registrar
+      // el check-in y dejar que decida (clientes nuevos mandan confirmed=false en
+      // el primer intento; los viejos no mandan el campo y conservan el flujo directo).
+      if (scanType === 'checkin' && preExistingRegistration && req.body.confirmed === false) {
+        const pendingRequired = await countPendingRequiredQuestions(eventId, registration.id);
+        if (pendingRequired > 0) {
+          await connection.rollback();
+          return res.status(200).json({
+            requires_confirmation: true,
+            pending_required_questions: pendingRequired,
+            person
+          });
+        }
+      }
+
       const [scanInsert] = await connection.query(
         'INSERT INTO health_event_scan(health_event_id, stand_id, service_id, registration_id, scanned_user_id, volunteer_user_id, scan_type, paired_scan_id) \
          VALUES (?,?,?,?,?,?,?,?)',
         [eventId, standId, Number.isInteger(serviceId) ? serviceId : null, registration.id,
           scannedUserId, req.currentUser.id, scanType, pairedScanId]);
       scanId = scanInsert.insertId;
-      await connection.commit();
     }
+    await connection.commit();
+
+    // Remember every successful state transition (including manual overrides),
+    // but consult this process-local layer only for QR requests.
+    healthQrSlidingDebounce.remember(debounceKey, scanId, scanType);
 
     // Context payload (outside the transaction).
     const [dates] = await mysqlConnection.promise().query(
@@ -1733,7 +1764,7 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
        ORDER BY sl.slot_date ASC, sl.start_time ASC`, [registration.id]);
 
     let checkoutForm = null;
-    if (scanType === 'checkout') {
+    if (scanType === 'checkout' && !duplicate) {
       const forms = await fetchForms(eventId, 'checkout', standId);
       checkoutForm = forms.length ? forms[0] : null;
     }
