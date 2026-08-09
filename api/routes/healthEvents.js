@@ -920,12 +920,17 @@ router.post('/health-events/:slug/register', async (req, res) => {
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
     const appointments = Array.isArray(req.body.appointments) ? req.body.appointments : [];
 
+    // Beneficiario logueado que YA está registrado (p. ej. importado de Jotform
+    // que vuelve a llenar el formulario para completar la encuesta): en vez de
+    // rechazar con 409 y descartar todo lo que respondió (incidente Banning
+    // 08-ago-2026), sus respuestas se absorben en la registración existente.
+    let existingRegistrationId = null;
     if (authUser && authUser.role === 'beneficiary') {
       const [alreadyRegistered] = await mysqlConnection.promise().query(
         'SELECT id FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" LIMIT 1',
         [event.id, authUser.id]);
       if (alreadyRegistered.length) {
-        return res.status(409).json({ error: 'ALREADY_REGISTERED', registration_id: alreadyRegistered[0].id });
+        existingRegistrationId = alreadyRegistered[0].id;
       }
     }
 
@@ -933,16 +938,30 @@ router.post('/health-events/:slug/register', async (req, res) => {
     const allQuestions = forms.flatMap(f => f.questions);
     const questionsById = new Map(allQuestions.map(q => [q.id, q]));
 
-    // Server-side required validation over reachable questions.
+    // Server-side required validation over reachable questions. For an existing
+    // registration the stored answers also count: visibility and "answered" are
+    // evaluated over the union of stored + submitted.
     const answersByQuestion = buildAnswersByQuestionFromSubmission(
       answers.map(a => ({ ...a, question_type: (questionsById.get(a.question_id) || {}).question_type })));
-    const visibleIds = computeVisibleQuestionIds(allQuestions, answersByQuestion);
     const answeredIds = new Set(answers
       .filter(a => {
         const q = questionsById.get(a.question_id);
         return q && (q.question_type === 'appointment' || hasMeaningfulAnswer(q.question_type, a.answer));
       })
       .map(a => a.question_id));
+    if (existingRegistrationId) {
+      const storedOptions = await fetchExistingAnswerOptions(existingRegistrationId);
+      const storedAnswered = await fetchAnsweredQuestionIds(existingRegistrationId);
+      for (const questionId of storedAnswered) {
+        answeredIds.add(questionId);
+      }
+      for (const [questionId, optionIds] of storedOptions.entries()) {
+        if (!answersByQuestion.has(questionId)) {
+          answersByQuestion.set(questionId, optionIds);
+        }
+      }
+    }
+    const visibleIds = computeVisibleQuestionIds(allQuestions, answersByQuestion);
     const missingRequired = allQuestions.filter(q =>
       q.required === 'Y' && q.question_type !== 'appointment' && q.question_type !== 'notice' &&
       visibleIds.has(q.id) && !answeredIds.has(q.id));
@@ -1025,19 +1044,24 @@ router.post('/health-events/:slug/register', async (req, res) => {
       createdUsername = username;
     }
 
-    const [existingReg] = await connection.query(
-      'SELECT id FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" LIMIT 1',
-      [event.id, userId]);
-    if (existingReg.length) {
-      await connection.rollback();
-      return res.status(409).json({ error: 'ALREADY_REGISTERED', registration_id: existingReg[0].id });
-    }
+    let registrationId;
+    if (existingRegistrationId) {
+      registrationId = existingRegistrationId;
+    } else {
+      const [existingReg] = await connection.query(
+        'SELECT id FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" LIMIT 1',
+        [event.id, userId]);
+      if (existingReg.length) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'ALREADY_REGISTERED', registration_id: existingReg[0].id });
+      }
 
-    const [regInsert] = await connection.query(
-      'INSERT INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, submitted_at) \
-       VALUES (?,?,?,?,?,NOW())',
-      [event.id, userId, 'beneficiary', account.email || (authUser ? authUser.email : null), 'web']);
-    const registrationId = regInsert.insertId;
+      const [regInsert] = await connection.query(
+        'INSERT INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, submitted_at) \
+         VALUES (?,?,?,?,?,NOW())',
+        [event.id, userId, 'beneficiary', account.email || (authUser ? authUser.email : null), 'web']);
+      registrationId = regInsert.insertId;
+    }
 
     await upsertAnswers(connection, registrationId, answers, questionsById, 'web-register');
     await syncRegistrationDates(connection, registrationId, answers, questionsById);
@@ -1050,17 +1074,21 @@ router.post('/health-events/:slug/register', async (req, res) => {
     // Token fallbacks apply only when the registrant IS the token holder
     // (logged-in beneficiary); a logged-in volunteer/admin registering a
     // walk-in must never receive the walk-in's confirmation.
-    const tokenIsRegistrant = !createdAccount && !!authUser;
-    dispatchRegistrationEmails(event, registrationId, 'beneficiary', {
-      to: (account.email && String(account.email).trim()) || (tokenIsRegistrant ? authUser.email : null) || null,
-      language: account.uiLanguage || (tokenIsRegistrant ? authUser.language : null) || null,
-      firstname: account.firstName || (tokenIsRegistrant ? authUser.firstname : null) || null,
-      // Accounts created with the shared default password get their credentials
-      // in the confirmation email so people can sign in later at the event.
-      credentials: createdWithDefaultPassword
-        ? { username: createdUsername, password: DEFAULT_HEALTH_PASSWORD }
-        : null
-    });
+    // Completar respuestas sobre una registración existente NO re-envía la
+    // confirmación (ya la recibieron al registrarse/importarse).
+    if (!existingRegistrationId) {
+      const tokenIsRegistrant = !createdAccount && !!authUser;
+      dispatchRegistrationEmails(event, registrationId, 'beneficiary', {
+        to: (account.email && String(account.email).trim()) || (tokenIsRegistrant ? authUser.email : null) || null,
+        language: account.uiLanguage || (tokenIsRegistrant ? authUser.language : null) || null,
+        firstname: account.firstName || (tokenIsRegistrant ? authUser.firstname : null) || null,
+        // Accounts created with the shared default password get their credentials
+        // in the confirmation email so people can sign in later at the event.
+        credentials: createdWithDefaultPassword
+          ? { username: createdUsername, password: DEFAULT_HEALTH_PASSWORD }
+          : null
+      });
+    }
 
     let token = null;
     if (createdAccount) {
@@ -1072,6 +1100,7 @@ router.post('/health-events/:slug/register', async (req, res) => {
     }
     res.status(200).json({
       registration_id: registrationId,
+      already_registered: !!existingRegistrationId,
       token,
       reset_password: createdWithDefaultPassword ? 'Y' : 'N',
       // Recordatorio en pantalla: hay gente que no deja email, así que el
@@ -1711,12 +1740,19 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       scanType = 'checkin';
       let pairedScanId = null;
       if (stand.has_checkout === 'Y') {
+        // "Mismo día" en la zona horaria DEL EVENTO, no del servidor: con el
+        // server en UTC, un check-in antes de las 5pm PT y su check-out después
+        // caían en días UTC distintos y el segundo escaneo quedaba como otro
+        // check-in. COALESCE mantiene el comportamiento viejo si la base no
+        // tiene cargadas las tablas de timezones (CONVERT_TZ => NULL en dev).
         const [openCheckins] = await connection.query(
           `SELECT s.id FROM health_event_scan s
            WHERE s.stand_id = ? AND s.scanned_user_id = ? AND s.scan_type = 'checkin'
-             AND DATE(s.scanned_at) = CURDATE()
+             AND DATE(COALESCE(CONVERT_TZ(s.scanned_at, @@session.time_zone, ?), s.scanned_at))
+               = DATE(COALESCE(CONVERT_TZ(NOW(), @@session.time_zone, ?), NOW()))
              AND NOT EXISTS (SELECT 1 FROM health_event_scan c WHERE c.paired_scan_id = s.id)
-           ORDER BY s.scanned_at DESC LIMIT 1 FOR UPDATE`, [standId, scannedUserId]);
+           ORDER BY s.scanned_at DESC LIMIT 1 FOR UPDATE`,
+          [standId, scannedUserId, stand.event_timezone, stand.event_timezone]);
         if (openCheckins.length) {
           scanType = 'checkout';
           pairedScanId = openCheckins[0].id;
