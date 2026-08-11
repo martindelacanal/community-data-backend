@@ -36,6 +36,7 @@ const {
   buildHealthScanDebounceKey,
   findRecentHealthScan
 } = require('../utils/healthScanGuard');
+const healthEventAnalytics = require('../services/healthEventAnalytics');
 
 const router = express.Router();
 
@@ -3239,20 +3240,28 @@ router.put('/health-events/:id(\\d+)/slots', verifyToken, requireAdmin, async (r
 router.get('/health-events/:id(\\d+)/metrics-summary', verifyToken, requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
+    // Days must be counted in the EVENT's timezone. With the server in UTC a
+    // Pacific event day rolls over at 5pm local, so DATE(scanned_at) split each
+    // clinic day in two and reported a phantom extra day. COALESCE keeps dev
+    // databases without the MySQL timezone tables working (CONVERT_TZ => NULL).
+    const event = await getEventById(id);
+    const timezone = (event && event.timezone) || 'America/Los_Angeles';
+    const localDay = 'DATE(COALESCE(CONVERT_TZ(s.scanned_at, @@session.time_zone, ?), s.scanned_at))';
+
     const [bySource] = await mysqlConnection.promise().query(
       `SELECT registration_role, source, COUNT(*) AS total
        FROM health_event_registration WHERE health_event_id = ? AND status = 'registered'
        GROUP BY registration_role, source`, [id]);
     const [scansPerStand] = await mysqlConnection.promise().query(
-      `SELECT st.id AS stand_id, st.name_en, st.name_es, DATE(s.scanned_at) AS day, s.scan_type, COUNT(*) AS total,
+      `SELECT st.id AS stand_id, st.name_en, st.name_es, ${localDay} AS day, s.scan_type, COUNT(*) AS total,
               COUNT(DISTINCT s.scanned_user_id) AS unique_people
        FROM health_event_scan s INNER JOIN health_event_stand st ON st.id = s.stand_id
        WHERE s.health_event_id = ?
-       GROUP BY st.id, st.name_en, st.name_es, DATE(s.scanned_at), s.scan_type
-       ORDER BY st.sort_order, day`, [id]);
+       GROUP BY st.id, st.name_en, st.name_es, day, s.scan_type
+       ORDER BY st.sort_order, day`, [timezone, id]);
     const [uniquePerDay] = await mysqlConnection.promise().query(
-      `SELECT DATE(s.scanned_at) AS day, COUNT(DISTINCT s.scanned_user_id) AS unique_attendees
-       FROM health_event_scan s WHERE s.health_event_id = ? GROUP BY DATE(s.scanned_at) ORDER BY day`, [id]);
+      `SELECT ${localDay} AS day, COUNT(DISTINCT s.scanned_user_id) AS unique_attendees
+       FROM health_event_scan s WHERE s.health_event_id = ? GROUP BY day ORDER BY day`, [timezone, id]);
     const [appointmentsPerService] = await mysqlConnection.promise().query(
       `SELECT sl.service_key, sl.slot_date, COUNT(*) AS booked
        FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
@@ -3277,6 +3286,102 @@ router.get('/health-events/:id(\\d+)/metrics-summary', verifyToken, requireAdmin
     });
   } catch (error) {
     logger.error('GET /health-events/:id/metrics-summary error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+// =====================================================================
+// ADMIN — ANALYTICS & RAW-DATA EXPORTS ("Metrics & exports" tab)
+//
+// Everything here derives from one in-memory snapshot of the event so the
+// dashboard, the on-screen scan log and the downloaded files can never
+// disagree. Filters travel identically through all three.
+// =====================================================================
+
+function analyticsLang(req) {
+  return req.query.lang === 'es' ? 'es' : 'en';
+}
+
+router.get('/health-events/:id(\\d+)/analytics', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const snapshot = await healthEventAnalytics.loadSnapshot(id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    const filters = healthEventAnalytics.parseAnalyticsFilters(req.query);
+    res.status(200).json(healthEventAnalytics.buildAnalytics(snapshot, filters, analyticsLang(req)));
+  } catch (error) {
+    logger.error('GET /health-events/:id/analytics error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+router.get('/health-events/:id(\\d+)/analytics/scan-log', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const snapshot = await healthEventAnalytics.loadSnapshot(id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    const filters = healthEventAnalytics.parseAnalyticsFilters(req.query);
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 50, 1), 500);
+    res.status(200).json(healthEventAnalytics.buildScanLog(snapshot, filters, analyticsLang(req), page, pageSize));
+  } catch (error) {
+    logger.error('GET /health-events/:id/analytics/scan-log error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+/**
+ * One dataset as CSV/XLSX, or the whole event as a multi-sheet workbook
+ * (dataset=workbook). The current filters are applied and stamped into the
+ * Summary sheet, so a downloaded file always says what it contains.
+ */
+router.get('/health-events/:id(\\d+)/analytics/export', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const dataset = String(req.query.dataset || 'workbook');
+    const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
+    if (dataset !== 'workbook' && !healthEventAnalytics.DATASET_SET.has(dataset)) {
+      return res.status(400).json({ error: 'INVALID_DATASET' });
+    }
+    if (dataset === 'workbook' && format === 'csv') {
+      // A workbook is many tables; CSV cannot hold them.
+      return res.status(400).json({ error: 'INVALID_FORMAT' });
+    }
+
+    const keys = dataset === 'workbook' ? healthEventAnalytics.DATASETS : [dataset];
+    // Registration answers are 16k+ rows on a real event; only the Participants
+    // sheet spreads them into columns.
+    const snapshot = await healthEventAnalytics.loadSnapshot(id, { withAnswers: keys.includes('participants') });
+    if (!snapshot) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    const lang = analyticsLang(req);
+    const filters = healthEventAnalytics.parseAnalyticsFilters(req.query);
+    const analytics = healthEventAnalytics.buildAnalytics(snapshot, filters, lang);
+
+    const tables = keys.map(key => healthEventAnalytics.buildTable(key, snapshot, analytics, filters, lang));
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    const baseName = `${snapshot.event.slug || `event-${id}`}-${dataset === 'workbook' ? 'full-data' : dataset}-${stamp}`;
+
+    if (format === 'csv') {
+      const csv = healthEventAnalytics.tableToCsv(tables[0]);
+      res.setHeader('Content-disposition', `attachment; filename=${baseName}.csv`);
+      res.setHeader('Content-type', 'text/csv; charset=utf-8');
+      return res.send(csv);
+    }
+
+    const buffer = healthEventAnalytics.tablesToWorkbook(tables);
+    res.setHeader('Content-disposition', `attachment; filename=${baseName}.xlsx`);
+    res.setHeader('Content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Length', buffer.length);
+    return res.send(buffer);
+  } catch (error) {
+    logger.error('GET /health-events/:id/analytics/export error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
   }
 });
