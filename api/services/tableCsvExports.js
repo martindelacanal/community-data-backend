@@ -188,8 +188,8 @@ async function generateTicketTableCsvs() {
       LEFT JOIN transported_by AS tb ON dt.transported_by_id = tb.id
       LEFT JOIN provider AS p ON dt.provider_id = p.id
       LEFT JOIN audit_status AS as1 ON dt.audit_status_id = as1.id
-      INNER JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
-      INNER JOIN location AS loc ON dtl.location_id = loc.id
+      LEFT JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
+      LEFT JOIN location AS loc ON dtl.location_id = loc.id
       LEFT JOIN user AS u ON sl.user_id = u.id
       WHERE dt.enabled = 'Y'
       ORDER BY dt.date, dt.id, dtl.display_order, dtl.id`
@@ -245,7 +245,7 @@ async function generateTicketTableCsvs() {
        LEFT JOIN transported_by AS tb ON dt.transported_by_id = tb.id
        LEFT JOIN provider AS p ON dt.provider_id = p.id
        LEFT JOIN audit_status AS as1 ON dt.audit_status_id = as1.id
-       INNER JOIN visible_ticket_destinations AS destinations
+       LEFT JOIN visible_ticket_destinations AS destinations
          ON dt.id = destinations.donation_ticket_id
        LEFT JOIN user AS u ON sl.user_id = u.id
        LEFT JOIN ticket_products AS ticket_product

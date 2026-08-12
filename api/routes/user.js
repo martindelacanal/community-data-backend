@@ -14607,7 +14607,22 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         query_stocker_upload = 'AND sl.user_id IN (' + stocker_upload.map(() => '?').join(',') + ')';
         queryParams.push(...stocker_upload);
       }
+      // Los destinos se unen con LEFT JOIN para no perder tickets sin destino, de
+      // modo que el rol client necesita dos acotaciones: una en el ON del join
+      // (que destinos ve) y otra en el WHERE (que tickets ve). El id va al frente
+      // porque el join se resuelve antes que los filtros del WHERE.
+      const query_client_scope = cabecera.role === 'client'
+        ? `AND EXISTS (
+             SELECT 1
+             FROM donation_ticket_location AS dtl_client
+             INNER JOIN client_location AS cl_client
+               ON dtl_client.location_id = cl_client.location_id
+             WHERE dtl_client.donation_ticket_id = dt.id
+               AND cl_client.client_id = ?
+           )`
+        : '';
       if (cabecera.role === 'client') {
+        queryParams.unshift(cabecera.client_id);
         queryParams.push(cabecera.client_id);
       }
 
@@ -14629,6 +14644,10 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
       }
       if (stocker_upload.length > 0) {
         foodQueryParams.push(...stocker_upload);
+      }
+      if (cabecera.role === 'client') {
+        // Alcance por ticket del WHERE, ahora que el CTE de destinos se une con LEFT JOIN.
+        foodQueryParams.push(cabecera.client_id);
       }
 
       const [ticketRowsResult, foodRowsResult] = await Promise.all([
@@ -14657,9 +14676,16 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         LEFT JOIN transported_by as tb ON dt.transported_by_id = tb.id
         LEFT JOIN provider as p ON dt.provider_id = p.id
         LEFT JOIN audit_status as as1 ON dt.audit_status_id = as1.id
-        INNER JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
-        INNER JOIN location as loc ON dtl.location_id = loc.id
-        ${cabecera.role === 'client' ? 'INNER JOIN client_location cl ON dtl.location_id = cl.location_id' : ''}
+        LEFT JOIN donation_ticket_location AS dtl ON dt.id = dtl.donation_ticket_id
+          ${cabecera.role === 'client'
+            ? `AND EXISTS (
+                 SELECT 1
+                 FROM client_location AS cl_visible
+                 WHERE cl_visible.location_id = dtl.location_id
+                   AND cl_visible.client_id = ?
+               )`
+            : ''}
+        LEFT JOIN location as loc ON dtl.location_id = loc.id
         LEFT JOIN user as u ON sl.user_id = u.id
         WHERE dt.enabled = 'Y'
         ${query_from_date}
@@ -14669,7 +14695,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
         ${query_delivered_by}
         ${query_transported_by}
         ${query_stocker_upload}
-        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
+        ${query_client_scope}
         ORDER BY dt.date, dt.id, dtl.display_order, dtl.id`,
           queryParams
         ),
@@ -14731,7 +14757,7 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
            LEFT JOIN transported_by AS tb ON dt.transported_by_id = tb.id
            LEFT JOIN provider AS p ON dt.provider_id = p.id
            LEFT JOIN audit_status AS as1 ON dt.audit_status_id = as1.id
-           INNER JOIN visible_ticket_destinations AS destinations
+           LEFT JOIN visible_ticket_destinations AS destinations
              ON dt.id = destinations.donation_ticket_id
            LEFT JOIN user AS u ON sl.user_id = u.id
            LEFT JOIN ticket_products AS ticket_product
@@ -14745,6 +14771,8 @@ router.post('/table/ticket/download-csv', verifyToken, async (req, res) => {
            ${query_delivered_by}
            ${query_transported_by}
            ${query_stocker_upload}
+           ${locations.length > 0 ? 'AND destinations.donation_ticket_id IS NOT NULL' : ''}
+           ${query_client_scope}
            ORDER BY dt.date, dt.id, ticket_product.sort_id`,
           foodQueryParams
         )
@@ -21082,8 +21110,12 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
     if (cabecera.role === 'client' && (!Number.isSafeInteger(clientId) || clientId <= 0)) {
       return res.status(400).json('Invalid client');
     }
+    // El resumen de destinos se une con LEFT JOIN: un ticket sin filas en
+    // donation_ticket_location (dato heredado de la ventana de deploy del
+    // 2026-07-27/28) debe seguir apareciendo en la tabla, en el contador y en la
+    // busqueda, con la ubicacion vacia, en vez de desaparecer por completo.
     const ticketLocationSummaryJoin = `
-      INNER JOIN (
+      LEFT JOIN (
         SELECT
           dtl.donation_ticket_id,
           GROUP_CONCAT(l.community_city ORDER BY dtl.display_order, dtl.id SEPARATOR ', ') AS location
@@ -21099,6 +21131,20 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
           : ''}
         GROUP BY dtl.donation_ticket_id
       ) AS ticket_locations ON dt.id = ticket_locations.donation_ticket_id`;
+
+    // Al dejar de ser INNER, el join ya no acota los tickets del cliente, asi que
+    // el alcance se aplica de forma explicita. Un ticket sin destinos no se puede
+    // atribuir a ningun cliente, por lo que sigue oculto para ese rol.
+    const query_client_scope = cabecera.role === 'client'
+      ? `AND EXISTS (
+           SELECT 1
+           FROM donation_ticket_location AS dtl_client
+           INNER JOIN client_location AS cl_client
+             ON dtl_client.location_id = cl_client.location_id
+           WHERE dtl_client.donation_ticket_id = dt.id
+             AND cl_client.client_id = ${clientId}
+         )`
+      : '';
 
     const ticketOrder = buildTableOrder(req, {
       id: 'dt.id',
@@ -21169,6 +21215,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
       ${query_delivered_by}
       ${query_transported_by}
       ${query_stocker_upload}
+      ${query_client_scope}
       GROUP BY dt.id
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
@@ -21249,6 +21296,7 @@ router.post('/table/ticket', verifyToken, async (req, res) => {
         ${query_delivered_by}
         ${query_transported_by}
         ${query_stocker_upload}
+        ${query_client_scope}
       `, tableQueryParams);
 
         const numOfResults = countRows[0].count;
