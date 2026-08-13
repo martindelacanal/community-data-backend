@@ -353,6 +353,7 @@ test('attendance_by_day separates sign-ups, no-shows and unexpected arrivals', (
   assert.equal(day1.signed_up, 2, 'Ana and Carla');
   assert.equal(day1.attended, 2, 'Ana and Beto');
   assert.equal(day1.signed_up_and_attended, 1, 'only Ana did both');
+  assert.equal(day1.cancelled, 0);
   assert.equal(day1.no_show, 1, 'Carla');
   assert.equal(day1.walk_in_or_other_day, 1, 'Beto never signed up for a day');
   assert.equal(day1.show_rate, 50);
@@ -361,6 +362,62 @@ test('attendance_by_day separates sign-ups, no-shows and unexpected arrivals', (
   assert.equal(day2.day, '2026-08-09');
   assert.equal(day2.attended, 1);
   assert.equal(day2.first_time_that_day, 0, 'Ana was already seen on day 1');
+});
+
+test('attendance_by_day separates cancelled-only appointments from no-shows', () => {
+  const snapshot = buildSnapshot();
+  snapshot.registrations.push({
+    ...snapshot.registrations.find(row => row.user_id === 102),
+    registration_id: 6,
+    user_id: 103,
+    firstname: 'Dana',
+    lastname: 'Cancel',
+    email: 'dana@example.com',
+    username: 'dana',
+    phone: '5550103',
+    signed_up_days: '2026-08-08',
+    booked_appointment_days: null,
+    cancelled_appointment_days: '2026-08-08',
+    appointments: 'dental 2026-08-08 10:00 [cancelled]'
+  });
+
+  const result = analytics.buildAnalytics(snapshot, NO_FILTERS, 'en');
+  const day1 = result.attendance_by_day.find(row => row.day === '2026-08-08');
+
+  assert.equal(day1.signed_up, 3, 'Ana, Carla and Dana are still visible in the sign-up total');
+  assert.equal(day1.signed_up_and_attended, 1);
+  assert.equal(day1.cancelled, 1, 'Dana is classified separately');
+  assert.equal(day1.no_show, 1, 'only Carla is a no-show');
+  assert.equal(day1.show_rate, 50, 'cancelled absences are removed from the show-rate denominator');
+
+  const attendanceTable = analytics.buildTable('attendance', snapshot, result, NO_FILTERS, 'en');
+  const exportedDay1 = rowsAsObjects(attendanceTable).find(row => row.Day === '2026-08-08');
+  assert.equal(exportedDay1.Cancelled, 1, 'the attendance export exposes the separate bucket');
+});
+
+test('cancelling one appointment does not excuse another booked appointment that day', () => {
+  const snapshot = buildSnapshot();
+  snapshot.registrations.push({
+    ...snapshot.registrations.find(row => row.user_id === 102),
+    registration_id: 6,
+    user_id: 103,
+    firstname: 'Dana',
+    lastname: 'Mixed',
+    email: 'dana@example.com',
+    username: 'dana',
+    phone: '5550103',
+    signed_up_days: '2026-08-08',
+    booked_appointment_days: '2026-08-08',
+    cancelled_appointment_days: '2026-08-08',
+    appointments: 'dental 2026-08-08 10:00 [cancelled] | vision 2026-08-08 11:00 [booked]'
+  });
+
+  const result = analytics.buildAnalytics(snapshot, NO_FILTERS, 'en');
+  const day1 = result.attendance_by_day.find(row => row.day === '2026-08-08');
+
+  assert.equal(day1.cancelled, 0);
+  assert.equal(day1.no_show, 2, 'Carla and Dana both retain an active no-show');
+  assert.equal(day1.show_rate, 33.3);
 });
 
 // ---------------------------------------------------------------------------

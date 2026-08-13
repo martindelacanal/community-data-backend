@@ -2035,9 +2035,10 @@ router.get('/health-events/:id(\\d+)/registrants', verifyToken, requireVolunteer
               (SELECT COUNT(*) FROM health_event_scan s
                  WHERE s.registration_id = r.id AND s.scan_type = 'checkin') AS checkins,
               (SELECT GROUP_CONCAT(CONCAT(sl.service_key, ' ', DATE_FORMAT(sl.slot_date, '%m/%d'), ' ',
-                      TIME_FORMAT(sl.start_time, '%H:%i')) ORDER BY sl.slot_date, sl.start_time SEPARATOR ' | ')
+                      TIME_FORMAT(sl.start_time, '%H:%i'), ' [', a.status, ']')
+                      ORDER BY sl.slot_date, sl.start_time, a.id SEPARATOR ' | ')
                  FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
-                 WHERE a.registration_id = r.id AND a.status = 'booked') AS appointment_summary
+                 WHERE a.registration_id = r.id) AS appointment_summary
        FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
        WHERE r.health_event_id = ? AND r.registration_role = 'beneficiary'${searchFilter}
        ORDER BY u.firstname ASC, u.lastname ASC, r.id DESC
@@ -2692,9 +2693,10 @@ router.get('/health-events/:id(\\d+)/registrations', verifyToken, requireAdmin, 
               (SELECT COUNT(*) FROM health_event_scan s
                  WHERE s.registration_id = r.id AND s.scan_type = 'checkin') AS checkins,
               (SELECT GROUP_CONCAT(CONCAT(sl.service_key, ' ', DATE_FORMAT(sl.slot_date, '%m/%d'), ' ',
-                      TIME_FORMAT(sl.start_time, '%H:%i')) ORDER BY sl.slot_date, sl.start_time SEPARATOR ' | ')
+                      TIME_FORMAT(sl.start_time, '%H:%i'), ' [', a.status, ']')
+                      ORDER BY sl.slot_date, sl.start_time, a.id SEPARATOR ' | ')
                  FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
-                 WHERE a.registration_id = r.id AND a.status = 'booked') AS appointment_summary
+                 WHERE a.registration_id = r.id) AS appointment_summary
        FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
        WHERE r.health_event_id = ? AND r.registration_role = ?${searchFilter}
        ORDER BY r.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
@@ -2757,9 +2759,10 @@ router.get('/health-events/:id(\\d+)/registrations/csv', verifyToken, requireAdm
               (SELECT COUNT(*) FROM health_event_scan s
                  WHERE s.registration_id = r.id AND s.scan_type = 'checkin') AS checkins,
               (SELECT GROUP_CONCAT(CONCAT(sl.service_key, ' ', DATE_FORMAT(sl.slot_date, '%m/%d'), ' ',
-                      TIME_FORMAT(sl.start_time, '%H:%i')) ORDER BY sl.slot_date, sl.start_time SEPARATOR ' | ')
+                      TIME_FORMAT(sl.start_time, '%H:%i'), ' [', a.status, ']')
+                      ORDER BY sl.slot_date, sl.start_time, a.id SEPARATOR ' | ')
                  FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
-                 WHERE a.registration_id = r.id AND a.status = 'booked') AS appointment_summary
+                 WHERE a.registration_id = r.id) AS appointment_summary
        FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
        WHERE r.health_event_id = ? AND r.registration_role = ?
        ORDER BY r.id DESC`, [id, role]);
@@ -3263,9 +3266,11 @@ router.get('/health-events/:id(\\d+)/metrics-summary', verifyToken, requireAdmin
       `SELECT ${localDay} AS day, COUNT(DISTINCT s.scanned_user_id) AS unique_attendees
        FROM health_event_scan s WHERE s.health_event_id = ? GROUP BY day ORDER BY day`, [timezone, id]);
     const [appointmentsPerService] = await mysqlConnection.promise().query(
-      `SELECT sl.service_key, sl.slot_date, COUNT(*) AS booked
+      `SELECT sl.service_key, sl.slot_date,
+              COUNT(CASE WHEN a.status = 'booked' THEN 1 END) AS booked,
+              COUNT(CASE WHEN a.status = 'cancelled' THEN 1 END) AS cancelled
        FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
-       WHERE sl.health_event_id = ? AND a.status = 'booked'
+       WHERE sl.health_event_id = ? AND a.status IN ('booked', 'cancelled')
        GROUP BY sl.service_key, sl.slot_date ORDER BY sl.slot_date`, [id]);
     const [checkoutStatus] = await mysqlConnection.promise().query(
       `SELECT st.name_en AS stand_en, st.name_es AS stand_es, o.name_en, o.name_es, COUNT(*) AS total

@@ -254,10 +254,19 @@ async function loadRegistrations(eventId, timezone, eventStartDate) {
                FROM health_event_registration_date d WHERE d.registration_id = r.id) AS signed_up_days,
             (SELECT GROUP_CONCAT(DISTINCT d.priority_service ORDER BY d.priority_service SEPARATOR ', ')
                FROM health_event_registration_date d WHERE d.registration_id = r.id) AS priority_services,
-            (SELECT GROUP_CONCAT(CONCAT(sl.service_key, ' ', DATE_FORMAT(sl.slot_date, '%Y-%m-%d'), ' ',
-                    TIME_FORMAT(sl.start_time, '%H:%i')) ORDER BY sl.slot_date, sl.start_time SEPARATOR ' | ')
+            (SELECT GROUP_CONCAT(DISTINCT DATE_FORMAT(sl.slot_date, '%Y-%m-%d')
+                    ORDER BY DATE_FORMAT(sl.slot_date, '%Y-%m-%d') SEPARATOR ', ')
                FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
-               WHERE a.registration_id = r.id AND a.status = 'booked') AS appointments
+               WHERE a.registration_id = r.id AND a.status = 'booked') AS booked_appointment_days,
+            (SELECT GROUP_CONCAT(DISTINCT DATE_FORMAT(sl.slot_date, '%Y-%m-%d')
+                    ORDER BY DATE_FORMAT(sl.slot_date, '%Y-%m-%d') SEPARATOR ', ')
+               FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
+               WHERE a.registration_id = r.id AND a.status = 'cancelled') AS cancelled_appointment_days,
+            (SELECT GROUP_CONCAT(CONCAT(sl.service_key, ' ', DATE_FORMAT(sl.slot_date, '%Y-%m-%d'), ' ',
+                    TIME_FORMAT(sl.start_time, '%H:%i'), ' [', a.status, ']')
+                    ORDER BY sl.slot_date, sl.start_time, a.id SEPARATOR ' | ')
+               FROM health_event_appointment a INNER JOIN health_event_slot sl ON sl.id = a.slot_id
+               WHERE a.registration_id = r.id) AS appointments
      FROM health_event_registration r
      INNER JOIN user u ON u.id = r.user_id
      LEFT JOIN gender g ON g.id = u.gender_id
@@ -822,26 +831,55 @@ function buildAnalytics(snapshot, filters, lang) {
 
   // ---- per-day attendance vs sign-ups ----
   const signedUpByDay = new Map();
+  const cancelledOnlyByDay = new Map();
+  const parseDays = value => new Set(
+    String(value || '').split(',').map(day => day.trim()).filter(Boolean)
+  );
   for (const registration of beneficiaryRegs) {
-    for (const day of String(registration.signed_up_days || '').split(',').map(s => s.trim()).filter(Boolean)) {
+    const signedUpDays = parseDays(registration.signed_up_days);
+    const bookedDays = parseDays(registration.booked_appointment_days);
+    const cancelledDays = parseDays(registration.cancelled_appointment_days);
+
+    // Appointment dates are also sign-up dates. Usually registration_date has
+    // the same rows, but using the appointments as a fallback keeps historical
+    // imports and administrative corrections from disappearing from attendance.
+    for (const day of new Set([...signedUpDays, ...bookedDays, ...cancelledDays])) {
       increment(signedUpByDay, day, () => new Set()).add(registration.user_id);
+    }
+    // A cancellation only excuses a no-show when the person has no remaining
+    // booked appointment that day. Cancelling one of two appointments must not
+    // hide a genuine no-show for the other one.
+    for (const day of cancelledDays) {
+      if (!bookedDays.has(day)) {
+        increment(cancelledOnlyByDay, day, () => new Set()).add(registration.user_id);
+      }
     }
   }
   const attendedByDay = new Map();
   for (const scan of scans) {
     increment(attendedByDay, scan.day, () => new Set()).add(scan.user_id);
   }
-  const allDays = Array.from(new Set([...signedUpByDay.keys(), ...attendedByDay.keys()])).sort();
+  const allDays = Array.from(new Set([
+    ...signedUpByDay.keys(), ...attendedByDay.keys(), ...cancelledOnlyByDay.keys()
+  ])).sort();
   const seenBefore = new Set();
   const attendance_by_day = allDays.map(day => {
     const signedUp = signedUpByDay.get(day) || new Set();
     const attended = attendedByDay.get(day) || new Set();
+    const cancelledOnly = cancelledOnlyByDay.get(day) || new Set();
     let newPeople = 0;
     for (const userId of attended) {
       if (!seenBefore.has(userId)) { newPeople += 1; seenBefore.add(userId); }
     }
     let matched = 0;
-    for (const userId of attended) { if (signedUp.has(userId)) matched += 1; }
+    let cancelled = 0;
+    let noShow = 0;
+    for (const userId of signedUp) {
+      if (attended.has(userId)) matched += 1;
+      else if (cancelledOnly.has(userId)) cancelled += 1;
+      else noShow += 1;
+    }
+    const expectedAfterCancellations = matched + noShow;
     return {
       day,
       signed_up: signedUp.size,
@@ -849,8 +887,11 @@ function buildAnalytics(snapshot, filters, lang) {
       first_time_that_day: newPeople,
       signed_up_and_attended: matched,
       walk_in_or_other_day: attended.size - matched,
-      no_show: Math.max(signedUp.size - matched, 0),
-      show_rate: signedUp.size ? Math.round((matched / signedUp.size) * 1000) / 10 : null
+      cancelled,
+      no_show: noShow,
+      show_rate: expectedAfterCancellations
+        ? Math.round((matched / expectedAfterCancellations) * 1000) / 10
+        : null
     };
   });
 
@@ -1041,13 +1082,14 @@ function buildAttendanceTable(analytics, lang) {
     label(lang, 'Signed up and attended', 'Anotados que asistieron'),
     label(lang, 'Show rate %', '% de asistencia'),
     label(lang, 'No-show', 'No asistieron'),
+    label(lang, 'Cancelled', 'Cancelaron'),
     label(lang, 'Attended without signing up for this day', 'Asistieron sin anotarse para este día'),
     label(lang, 'First day on site', 'Primer día en el lugar')
   ];
   const rows = analytics.attendance_by_day.map(row => [
     row.day, row.signed_up, row.attended, row.signed_up_and_attended,
     row.show_rate == null ? '' : row.show_rate,
-    row.no_show, row.walk_in_or_other_day, row.first_time_that_day
+    row.no_show, row.cancelled, row.walk_in_or_other_day, row.first_time_that_day
   ]);
   return { key: 'attendance', title: label(lang, 'Attendance by day', 'Asistencia por día'), headers, rows };
 }
