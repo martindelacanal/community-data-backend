@@ -1146,6 +1146,7 @@ const HEALTH_BENEFICIARY_CONFIRMATION_I18N = {
     timeLabel: 'Hours',
     appointmentsLabel: 'Your appointments',
     qrHint: 'On the day of the event, sign in with your account from our app or website and show your QR code at the entrance — that\'s your ticket to every service.',
+    familyHint: 'Important: each person needs their own registration and QR code — including children. A QR code only admits the person it belongs to, so please register every family member individually.',
     credentialsTitle: 'Your sign-in details',
     credentialsHint: 'Use them to sign in from our app or website. You will be asked to choose your own password the first time you sign in.',
     usernameLabel: 'Username',
@@ -1164,6 +1165,7 @@ const HEALTH_BENEFICIARY_CONFIRMATION_I18N = {
     timeLabel: 'Horario',
     appointmentsLabel: 'Tus citas',
     qrHint: 'El día del evento, inicia sesión con tu cuenta desde nuestra app o el sitio web y muestra tu código QR en la entrada: es tu pase para todos los servicios.',
+    familyHint: 'Importante: cada persona necesita su propio registro y código QR, incluidos los niños. Un código QR solo admite a la persona a la que pertenece; registra individualmente a cada integrante de tu familia.',
     credentialsTitle: 'Tus datos para iniciar sesión',
     credentialsHint: 'Úsalos para iniciar sesión desde nuestra app o el sitio web. La primera vez que inicies sesión te pediremos que elijas tu propia contraseña.',
     usernameLabel: 'Usuario',
@@ -1238,6 +1240,7 @@ function buildHealthBeneficiaryConfirmationContent({
         </tr>
       </table>
       <p style="margin:0 0 4px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;">${escapeHtmlValue(t.qrHint)}</p>
+      <p style="margin:0 0 4px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;font-weight:600;">${escapeHtmlValue(t.familyHint)}</p>
       ${credentials && credentials.username && credentials.password ? `
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0 0 0;">
         <tr>
@@ -1271,6 +1274,7 @@ function buildHealthBeneficiaryConfirmationContent({
     if (timeLine) text += `${t.timeLabel}: ${timeLine}\n`;
     if (appointmentLines.length) text += `${t.appointmentsLabel}: ${appointmentLines.join(' | ')}\n`;
     text += `\n${t.qrHint}\n`;
+    text += `\n${t.familyHint}\n`;
     if (credentials && credentials.username && credentials.password) {
       text += `\n${t.credentialsTitle}\n${t.usernameLabel}: ${credentials.username}\n${t.passwordLabel}: ${credentials.password}\n${t.credentialsHint}\n`;
     }
