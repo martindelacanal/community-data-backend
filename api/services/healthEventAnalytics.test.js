@@ -88,11 +88,11 @@ function buildSnapshot() {
   ];
 
   const registrations = [
-    { registration_id: 1, registration_role: 'beneficiary', status: 'registered', source: 'web', contact_email: null, submitted_at_local: '2026-07-01 10:00:00', user_id: 100, firstname: 'Ana', lastname: 'Lopez', email: 'ana@example.com', username: 'ana', phone: '5550100', zipcode: '92223', household_size: 3, user_enabled: 'Y', app_language: 'es', date_of_birth: '1990-01-01', age: 36, gender: 'Female', ethnicity: 'Hispanic', other_ethnicity: null, second_ethnicity: null, preferred_language: 'Spanish', other_language: null, signed_up_days: '2026-08-08, 2026-08-09', priority_services: 'dental', appointments: 'dental 2026-08-08 09:00' },
-    { registration_id: 2, registration_role: 'beneficiary', status: 'registered', source: 'walkin', contact_email: null, submitted_at_local: '2026-08-08 13:55:00', user_id: 101, firstname: 'Beto', lastname: 'Diaz', email: null, username: 'beto', phone: '5550101', zipcode: '92220', household_size: 1, user_enabled: 'Y', app_language: 'en', date_of_birth: '1980-05-05', age: 46, gender: 'Male', ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: 'English', other_language: null, signed_up_days: null, priority_services: null, appointments: null },
-    { registration_id: 3, registration_role: 'beneficiary', status: 'registered', source: 'web', contact_email: 'carla@example.com', submitted_at_local: '2026-07-02 10:00:00', user_id: 102, firstname: 'Carla', lastname: 'Ruiz', email: 'carla@example.com', username: 'carla', phone: '5550102', zipcode: '92223', household_size: 2, user_enabled: 'Y', app_language: 'en', date_of_birth: '2000-02-02', age: 26, gender: 'Female', ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: 'English', other_language: null, signed_up_days: '2026-08-08', priority_services: null, appointments: null },
-    { registration_id: 4, registration_role: 'volunteer', status: 'registered', source: 'web', contact_email: null, submitted_at_local: '2026-07-10 10:00:00', user_id: 900, firstname: 'Vol', lastname: 'One', email: 'v1@example.com', username: 'vol.one', phone: null, zipcode: null, household_size: null, user_enabled: 'Y', app_language: 'en', date_of_birth: null, age: null, gender: null, ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: null, other_language: null, signed_up_days: null, priority_services: null, appointments: null },
-    { registration_id: 5, registration_role: 'volunteer', status: 'registered', source: 'web', contact_email: null, submitted_at_local: '2026-07-10 10:00:00', user_id: 901, firstname: 'Vol', lastname: 'Two', email: 'v2@example.com', username: 'vol.two', phone: null, zipcode: null, household_size: null, user_enabled: 'N', app_language: 'en', date_of_birth: null, age: null, gender: null, ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: null, other_language: null, signed_up_days: null, priority_services: null, appointments: null }
+    { registration_id: 1, registration_role: 'beneficiary', status: 'registered', source: 'web', contact_email: null, submitted_at_local: '2026-07-01 10:00:00', user_id: 100, firstname: 'Ana', lastname: 'Lopez', email: 'ana@example.com', username: 'ana', phone: '5550100', zipcode: '92223', household_size: 3, user_enabled: 'Y', app_language: 'es', date_of_birth: '1990-01-01', age: 36, gender: 'Female', ethnicity: 'Hispanic', other_ethnicity: null, second_ethnicity: null, preferred_language: 'Spanish', other_language: null, signed_up_days: '2026-08-08, 2026-08-09', priority_services: 'dental', booked_appointment_days: '2026-08-08', cancelled_appointment_days: null, appointments: 'dental 2026-08-08 09:00' },
+    { registration_id: 2, registration_role: 'beneficiary', status: 'registered', source: 'walkin', contact_email: null, submitted_at_local: '2026-08-08 13:55:00', user_id: 101, firstname: 'Beto', lastname: 'Diaz', email: null, username: 'beto', phone: '5550101', zipcode: '92220', household_size: 1, user_enabled: 'Y', app_language: 'en', date_of_birth: '1980-05-05', age: 46, gender: 'Male', ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: 'English', other_language: null, signed_up_days: null, priority_services: null, booked_appointment_days: null, cancelled_appointment_days: null, appointments: null },
+    { registration_id: 3, registration_role: 'beneficiary', status: 'registered', source: 'web', contact_email: 'carla@example.com', submitted_at_local: '2026-07-02 10:00:00', user_id: 102, firstname: 'Carla', lastname: 'Ruiz', email: 'carla@example.com', username: 'carla', phone: '5550102', zipcode: '92223', household_size: 2, user_enabled: 'Y', app_language: 'en', date_of_birth: '2000-02-02', age: 26, gender: 'Female', ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: 'English', other_language: null, signed_up_days: '2026-08-08', priority_services: null, booked_appointment_days: null, cancelled_appointment_days: null, appointments: null },
+    { registration_id: 4, registration_role: 'volunteer', status: 'registered', source: 'web', contact_email: null, submitted_at_local: '2026-07-10 10:00:00', user_id: 900, firstname: 'Vol', lastname: 'One', email: 'v1@example.com', username: 'vol.one', phone: null, zipcode: null, household_size: null, user_enabled: 'Y', app_language: 'en', date_of_birth: null, age: null, gender: null, ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: null, other_language: null, signed_up_days: null, priority_services: null, booked_appointment_days: null, cancelled_appointment_days: null, appointments: null },
+    { registration_id: 5, registration_role: 'volunteer', status: 'registered', source: 'web', contact_email: null, submitted_at_local: '2026-07-10 10:00:00', user_id: 901, firstname: 'Vol', lastname: 'Two', email: 'v2@example.com', username: 'vol.two', phone: null, zipcode: null, household_size: null, user_enabled: 'N', app_language: 'en', date_of_birth: null, age: null, gender: null, ethnicity: null, other_ethnicity: null, second_ethnicity: null, preferred_language: null, other_language: null, signed_up_days: null, priority_services: null, booked_appointment_days: null, cancelled_appointment_days: null, appointments: null }
   ];
 
   const questions = [
@@ -182,7 +182,8 @@ test('KPIs count people once and exclude the entry desk from services', () => {
   assert.equal(k.attended_beneficiaries, 2, 'Ana and Beto, each once');
   assert.equal(k.registered_beneficiaries, 3);
   assert.equal(k.registered_without_scans, 1, 'Carla never showed up');
-  assert.equal(k.walkins, 1);
+  assert.equal(k.walkins, 1, 'Beto attended without a booked appointment');
+  assert.equal(k.attended_with_appointment, 1, 'Ana attended with her dental appointment');
   assert.equal(k.registered_volunteers, 2);
   assert.equal(k.scanning_volunteers, 3, 'Vol Three scanned without a volunteer registration');
   // 5 check-ins minus the 2 at the entry desk.
@@ -193,6 +194,29 @@ test('KPIs count people once and exclude the entry desk from services', () => {
   assert.equal(k.days, 2);
   // Ana: entry + dental + resource = 3 stands; Beto: entry + dental = 2.
   assert.equal(k.avg_stands_per_attendee, 2.5);
+});
+
+test('administrative NA check-outs close the visit but stay out of durations', () => {
+  const snapshot = buildSnapshot();
+  // Beto's open Dental visit is closed administratively hours later: the
+  // check-out exists, but its timestamp is synthetic backfill, not service time.
+  snapshot.scans.push(scan({ scan_id: 7, local: '2026-08-08 20:00:00', scan_type: 'checkout', paired_scan_id: 5, stand_id: 2, user_id: 101, person_name: 'Beto', registration_id: 2, source: 'walkin', volunteer_user_id: 901, volunteer_name: 'Vol Two' }));
+  snapshot.checkoutAnswers.push(
+    { scan_answer_id: 3, scan_id: 7, question_id: 60, answer_text: null, answer_number: null, question_en: 'Service status', question_es: 'Estado', question_type: 'single', sort_order: 1, stand_id: 2, options_en: 'NA (not recorded)', options_es: 'NA (no registrado)' });
+
+  const result = analytics.buildAnalytics(snapshot, NO_FILTERS, 'en');
+  const k = result.kpis;
+  assert.equal(k.checkouts, 2, 'the administrative check-out still counts as a scan');
+  assert.equal(k.open_visits, 0, 'the visit is closed, not left dangling');
+  assert.equal(k.avg_service_minutes, 30, "only Ana's genuine visit shapes the average");
+  assert.equal(k.median_service_minutes, 30);
+
+  // The per-stand rollup follows the same rule.
+  const dental = result.by_stand.find(row => row.stand_name === 'Dental');
+  assert.equal(dental.avg_minutes, 30, 'per-stand durations also ignore the NA check-out');
+  assert.equal(dental.median_minutes, 30);
+  assert.equal(dental.open_visits, 0);
+  assert.equal(dental.checkouts, 2);
 });
 
 test('an open visit is only counted at stands that record check-outs', () => {

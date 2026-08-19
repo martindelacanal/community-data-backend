@@ -475,6 +475,16 @@ function buildVisits(scans, checkoutAnswersByScan) {
   return visits;
 }
 
+/**
+ * True when the visit was closed administratively: backfilled check-outs answer
+ * 'Service status' with 'NA (not recorded)', so their check-out time is
+ * synthetic and must never shape duration metrics.
+ */
+function isAdministrativeCheckout(visit) {
+  return visit.answers.some(row => row.question_en === 'Service status' &&
+    String(row.options_en || '').split(' | ').includes('NA (not recorded)'));
+}
+
 /** Whole minutes between two event-local 'YYYY-MM-DD HH:MM:SS' strings. */
 function minutesBetween(fromLocal, toLocal) {
   const start = Date.parse(`${String(fromLocal).replace(' ', 'T')}Z`);
@@ -536,8 +546,15 @@ function buildAnalytics(snapshot, filters, lang) {
   for (const scan of scans) {
     increment(standsPerUser, scan.user_id, () => new Set()).add(scan.stand_id);
   }
-  const dwellMinutes = visits.filter(v => v.minutes != null).map(v => v.minutes);
+  // Administrative backfills keep counting as check-outs and closed visits,
+  // but their synthetic check-out time is kept out of the duration metrics.
+  const dwellMinutes = visits.filter(v => v.minutes != null && !isAdministrativeCheckout(v)).map(v => v.minutes);
   const openVisits = visits.filter(v => !v.checkout && v.checkin.has_checkout).length;
+  // The client's definition: anyone who attended without a booked dental/vision
+  // appointment is a walk-in, regardless of how they registered.
+  const usersWithAppointment = new Set(
+    beneficiaryRegs.filter(r => r.booked_appointment_days).map(r => r.user_id));
+  const walkins = Array.from(attendedUsers).filter(id => !usersWithAppointment.has(id)).length;
 
   const kpis = {
     registered_beneficiaries: beneficiaryRegs.length,
@@ -548,7 +565,8 @@ function buildAnalytics(snapshot, filters, lang) {
     // the UI labels it "registered without scans here".
     registered_without_scans: Math.max(
       beneficiaryRegs.length - beneficiaryRegs.filter(r => attendedUsers.has(r.user_id)).length, 0),
-    walkins: beneficiaryRegs.filter(r => r.source === 'walkin').length,
+    walkins,
+    attended_with_appointment: attendedUsers.size - walkins,
     total_scans: scans.length,
     checkins: scans.filter(scan => scan.scan_type === 'checkin').length,
     checkouts: scans.filter(scan => scan.scan_type === 'checkout').length,
@@ -630,8 +648,11 @@ function buildAnalytics(snapshot, filters, lang) {
   for (const visit of visits) {
     const key = `${visit.checkin.stand_id}|${visit.checkin.service_id || 0}`;
     const bucket = increment(dwellByKey, key, () => ({ minutes: [], open: 0 }));
-    if (visit.minutes != null) bucket.minutes.push(visit.minutes);
-    else if (visit.checkin.has_checkout) bucket.open += 1;
+    // Same rule as the dwell KPIs: administrative NA check-outs close the
+    // visit but their synthetic time never shapes per-stand durations.
+    if (visit.minutes != null) {
+      if (!isAdministrativeCheckout(visit)) bucket.minutes.push(visit.minutes);
+    } else if (visit.checkin.has_checkout) bucket.open += 1;
   }
 
   const by_stand = Array.from(standRollupMap.entries())
@@ -999,7 +1020,8 @@ function buildSummaryTable(analytics, lang) {
     [label(lang, 'Registered volunteers', 'Voluntarios registrados'), k.registered_volunteers],
     [label(lang, 'Participants scanned at least once', 'Participantes con al menos un escaneo'), k.attended_beneficiaries],
     [label(lang, 'Registered with no scan in this selection', 'Registrados sin escaneos en esta selección'), k.registered_without_scans],
-    [label(lang, 'Walk-ins registered on site', 'Walk-ins registrados en el lugar'), k.walkins],
+    [label(lang, 'Attended with a booked appointment', 'Asistieron con cita reservada'), k.attended_with_appointment],
+    [label(lang, 'Walk-ins (attended without an appointment)', 'Walk-ins (asistieron sin cita)'), k.walkins],
     [label(lang, 'Total scans', 'Escaneos totales'), k.total_scans],
     [label(lang, 'Check-ins', 'Check-ins'), k.checkins],
     [label(lang, 'Check-outs', 'Check-outs'), k.checkouts],
