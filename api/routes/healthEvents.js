@@ -36,6 +36,12 @@ const {
   buildHealthScanDebounceKey,
   findRecentHealthScan
 } = require('../utils/healthScanGuard');
+const {
+  answersUseOnlyAllowedQuestions,
+  canAccessBeneficiaryAnswers,
+  pendingRequiredState,
+  shouldIncludeBeneficiaryEvent
+} = require('../utils/postEventSurvey');
 const healthEventAnalytics = require('../services/healthEventAnalytics');
 
 const router = express.Router();
@@ -1261,7 +1267,7 @@ router.get('/health-events/mine', verifyToken, requireBeneficiary, async (req, r
     const userId = req.currentUser.id;
     const [events] = await mysqlConnection.promise().query(
       `SELECT he.*, l.organization, l.community_city, l.address,
-              r.id AS registration_id
+              r.id AS registration_id, r.post_event_survey_open
        FROM health_event he
        INNER JOIN location l ON l.id = he.location_id
        LEFT JOIN health_event_registration r
@@ -1271,17 +1277,21 @@ router.get('/health-events/mine', verifyToken, requireBeneficiary, async (req, r
 
     const result = [];
     for (const event of events) {
-      // Evento terminado: desaparece de la home del beneficiario (aunque haya
-      // estado registrado) — la sección se oculta sola si era el único.
-      if (hasEventEnded(event)) continue;
+      const ended = hasEventEnded(event);
       const open = isRegistrationOpen(event);
       const registered = !!event.registration_id;
-      if (!registered && !open) continue;
 
       let pending = 0;
-      if (registered) {
+      if (registered && (!ended || event.post_event_survey_open === 'Y')) {
         pending = await countPendingRequiredQuestions(event.id, event.registration_id);
       }
+      if (!shouldIncludeBeneficiaryEvent({
+        eventEnded: ended,
+        registrationOpen: open,
+        registered,
+        postEventSurveyOpen: event.post_event_survey_open,
+        pendingRequiredQuestions: pending
+      })) continue;
       const today = nowInTimezone(event.timezone).slice(0, 10);
       result.push({
         ...publicEventShape(event),
@@ -1298,26 +1308,48 @@ router.get('/health-events/mine', verifyToken, requireBeneficiary, async (req, r
   }
 });
 
-async function countPendingRequiredQuestions(eventId, registrationId) {
+async function countPendingRequiredQuestions(
+  eventId,
+  registrationId,
+  executor = mysqlConnection.promise()
+) {
+  const context = await loadPendingRequiredQuestionContext(eventId, registrationId, executor);
+  return context.pendingCount;
+}
+
+async function loadPendingRequiredQuestionContext(
+  eventId,
+  registrationId,
+  executor = mysqlConnection.promise()
+) {
   const forms = await fetchForms(eventId, 'beneficiary');
   const gatingForms = forms.filter(f => f.required_before_qr === 'Y');
-  if (!gatingForms.length) return 0;
+  if (!gatingForms.length) {
+    return { pendingCount: 0, pendingForms: [], answersByQuestion: new Map(), answeredIds: new Set() };
+  }
   // Visibility is computed over the FULL list (a child depending on a filtered
   // parent must resolve the same way everywhere); appointments and notices are
   // excluded from the count itself — neither ever produces an answer row.
   const allQuestions = gatingForms.flatMap(f => f.questions);
-  if (!allQuestions.length) return 0;
+  if (!allQuestions.length) {
+    return { pendingCount: 0, pendingForms: [], answersByQuestion: new Map(), answeredIds: new Set() };
+  }
 
-  const answersByQuestion = await fetchExistingAnswerOptions(registrationId);
-  const answeredIds = await fetchAnsweredQuestionIds(registrationId);
+  const answersByQuestion = await fetchExistingAnswerOptions(registrationId, executor);
+  const answeredIds = await fetchAnsweredQuestionIds(registrationId, executor);
   const visible = computeVisibleQuestionIds(allQuestions, answersByQuestion);
-  return allQuestions.filter(q =>
-    q.question_type !== 'appointment' && q.question_type !== 'notice' &&
-    visible.has(q.id) && q.required === 'Y' && !answeredIds.has(q.id)).length;
+  const { pendingForms, pendingQuestions } = pendingRequiredState(gatingForms, visible, answeredIds);
+  return {
+    pendingCount: pendingQuestions.length,
+    pendingForms,
+    answersByQuestion,
+    answeredIds,
+    visible
+  };
 }
 
-async function fetchExistingAnswerOptions(registrationId) {
-  const [rows] = await mysqlConnection.promise().query(
+async function fetchExistingAnswerOptions(registrationId, executor = mysqlConnection.promise()) {
+  const [rows] = await executor.query(
     `SELECT a.question_id, ao.option_id
      FROM health_event_answer a
      LEFT JOIN health_event_answer_option ao ON ao.answer_id = a.id
@@ -1330,8 +1362,8 @@ async function fetchExistingAnswerOptions(registrationId) {
   return map;
 }
 
-async function fetchAnsweredQuestionIds(registrationId) {
-  const [rows] = await mysqlConnection.promise().query(
+async function fetchAnsweredQuestionIds(registrationId, executor = mysqlConnection.promise()) {
+  const [rows] = await executor.query(
     'SELECT question_id FROM health_event_answer WHERE registration_id = ?', [registrationId]);
   return new Set(rows.map(r => r.question_id));
 }
@@ -1350,25 +1382,28 @@ router.get('/health-events/:eventId(\\d+)/pending-questions', verifyToken, requi
     if (!registration) {
       return res.status(404).json({ error: 'NOT_REGISTERED' });
     }
-    const forms = await fetchForms(eventId, 'beneficiary');
-    const gatingForms = forms.filter(f => f.required_before_qr === 'Y');
-    const answersByQuestion = await fetchExistingAnswerOptions(registration.id);
-    const answeredIds = await fetchAnsweredQuestionIds(registration.id);
+    const event = await getEventById(eventId);
+    if (!event) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    if (!canAccessBeneficiaryAnswers(hasEventEnded(event), registration)) {
+      return res.status(410).json({ error: 'EVENT_ENDED' });
+    }
+    const context = await loadPendingRequiredQuestionContext(eventId, registration.id);
 
-    const resultForms = gatingForms.map(form => {
-      // Visibility over the FULL list (same dependency resolution as the count);
-      // notices carry no answer, so they can never be "pending".
-      const visible = computeVisibleQuestionIds(form.questions, answersByQuestion);
+    const resultForms = context.pendingForms.map(form => {
       const questions = form.questions.filter(q => q.question_type !== 'appointment' && q.question_type !== 'notice');
-      // Return unanswered questions plus their (possibly answered) parents so the
-      // client can evaluate dependencies; mark answered ones.
-      const unanswered = questions.filter(q => !answeredIds.has(q.id));
-      if (!unanswered.length) return null;
       return {
         ...form,
-        questions: questions.map(q => ({ ...q, previously_answered: answeredIds.has(q.id), visible_now: visible.has(q.id) }))
+        // Include answered parents so the client can evaluate dependencies,
+        // but never return a form without a genuinely pending required item.
+        questions: questions.map(q => ({
+          ...q,
+          previously_answered: context.answeredIds.has(q.id),
+          visible_now: context.visible.has(q.id)
+        }))
       };
-    }).filter(Boolean);
+    });
 
     res.status(200).json({ registration_id: registration.id, forms: resultForms });
   } catch (error) {
@@ -1385,16 +1420,66 @@ router.post('/health-events/:eventId(\\d+)/answers', verifyToken, requireBenefic
     if (!registration) {
       return res.status(404).json({ error: 'NOT_REGISTERED' });
     }
+    const event = await getEventById(eventId);
+    if (!event) {
+      return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+    const ended = hasEventEnded(event);
+    if (!canAccessBeneficiaryAnswers(ended, registration)) {
+      return res.status(410).json({ error: 'EVENT_ENDED' });
+    }
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
     const forms = await fetchForms(eventId, 'beneficiary');
-    const questionsById = new Map(forms.flatMap(f => f.questions).map(q => [q.id, q]));
+    let allowedForms = forms;
+    let pendingContext = null;
+    if (ended) {
+      pendingContext = await loadPendingRequiredQuestionContext(eventId, registration.id);
+      allowedForms = pendingContext.pendingForms;
+    }
+    const allowedQuestions = allowedForms.flatMap(f => f.questions).filter(question =>
+      !ended || !pendingContext.answeredIds.has(question.id)
+    );
+    const questionsById = new Map(allowedQuestions.map(q => [q.id, q]));
+    if (ended && !answersUseOnlyAllowedQuestions(answers, questionsById)) {
+      return res.status(400).json({ error: 'INVALID_QUESTION' });
+    }
+    const normalizedAnswers = ended
+      ? answers.map(item => ({ ...item, question_id: Number(item.question_id) }))
+      : answers;
 
     connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
-    const saved = await upsertAnswers(connection, registration.id, answers, questionsById, 'beneficiary-home');
-    await syncRegistrationDates(connection, registration.id, answers, questionsById);
+    if (ended) {
+      const [[lockedRegistration]] = await connection.query(
+        `SELECT post_event_survey_open FROM health_event_registration
+          WHERE id = ? AND user_id = ? AND health_event_id = ? AND status = 'registered'
+          FOR UPDATE`,
+        [registration.id, req.currentUser.id, eventId]
+      );
+      if (!lockedRegistration || lockedRegistration.post_event_survey_open !== 'Y') {
+        await connection.rollback();
+        return res.status(410).json({ error: 'EVENT_ENDED' });
+      }
+    }
+    const saved = await upsertAnswers(
+      connection,
+      registration.id,
+      normalizedAnswers,
+      questionsById,
+      'beneficiary-home'
+    );
+    if (!ended) {
+      await syncRegistrationDates(connection, registration.id, normalizedAnswers, questionsById);
+    }
+    const pending = await countPendingRequiredQuestions(eventId, registration.id, connection);
+    if (ended && pending === 0) {
+      await connection.query(
+        `UPDATE health_event_registration SET post_event_survey_open = 'N' WHERE id = ?`,
+        [registration.id]
+      );
+    }
     await connection.commit();
-    res.status(200).json({ saved });
+    res.status(200).json({ saved, pending_required_questions: pending });
   } catch (error) {
     if (connection) {
       try { await connection.rollback(); } catch (e) { /* noop */ }
