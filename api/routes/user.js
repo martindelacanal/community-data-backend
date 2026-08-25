@@ -17869,12 +17869,18 @@ router.post('/metrics/participant/location_new_recurring', verifyToken, async (r
 });
 
 async function getParticipantRegisterHistory(cabecera, rawFilters, language = 'en') {
+  // Los extremos sin fecha explícita se resuelven con los límites globales del
+  // sistema; esos son los que se recortan si quedan en cero (ver trimEmptyPeriodEdges).
+  const trimEdges = {
+    start: !parseDateOnly(rawFilters?.from_date),
+    end: !parseDateOnly(rawFilters?.to_date)
+  };
   const filters = await normalizeParticipantMetricFilters(rawFilters, { resolveDateRange: true });
   const cacheKey = buildParticipantMetricsCacheKey(
     'participant-register-history',
     cabecera,
     filters,
-    { language }
+    { language, trimStart: trimEdges.start, trimEnd: trimEdges.end }
   );
 
   return getCachedParticipantMetrics(cacheKey, PARTICIPANT_METRICS_CACHE_TTL_MS, async () => {
@@ -18101,7 +18107,7 @@ async function getParticipantRegisterHistory(cabecera, rawFilters, language = 'e
     });
 
     const categories = Array.from(periodsMap.keys());
-    return {
+    return trimEmptyPeriodEdges({
       series: [
         {
           name: language === 'en' ? 'New' : 'Nuevos',
@@ -18117,7 +18123,7 @@ async function getParticipantRegisterHistory(cabecera, rawFilters, language = 'e
         }
       ],
       categories: categories.map(category => formatPeriod(category, filters.interval, language))
-    };
+    }, trimEdges);
   });
 }
 
@@ -18603,6 +18609,47 @@ overrideRouteHandler('/metrics/participant/register_history', 'post', optimizedP
 overrideRouteHandler('/metrics/participant/location_new_recurring', 'post', optimizedParticipantLocationNewRecurringHandler);
 
 // Funciones auxiliares
+
+/**
+ * Recorta los períodos vacíos al inicio y/o al final de una serie temporal.
+ *
+ * Cuando el usuario no fija fechas, el rango se resuelve con los límites
+ * GLOBALES del sistema (primer/último registro de toda la base), así que una
+ * location que empezó a operar hace un año recibía tres años de barras en cero
+ * al principio y el eje X quedaba ilegible. Solo se recorta el extremo que el
+ * usuario NO fijó explícitamente: si eligió "desde", los ceros iniciales son
+ * información y se respetan. Siempre queda al menos un período.
+ */
+function trimEmptyPeriodEdges(result, { start = true, end = true } = {}) {
+  const categories = Array.isArray(result?.categories) ? result.categories : [];
+  const series = Array.isArray(result?.series) ? result.series : [];
+  if (categories.length <= 1 || (!start && !end)) {
+    return result;
+  }
+
+  const hasData = (index) => series.some(serie => Number(serie?.data?.[index] || 0) !== 0);
+  let first = 0;
+  let last = categories.length - 1;
+  if (start) {
+    while (first < last && !hasData(first)) first += 1;
+  }
+  if (end) {
+    while (last > first && !hasData(last)) last -= 1;
+  }
+  if (first === 0 && last === categories.length - 1) {
+    return result;
+  }
+
+  return {
+    ...result,
+    categories: categories.slice(first, last + 1),
+    series: series.map(serie => ({
+      ...serie,
+      data: Array.isArray(serie.data) ? serie.data.slice(first, last + 1) : serie.data
+    }))
+  };
+}
+
 function generatePeriods(startDate, endDate, interval) {
   const pad2 = (n) => String(n).padStart(2, '0');
   const parseYMD = (ymd) => {
@@ -20025,7 +20072,12 @@ async function optimizedProductTotalPoundsHandler(req, res) {
         (useProductQuantity ? [] : ticketWeight.params).concat(metricWhere.params)
       );
 
-      return buildProductMetricsSeries(rows, periods, filters.interval);
+      // Sin fechas explícitas el rango arranca en el primer ticket de TODO el
+      // sistema; los períodos vacíos de los extremos no fijados se recortan.
+      return trimEmptyPeriodEdges(buildProductMetricsSeries(rows, periods, filters.interval), {
+        start: !rawFilters.from_date,
+        end: !rawFilters.to_date
+      });
     });
 
     return res.json(response);
@@ -20071,7 +20123,12 @@ async function optimizedProductNumberOfTripsHandler(req, res) {
         metricWhere.params
       );
 
-      return buildProductMetricsSeries(rows, periods, filters.interval);
+      // Sin fechas explícitas el rango arranca en el primer ticket de TODO el
+      // sistema; los períodos vacíos de los extremos no fijados se recortan.
+      return trimEmptyPeriodEdges(buildProductMetricsSeries(rows, periods, filters.interval), {
+        start: !rawFilters.from_date,
+        end: !rawFilters.to_date
+      });
     });
 
     return res.json(response);
