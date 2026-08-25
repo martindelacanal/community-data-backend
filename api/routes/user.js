@@ -45,6 +45,10 @@ const {
   getSameDayApprovedDeliveries
 } = require('../services/sameDayDelivery');
 const {
+  normalizePositiveInteger: normalizeDeliveryIdentifier,
+  resolveDeliveryClientContext
+} = require('../services/deliveryClientContext');
+const {
   isCurrentDailyBeneficiaryQr,
   parseDailyBeneficiaryQr
 } = require('../utils/dailyBeneficiaryQr');
@@ -3894,6 +3898,15 @@ router.post('/upload/beneficiaryPIN/:locationId/:clientId', verifyToken, async (
       return res.status(200).json({ error: 'pin_invalid' });
     }
 
+    const deliveryContext = await resolveDeliveryClientContext(mysqlConnection, {
+      locationId: delivery_location_id,
+      requestedClientId: req.params.clientId,
+      authenticatedClientId: cabecera.client_id
+    });
+    if (deliveryContext.error) {
+      return res.status(400).json({ error: deliveryContext.error });
+    }
+
     await cleanupExpiredBeneficiaryPins();
 
     const [rows] = await mysqlConnection.promise().query(
@@ -3931,8 +3944,8 @@ router.post('/upload/beneficiaryPIN/:locationId/:clientId', verifyToken, async (
       deliveringUserId: cabecera.id,
       receivingUserId: ticket.id,
       approved: 'N',
-      locationId: delivery_location_id,
-      clientId: req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id
+      locationId: deliveryContext.locationId,
+      clientId: deliveryContext.clientId
     });
 
     if (result.status !== 200) {
@@ -3963,126 +3976,125 @@ async function processDeliveryTicket({ deliveringUserId, receivingUserId, approv
     return { status: 200, body: { error: 'receiving_user_null' } };
   }
 
+  locationId = normalizeDeliveryIdentifier(locationId);
+  clientId = normalizeDeliveryIdentifier(clientId);
+  if (!locationId) {
+    return { status: 400, body: { error: 'location_required' } };
+  }
+  if (!clientId) {
+    return { status: 400, body: { error: 'client_required' } };
+  }
+
+  const [beneficiaryRows] = await mysqlConnection.promise().query(
+    `select firstname, lastname
+       from user
+      where id = ?
+        and role_id = 5
+        and enabled = 'Y'
+        and deleted = 'N'`,
+    [receivingUserId]
+  );
+  if (beneficiaryRows.length === 0) {
+    return { status: 200, body: { error: 'receiving_user_null' } };
+  }
+
   // Aviso no bloqueante: preguntas del onboarding sin responder en esta location.
   let pending_questions = 0;
-  let beneficiary = null;
+  const beneficiary = approved !== 'Y' ? beneficiaryRows[0] : null;
   if (approved !== 'Y') {
-    const [beneficiaryRows] = await mysqlConnection.promise().query(
-      'select firstname, lastname from user where id = ?', [receivingUserId]
-    );
-    beneficiary = beneficiaryRows.length > 0 ? beneficiaryRows[0] : null;
     pending_questions = await countPendingOnboardQuestions(receivingUserId, locationId);
   }
 
-  // actualizar location_id y client_id del user beneficiary
-  // Verificar si el usuario se registró hoy y no tiene delivery aprobado
-  const [check_user_conditions] = await mysqlConnection.promise().query(
-    `SELECT
-        DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
-        (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
-      FROM user WHERE id = ?`,
-    [receivingUserId, receivingUserId]
-  );
+  const connection = await mysqlConnection.promise().getConnection();
+  try {
+    await connection.beginTransaction();
 
-  let update_query = 'update user set location_id = ?, client_id = ?';
-  let update_params = [locationId, clientId];
+    // Actualizar location/client del beneficiary y conservar la primera location
+    // para usuarios creados hoy que todavía no recibieron una entrega aprobada.
+    const [check_user_conditions] = await connection.query(
+      `SELECT
+          DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
+          (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
+        FROM user WHERE id = ?`,
+      [receivingUserId, receivingUserId]
+    );
 
-  // Si se registró hoy y no tiene delivery aprobado, también actualizar first_location_id
-  if (check_user_conditions.length > 0 &&
-    check_user_conditions[0].registered_today === 1 &&
-    check_user_conditions[0].has_approved_delivery === 0) {
-    update_query += ', first_location_id = ?';
-    update_params.push(locationId);
-  }
+    let update_query = 'update user set location_id = ?, client_id = ?';
+    const update_params = [locationId, clientId];
+    if (check_user_conditions.length > 0 &&
+      check_user_conditions[0].registered_today === 1 &&
+      check_user_conditions[0].has_approved_delivery === 0) {
+      update_query += ', first_location_id = ?';
+      update_params.push(locationId);
+    }
+    update_query += ' where id = ?';
+    update_params.push(receivingUserId);
+    await connection.query(update_query, update_params);
 
-  update_query += ' where id = ?';
-  update_params.push(receivingUserId);
+    // Quitar únicamente asociaciones temporales de hoy y marcar/crear de forma
+    // atómica la asociación correcta. El upsert evita colisiones por reintentos.
+    await connection.query(
+      `delete from client_user
+        where user_id = ?
+          and client_id <> ?
+          and date(creation_date) = curdate()
+          and checked = 'N'`,
+      [receivingUserId, clientId]
+    );
+    await connection.query(
+      `insert into client_user(user_id, client_id, checked)
+       values(?, ?, 'Y')
+       on duplicate key update checked = 'Y'`,
+      [receivingUserId, clientId]
+    );
 
-  await mysqlConnection.promise().query(update_query, update_params);
+    const rows = await getLatestSameDayDelivery(connection, {
+      locationId,
+      receivingUserId
+    });
+    let result;
 
-  // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
-  // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N',
-  // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
-  const [rows_client_user] = await mysqlConnection.promise().query(
-    'select * from client_user where user_id = ? and (client_id = ? or (client_id <> ? and date(creation_date) = curdate() and checked = "N"))',
-    [receivingUserId, clientId, clientId]
-  );
-  let insertarClientUser = true;
-  if (rows_client_user.length > 0) {
-    for (let i = 0; i < rows_client_user.length; i++) {
-      if (rows_client_user[i].client_id === clientId) {
-        insertarClientUser = false;
-        if (rows_client_user[i].checked === 'N') {
-          await mysqlConnection.promise().query(
-            'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receivingUserId, clientId]
-          );
-        }
+    if (rows.length > 0 && rows[0].delivering_user_id === null) {
+      const [updatedDelivery] = await connection.query(
+        'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?',
+        [clientId, deliveringUserId, locationId, rows[0].id]
+      );
+      result = updatedDelivery.affectedRows > 0
+        ? { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } }
+        : { status: 501, body: 'Could not update delivering_user_id' };
+    } else if (rows.length > 0 && rows[0].approved === 'N') {
+      if (approved === 'Y') {
+        const [approvedDelivery] = await connection.query(
+          'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
+        );
+        result = approvedDelivery.affectedRows > 0
+          ? { status: 200, body: 'Beneficiary approved successfully' }
+          : { status: 502, body: 'Could not approve beneficiary' };
       } else {
-        // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
-        if (rows_client_user[i].checked === 'N') {
-          await mysqlConnection.promise().query(
-            'delete from client_user where user_id = ? and client_id = ?', [receivingUserId, rows_client_user[i].client_id]
-          );
-        }
+        result = { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } };
       }
-    }
-    if (insertarClientUser) {
-      await mysqlConnection.promise().query(
-        'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receivingUserId, clientId, 'Y']
+    } else {
+      const [createdDelivery] = await connection.query(
+        'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
+        [clientId, deliveringUserId, receivingUserId, locationId]
       );
+      result = createdDelivery.affectedRows > 0
+        ? { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } }
+        : { status: 503, body: 'Could not create delivery_beneficiary' };
     }
-  } else {
-    await mysqlConnection.promise().query(
-      'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receivingUserId, clientId, 'Y']
-    );
-  }
 
-  // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
-  const rows = await getLatestSameDayDelivery(mysqlConnection, {
-    locationId,
-    receivingUserId
-  });
-
-  // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
-  if (rows.length > 0 && rows[0].delivering_user_id === null) {
-    const [rows2] = await mysqlConnection.promise().query(
-      'update delivery_beneficiary set client_id = ?, delivering_user_id = ?, location_id = ? where id = ?',
-      [clientId, deliveringUserId, locationId, rows[0].id]
-    );
-
-    if (rows2.affectedRows > 0) {
-      return { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } };
+    if (result.status !== 200) {
+      throw new Error(result.body);
     }
-    console.log('error qr 501: ' + new Date() + ' delivery_user_id: ' + deliveringUserId + ' receiving_user_id: ' + receivingUserId + ' location_id: ' + locationId + ' client_id: ' + clientId);
-    return { status: 501, body: 'Could not update delivering_user_id' };
-  }
 
-  // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
-  if (rows.length > 0 && rows[0].approved === 'N') {
-    if (approved === 'Y') {
-      const [rows2] = await mysqlConnection.promise().query(
-        'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
-      );
-      if (rows2.affectedRows > 0) {
-        return { status: 200, body: 'Beneficiary approved successfully' };
-      }
-      console.log('error qr 502: ' + new Date() + ' delivery_user_id: ' + deliveringUserId + ' receiving_user_id: ' + receivingUserId + ' location_id: ' + locationId + ' client_id: ' + clientId);
-      return { status: 502, body: 'Could not approve beneficiary' };
-    }
-    return { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } };
+    await connection.commit();
+    return result;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
   }
-
-  // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
-  const [rows3] = await mysqlConnection.promise().query(
-    'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id) values(?,?,?,?)',
-    [clientId, deliveringUserId, receivingUserId, locationId]
-  );
-
-  if (rows3.affectedRows > 0) {
-    return { status: 200, body: { could_approve: 'Y', pending_questions, beneficiary } };
-  }
-  console.log('error qr 503: ' + new Date() + ' delivery_user_id: ' + deliveringUserId + ' receiving_user_id: ' + receivingUserId + ' location_id: ' + locationId + ' client_id: ' + clientId);
-  return { status: 503, body: 'Could not create delivery_beneficiary' };
 }
 
 router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (req, res) => {
@@ -4095,14 +4107,23 @@ router.post('/upload/beneficiaryQR/:locationId/:clientId', verifyToken, async (r
         return res.status(200).json({ error: 'qr_expired' });
       }
       try {
+        const deliveryContext = await resolveDeliveryClientContext(mysqlConnection, {
+          locationId: req.params.locationId,
+          requestedClientId: req.params.clientId,
+          authenticatedClientId: cabecera.client_id
+        });
+        if (deliveryContext.error) {
+          return res.status(400).json({ error: deliveryContext.error });
+        }
+
         const result = await processDeliveryTicket({
           deliveringUserId: cabecera.id,
           receivingUserId: qr.id,
           // Only the authenticated second phase can request approval. The QR
           // identity parser itself always normalizes this field to N.
           approved: approvalRequested ? 'Y' : 'N',
-          locationId: req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null,
-          clientId: req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id
+          locationId: deliveryContext.locationId,
+          clientId: deliveryContext.clientId
         });
         res.status(result.status).json(result.body);
       } catch (error) {
@@ -4127,8 +4148,16 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
       // PHONE
       const receiving_user_phone = req.body.phone;
       const user_id_from_phone_list = req.body.user_id;
-      const location_id = req.params.locationId !== 'null' ? parseInt(req.params.locationId) : null;
-      const client_id = req.params.clientId !== 'null' ? parseInt(req.params.clientId) : cabecera.client_id;
+      const deliveryContext = await resolveDeliveryClientContext(mysqlConnection, {
+        locationId: req.params.locationId,
+        requestedClientId: req.params.clientId,
+        authenticatedClientId: cabecera.client_id
+      });
+      if (deliveryContext.error) {
+        return res.status(400).json({ error: deliveryContext.error });
+      }
+      const location_id = deliveryContext.locationId;
+      const client_id = deliveryContext.clientId;
       let receiving_user_id = null;
       if (user_id_from_phone_list === 0) {
         // Mismos filtros y orden que /phone/exists/search (la lista que vio el
@@ -4170,119 +4199,78 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
             });
           }
         }
-        // actualizar location_id y client_id del user beneficiary
-        // Verificar si el usuario se registró hoy y no tiene delivery aprobado
-        const [check_user_conditions] = await mysqlConnection.promise().query(
-          `SELECT 
-              DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
-              (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
-            FROM user WHERE id = ?`,
-          [receiving_user_id, receiving_user_id]
-        );
+        const connection = await mysqlConnection.promise().getConnection();
+        try {
+          await connection.beginTransaction();
 
-        let update_query = 'update user set location_id = ?, client_id = ?';
-        let update_params = [location_id, client_id];
+          const [check_user_conditions] = await connection.query(
+            `SELECT
+                DATE(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles')) as registered_today,
+                (SELECT COUNT(*) FROM delivery_beneficiary WHERE receiving_user_id = ? AND approved = 'Y') as has_approved_delivery
+              FROM user WHERE id = ?`,
+            [receiving_user_id, receiving_user_id]
+          );
 
-        // Si se registró hoy y no tiene delivery aprobado, también actualizar first_location_id
-        if (check_user_conditions.length > 0 &&
-          check_user_conditions[0].registered_today === 1 &&
-          check_user_conditions[0].has_approved_delivery === 0) {
-          update_query += ', first_location_id = ?';
-          update_params.push(location_id);
-        }
-
-        update_query += ' where id = ?';
-        update_params.push(receiving_user_id);
-
-        const [rows2_update_user] = await mysqlConnection.promise().query(update_query, update_params);
-        // el caso en el que una locacion tiene varios client_id, corregir al beneficiario:
-        // buscar en tabla client_user si existe un registro con user_id, client_id o con fecha de hoy con checked = 'N', 
-        // si el de hoy es el mismo client_id, actualizarlo, sino eliminarlo y crear uno nuevo
-        const [rows_client_user] = await mysqlConnection.promise().query(
-          'select * from client_user where user_id = ? and (client_id = ? or (client_id <> ? and date(creation_date) = curdate() and checked = "N"))',
-          [receiving_user_id, client_id, client_id]
-        );
-        let insertarClientUser = true;
-        if (rows_client_user.length > 0) {
-          // recorrer el array de rows_client_user y si el client_id es el mismo que el de hoy y tiene checked 'N', actualizarlo, sino eliminarlo y crear uno nuevo
-          for (let i = 0; i < rows_client_user.length; i++) {
-            if (rows_client_user[i].client_id === client_id) {
-              insertarClientUser = false;
-              if (rows_client_user[i].checked === 'N') {
-                // actualizar el campo checked de client_user por 'Y'
-                const [rows_checked] = await mysqlConnection.promise().query(
-                  'update client_user set checked = "Y" where user_id = ? and client_id = ?', [receiving_user_id, client_id]
-                );
-              }
-            } else {
-              // si el client_id tiene creation date de hoy y client_id diferente, eliminarlo
-              if (rows_client_user[i].checked === 'N') {
-                const [rows_delete] = await mysqlConnection.promise().query(
-                  'delete from client_user where user_id = ? and client_id = ?', [receiving_user_id, rows_client_user[i].client_id]
-                );
-              }
-            }
+          let update_query = 'update user set location_id = ?, client_id = ?';
+          const update_params = [location_id, client_id];
+          if (check_user_conditions.length > 0 &&
+            check_user_conditions[0].registered_today === 1 &&
+            check_user_conditions[0].has_approved_delivery === 0) {
+            update_query += ', first_location_id = ?';
+            update_params.push(location_id);
           }
-          if (insertarClientUser) {
-            // insertar en client_user
-            const [rows_insert] = await mysqlConnection.promise().query(
-              'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
+          update_query += ' where id = ?';
+          update_params.push(receiving_user_id);
+          await connection.query(update_query, update_params);
+
+          await connection.query(
+            `delete from client_user
+              where user_id = ?
+                and client_id <> ?
+                and date(creation_date) = curdate()
+                and checked = 'N'`,
+            [receiving_user_id, client_id]
+          );
+          await connection.query(
+            `insert into client_user(user_id, client_id, checked)
+             values(?, ?, 'Y')
+             on duplicate key update checked = 'Y'`,
+            [receiving_user_id, client_id]
+          );
+
+          const rows = await getLatestSameDayDelivery(connection, {
+            locationId: location_id,
+            receivingUserId: receiving_user_id
+          });
+          let deliveryResult;
+
+          if (rows.length > 0 && rows[0].delivering_user_id === null) {
+            [deliveryResult] = await connection.query(
+              'update delivery_beneficiary set approved = "Y", client_id = ?, delivering_user_id = ?, location_id = ? where id = ?',
+              [client_id, delivering_user_id, location_id, rows[0].id]
             );
-          }
-        } else {
-          // insertar en client_user
-          const [rows_insert] = await mysqlConnection.promise().query(
-            'insert into client_user(user_id, client_id, checked) values(?,?,?)', [receiving_user_id, client_id, 'Y']
-          );
-        }
-        // buscar en tabla delivery_beneficiary si existe un registro con location_id, receiving_user_id en el dia de hoy y filtrar el más reciente
-        const rows = await getLatestSameDayDelivery(mysqlConnection, {
-          locationId: location_id,
-          receivingUserId: receiving_user_id
-        });
-        // si no tiene delivering_user_id quiere decir que no se ha escaneado el QR pero si se ha generado el QR
-        if (rows.length > 0 && rows[0].delivering_user_id === null) {
-          // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
-
-          // actualizar el campo delivering_user_id con el id del delivery user y el campo location_id
-          const [rows2] = await mysqlConnection.promise().query(
-            'update delivery_beneficiary set approved = "Y", client_id = ?, delivering_user_id = ?, location_id = ? where id = ?', [client_id, delivering_user_id, location_id, rows[0].id]
-          );
-
-          if (rows2.affectedRows > 0) {
-            return res.json('Beneficiary approved successfully');
-          } else {
-            return res.status(500).json('Could not update delivering_user_id');
-          }
-        } else {
-          // ya existe el campo en delivery_beneficiary con delivering_user_id, verificar si el campo approved es 'N'
-          if (rows.length > 0 && rows[0].approved === 'N') {
-            // actualizar el campo approved a 'Y'
-            const [rows2] = await mysqlConnection.promise().query(
+          } else if (rows.length > 0 && rows[0].approved === 'N') {
+            [deliveryResult] = await connection.query(
               'update delivery_beneficiary set approved = "Y" where id = ?', [rows[0].id]
             );
-            if (rows2.affectedRows > 0) {
-              res.json('Beneficiary approved successfully');
-            } else {
-              res.status(500).json('Could not approve beneficiary');
-            }
-
           } else {
-            // TO-DO verificar si el beneficiary esta apto para recibir la entrega, sino enviar un 'N'
-
-            // si no existe en delivery_beneficiary o si ya pasó con un Y el approved, insertar una mas en tabla delivery_beneficiary para otro bolson
-            const [rows3] = await mysqlConnection.promise().query(
+            [deliveryResult] = await connection.query(
               'insert into delivery_beneficiary(client_id, delivering_user_id, receiving_user_id, location_id, approved) values(?,?,?,?,?)',
               [client_id, delivering_user_id, receiving_user_id, location_id, 'Y']
             );
-
-            if (rows3.affectedRows > 0) {
-              return res.json('Beneficiary approved successfully');
-            } else {
-              return res.status(500).json('Could not create delivery_beneficiary');
-            }
-
           }
+
+          if (deliveryResult.affectedRows === 0) {
+            throw new Error('Could not approve beneficiary');
+          }
+
+          await connection.commit();
+          return res.json('Beneficiary approved successfully');
+        } catch (error) {
+          await connection.rollback();
+          throw error;
+        } finally {
+          connection.release();
         }
       } else {
         res.status(400).json({ error: 'receiving_user_null' });
@@ -4908,25 +4896,51 @@ router.post('/onBoard', verifyToken, async (req, res) => {
       const user_id = cabecera.id;
       const { value } = req.body;
       const user_status_id = value ? 3 : 4;
-      const location_id = value ? req.body.location_id : null;
-      const client_id = value ? req.body.client_id : null;
-      const [rows] = await mysqlConnection.promise().query(
-        'update user set user_status_id = ?, location_id = ?, client_id = ? where id = ?',
-        [user_status_id, location_id, client_id, user_id]
-      );
-      if (user_status_id == 3) {
-        // insertar en tabla delivery_log la operation
-        const [rows2] = await mysqlConnection.promise().query(
-          'insert into delivery_log(user_id, operation_id, location_id, client_id) values(?,?,?,?)',
-          [user_id, user_status_id, location_id, client_id]
-        );
-      } else {
-        // modificar el campo offboarding_date en el ultimo elemento de la tabla delivery_log que tenga operation_id 3 y user_id ordenando por fecha descendente
-        const [rows2] = await mysqlConnection.promise().query(
-          'update delivery_log set offboarding_date = now() where user_id = ? and operation_id = 3 order by creation_date desc limit 1',
-          [user_id]
-        );
+      let location_id = null;
+      let client_id = null;
+      if (value) {
+        const deliveryContext = await resolveDeliveryClientContext(mysqlConnection, {
+          locationId: req.body.location_id,
+          requestedClientId: req.body.client_id,
+          authenticatedClientId: cabecera.client_id
+        });
+        if (deliveryContext.error) {
+          return res.status(400).json({ error: deliveryContext.error });
+        }
+        location_id = deliveryContext.locationId;
+        client_id = deliveryContext.clientId;
       }
+      const connection = await mysqlConnection.promise().getConnection();
+      let rows;
+      try {
+        await connection.beginTransaction();
+        [rows] = await connection.query(
+          'update user set user_status_id = ?, location_id = ?, client_id = ? where id = ?',
+          [user_status_id, location_id, client_id, user_id]
+        );
+        if (rows.affectedRows === 0) {
+          throw new Error('Could not update delivery status');
+        }
+
+        if (user_status_id === 3) {
+          await connection.query(
+            'insert into delivery_log(user_id, operation_id, location_id, client_id) values(?,?,?,?)',
+            [user_id, user_status_id, location_id, client_id]
+          );
+        } else {
+          await connection.query(
+            'update delivery_log set offboarding_date = now() where user_id = ? and operation_id = 3 order by creation_date desc limit 1',
+            [user_id]
+          );
+        }
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+
       if (rows.affectedRows > 0) {
         // update token
         let object_token = {

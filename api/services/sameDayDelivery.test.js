@@ -106,3 +106,20 @@ test('loads the latest delivery from the current California day using an indexab
   ]);
   assert.deepEqual(rows, [expectedRow]);
 });
+
+test('accepts a promise connection so delivery mutations can share a transaction', async () => {
+  let queried = false;
+  const transactionConnection = {
+    query: async () => {
+      queried = true;
+      return [[]];
+    }
+  };
+
+  await getLatestSameDayDelivery(transactionConnection, {
+    receivingUserId: 42,
+    locationId: 17
+  });
+
+  assert.equal(queried, true);
+});

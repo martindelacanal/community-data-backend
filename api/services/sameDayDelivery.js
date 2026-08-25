@@ -60,12 +60,19 @@ function getSameDayTimeZoneParams() {
   ];
 }
 
+function getQueryExecutor(database) {
+  if (database && typeof database.promise === 'function') {
+    return database.promise();
+  }
+  return database;
+}
+
 async function getSameDayApprovedDeliveries(mysqlConnection, receivingUserId) {
   if (!Number.isInteger(Number(receivingUserId)) || Number(receivingUserId) <= 0) {
     return [];
   }
 
-  const [rows] = await mysqlConnection.promise().query(
+  const [rows] = await getQueryExecutor(mysqlConnection).query(
     SAME_DAY_APPROVED_DELIVERIES_QUERY,
     [Number(receivingUserId), ...getSameDayTimeZoneParams()]
   );
@@ -89,7 +96,7 @@ async function getLatestSameDayDelivery(mysqlConnection, { receivingUserId, loca
     return [];
   }
 
-  const [rows] = await mysqlConnection.promise().query(
+  const [rows] = await getQueryExecutor(mysqlConnection).query(
     LATEST_SAME_DAY_DELIVERY_QUERY,
     [normalizedLocationId, normalizedReceivingUserId, ...getSameDayTimeZoneParams()]
   );
