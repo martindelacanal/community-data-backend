@@ -34,7 +34,9 @@ const {
   HEALTH_QR_SLIDING_DEBOUNCE_MS,
   SlidingHealthQrDebounce,
   buildHealthScanDebounceKey,
-  findRecentHealthScan
+  findRecentHealthScan,
+  findTodayHealthCheckins,
+  resolveDailyScanDecision
 } = require('../utils/healthScanGuard');
 const {
   answersUseOnlyAllowedQuestions,
@@ -185,6 +187,22 @@ async function attachImageUrls(images) {
     url_small: await signImageUrl(img.s3_key_small),
     url_medium: await signImageUrl(img.s3_key_medium)
   })));
+}
+
+/** 'HH:mm' of a stored scan timestamp in the event timezone (what the volunteer sees on the wall clock). */
+function clockInTimezone(value, timeZone) {
+  if (value == null) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timeZone || 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(date);
+    const get = (type) => (parts.find(p => p.type === type) || {}).value || '00';
+    return `${get('hour') === '24' ? '00' : get('hour')}:${get('minute')}`;
+  } catch (error) {
+    return date.toISOString().slice(11, 16);
+  }
 }
 
 /** Current wall-clock in the event timezone as 'YYYY-MM-DD HH:mm:ss' (lexicographically comparable). */
@@ -1677,6 +1695,16 @@ function stripPhoneSql(column) {
   return `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(${column}, '-', ''), ' ', ''), '(', ''), ')', ''), '+', ''), '.', '')`;
 }
 
+/** Name shown to a volunteer in "already scanned by ..." messages (null when unknown). */
+async function volunteerDisplayName(userId) {
+  if (!Number.isInteger(userId) || userId <= 0) return null;
+  const [rows] = await mysqlConnection.promise().query(
+    'SELECT firstname, lastname, username FROM user WHERE id = ? LIMIT 1', [userId]);
+  if (!rows.length) return null;
+  const name = [rows[0].firstname, rows[0].lastname].filter(Boolean).join(' ').trim();
+  return name || rows[0].username || null;
+}
+
 router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, res) => {
   let connection;
   try {
@@ -1817,39 +1845,71 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
     let scanId = null;
     let scanType = null;
     let duplicate = false;
+    // Set when today's rule refuses the scan (nothing is inserted).
+    let duplicateReason = null;
+    let previousScan = null;
     if (recentScan) {
       duplicate = true;
+      duplicateReason = 'recent';
       scanId = recentScan.scanId;
       scanType = recentScan.scanType;
     } else {
       // Determine scan type only after both duplicate guards have passed.
-      scanType = 'checkin';
-      let pairedScanId = null;
-      if (stand.has_checkout === 'Y') {
-        // "Mismo día" en la zona horaria DEL EVENTO, no del servidor: con el
-        // server en UTC, un check-in antes de las 5pm PT y su check-out después
-        // caían en días UTC distintos y el segundo escaneo quedaba como otro
-        // check-in. COALESCE mantiene el comportamiento viejo si la base no
-        // tiene cargadas las tablas de timezones (CONVERT_TZ => NULL en dev).
-        const [openCheckins] = await connection.query(
-          `SELECT s.id FROM health_event_scan s
-           WHERE s.stand_id = ? AND s.scanned_user_id = ? AND s.scan_type = 'checkin'
-             AND DATE(COALESCE(CONVERT_TZ(s.scanned_at, @@session.time_zone, ?), s.scanned_at))
-               = DATE(COALESCE(CONVERT_TZ(NOW(), @@session.time_zone, ?), NOW()))
-             AND NOT EXISTS (SELECT 1 FROM health_event_scan c WHERE c.paired_scan_id = s.id)
-           ORDER BY s.scanned_at DESC LIMIT 1 FOR UPDATE`,
-          [standId, scannedUserId, stand.event_timezone, stand.event_timezone]);
-        if (openCheckins.length) {
-          scanType = 'checkout';
-          pairedScanId = openCheckins[0].id;
-        }
+      // "Mismo día" en la zona horaria DEL EVENTO, no del servidor: con el
+      // server en UTC, un check-in antes de las 5pm PT y su check-out después
+      // caían en días UTC distintos y el segundo escaneo quedaba como otro
+      // check-in (findTodayHealthCheckins resuelve el día con CONVERT_TZ).
+      const todayCheckins = await findTodayHealthCheckins(connection, {
+        standId,
+        userId: scannedUserId,
+        timezone: stand.event_timezone
+      });
+      // Una persona, una visita por puesto y por día. Clientes nuevos mandan
+      // allow_repeat=false en el primer intento (segunda visita real en un
+      // puesto con check-out => confirmación explícita); los viejos no mandan
+      // el campo y conservan el flujo directo.
+      const decision = resolveDailyScanDecision({
+        hasCheckout: stand.has_checkout === 'Y',
+        serviceId: Number.isInteger(serviceId) ? serviceId : null,
+        todayCheckins,
+        allowRepeat: req.body.allow_repeat === false ? false : null
+      });
+      if (decision.kind === 'confirm_repeat') {
+        await connection.rollback();
+        return res.status(200).json({
+          requires_repeat_confirmation: true,
+          person,
+          previous_visit: {
+            scan_id: decision.previous.id,
+            checkin_at: decision.previous.scannedAt,
+            checkin_at_local: clockInTimezone(decision.previous.scannedAt, stand.event_timezone),
+            checkout_at: decision.previous.checkoutAt,
+            checkout_at_local: clockInTimezone(decision.previous.checkoutAt, stand.event_timezone),
+            volunteer_name: await volunteerDisplayName(decision.previous.volunteerUserId)
+          }
+        });
+      }
+
+      scanType = decision.kind === 'checkout' ? 'checkout' : 'checkin';
+      const pairedScanId = decision.kind === 'checkout' ? decision.pairedScanId : null;
+      if (decision.kind === 'already_served') {
+        // Refused: report the scan that already counts for today instead.
+        duplicate = true;
+        duplicateReason = 'already_served_today';
+        scanId = decision.previous.id;
+        previousScan = {
+          scan_id: decision.previous.id,
+          scanned_at: decision.previous.scannedAt,
+          scanned_at_local: clockInTimezone(decision.previous.scannedAt, stand.event_timezone),
+          volunteer_user_id: decision.previous.volunteerUserId
+        };
       }
 
       // Confirmación en dos fases: si la persona (ya registrada) todavía debe
       // preguntas requeridas del evento, avisar al voluntario ANTES de registrar
       // el check-in y dejar que decida (clientes nuevos mandan confirmed=false en
       // el primer intento; los viejos no mandan el campo y conservan el flujo directo).
-      if (scanType === 'checkin' && preExistingRegistration && req.body.confirmed === false) {
+      if (!duplicate && scanType === 'checkin' && preExistingRegistration && req.body.confirmed === false) {
         const pendingRequired = await countPendingRequiredQuestions(eventId, registration.id);
         if (pendingRequired > 0) {
           await connection.rollback();
@@ -1861,18 +1921,25 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
         }
       }
 
-      const [scanInsert] = await connection.query(
-        'INSERT INTO health_event_scan(health_event_id, stand_id, service_id, registration_id, scanned_user_id, volunteer_user_id, scan_type, paired_scan_id) \
-         VALUES (?,?,?,?,?,?,?,?)',
-        [eventId, standId, Number.isInteger(serviceId) ? serviceId : null, registration.id,
-          scannedUserId, req.currentUser.id, scanType, pairedScanId]);
-      scanId = scanInsert.insertId;
+      if (!duplicate) {
+        const [scanInsert] = await connection.query(
+          'INSERT INTO health_event_scan(health_event_id, stand_id, service_id, registration_id, scanned_user_id, volunteer_user_id, scan_type, paired_scan_id) \
+           VALUES (?,?,?,?,?,?,?,?)',
+          [eventId, standId, Number.isInteger(serviceId) ? serviceId : null, registration.id,
+            scannedUserId, req.currentUser.id, scanType, pairedScanId]);
+        scanId = scanInsert.insertId;
+      }
     }
     await connection.commit();
 
     // Remember every successful state transition (including manual overrides),
-    // but consult this process-local layer only for QR requests.
-    healthQrSlidingDebounce.remember(debounceKey, scanId, scanType);
+    // but consult this process-local layer only for QR requests. A refusal by
+    // today's rule inserted nothing: do not remember it, so the next frame
+    // re-evaluates the rule and keeps answering already_served_today (with
+    // previous_scan) instead of replaying it as a plain 'recent' duplicate.
+    if (duplicateReason !== 'already_served_today') {
+      healthQrSlidingDebounce.remember(debounceKey, scanId, scanType);
+    }
 
     // Context payload (outside the transaction).
     const [dates] = await mysqlConnection.promise().query(
@@ -1891,10 +1958,17 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       checkoutForm = forms.length ? forms[0] : null;
     }
 
+    if (previousScan) {
+      previousScan.volunteer_name = await volunteerDisplayName(previousScan.volunteer_user_id);
+      delete previousScan.volunteer_user_id;
+    }
+
     res.status(200).json({
       scan_id: scanId,
       scan_type: scanType,
       duplicate,
+      duplicate_reason: duplicate ? duplicateReason : null,
+      previous_scan: previousScan,
       person,
       registration: {
         id: registration.id,

@@ -15,6 +15,13 @@ const SLIDING_REFRESH_DELAY_MS = 6_000;
 const SLIDING_EXPIRY_DELAY_MS = 10_500;
 const CONCURRENT_REQUESTS = 12;
 
+// The app's connection module is a process-wide cached pool: ending it inside
+// one test would break every test that runs after it in the same file.
+let sharedPool = null;
+test.after(async () => {
+  if (sharedPool) await sharedPool.promise().end();
+});
+
 function normalizeEnvValue(value) {
   return String(value == null ? '' : value)
     .trim()
@@ -279,6 +286,7 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
     assertDevelopmentDatabaseTarget();
 
     pool = require('../connection/connection');
+    sharedPool = pool;
     const app = require('../../app');
     const { formatDailyQrDate } = require('../utils/dailyBeneficiaryQr');
 
@@ -433,8 +441,206 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
     } catch (error) {
       cleanupErrors.push(error);
     }
+  }
+
+  const errors = testError ? [testError, ...cleanupErrors] : cleanupErrors;
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'Health scan integration test and/or cleanup failed.');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// One visit per stand per day (temporary event with its own stands)
+// ---------------------------------------------------------------------------
+
+const DB_WINDOW_EXPIRY_DELAY_MS = 10_500;
+
+async function createDailyRuleEvent(pool) {
+  const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+  const connection = await pool.promise().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [locationRows] = await connection.query('SELECT id FROM location ORDER BY id ASC LIMIT 1');
+    assert.equal(locationRows.length, 1, 'Development database needs at least one location.');
+    const timezone = 'America/Los_Angeles';
+    const today = moment().tz(timezone).format('YYYY-MM-DD');
+    const [eventInsert] = await connection.query(
+      `INSERT INTO health_event (slug, name_en, name_es, location_id, start_date, end_date, timezone, enabled, landing_enabled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'Y', 'N')`,
+      [`__daily_rule_${suffix}`, 'Daily rule test', 'Prueba regla diaria', locationRows[0].id, today, today, timezone]
+    );
+    const eventId = Number(eventInsert.insertId);
+    const [haircuts] = await connection.query(
+      `INSERT INTO health_event_stand (health_event_id, name_en, name_es, is_entry, has_checkout, sort_order, enabled)
+       VALUES (?, 'Haircuts', 'Cortes de pelo', 'N', 'N', 1, 'Y')`, [eventId]);
+    const [dental] = await connection.query(
+      `INSERT INTO health_event_stand (health_event_id, name_en, name_es, is_entry, has_checkout, sort_order, enabled)
+       VALUES (?, 'Dental', 'Dental', 'N', 'Y', 2, 'Y')`, [eventId]);
+    await connection.commit();
+    return {
+      event_id: eventId,
+      event_timezone: timezone,
+      event_end_date: today,
+      haircuts_stand_id: Number(haircuts.insertId),
+      dental_stand_id: Number(dental.insertId)
+    };
+  } catch (error) {
+    try { await connection.rollback(); } catch (rollbackError) { /* preserve original error */ }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function cleanupDailyRuleEvent(pool, event) {
+  if (!event) return;
+  // Scans/stands/registrations cascade from the event row; the fixture user is
+  // removed by cleanupFixture, which also asserts nothing was left behind.
+  await pool.promise().query('DELETE FROM health_event_scan WHERE health_event_id = ?', [event.event_id]);
+  await pool.promise().query('DELETE FROM health_event WHERE id = ?', [event.event_id]);
+  const [rows] = await pool.promise().query(
+    'SELECT COUNT(*) AS total FROM health_event_stand WHERE health_event_id = ?', [event.event_id]);
+  assert.equal(Number(rows[0].total), 0, 'Temporary event stands were not removed.');
+}
+
+test('health scan endpoint enforces one visit per stand per day', {
+  skip: RUN_INTEGRATION
+    ? false
+    : 'Set RUN_HEALTH_SCAN_INTEGRATION=development to run against the development database.',
+  timeout: 120_000
+}, async () => {
+  let pool = null;
+  let server = null;
+  let event = null;
+  let fixture = null;
+  let testError = null;
+  const cleanupErrors = [];
+
+  try {
+    require('dotenv').config({ path: ENV_PATH });
+    assertDevelopmentDatabaseTarget();
+
+    pool = require('../connection/connection');
+    sharedPool = pool;
+    const app = require('../../app');
+
+    const [volunteerRows] = await pool.promise().query(
+      `SELECT u.id, r.name AS role
+         FROM user u
+         INNER JOIN role r ON r.id = u.role_id
+        WHERE r.name IN ('eventvolunteer', 'opsmanager', 'admin')
+          AND u.enabled = 'Y' AND u.deleted = 'N'
+        ORDER BY FIELD(r.name, 'eventvolunteer', 'opsmanager', 'admin'), u.id ASC
+        LIMIT 1`
+    );
+    assert.equal(volunteerRows.length, 1, 'Development database needs an active volunteer or admin user.');
+
+    event = await createDailyRuleEvent(pool);
+    fixture = await createFixture(pool, { event_id: event.event_id });
+    const token = jwt.sign({
+      data: JSON.stringify({ id: Number(volunteerRows[0].id), role: volunteerRows[0].role })
+    }, process.env.JWT_SECRET, { expiresIn: '10m' });
+
+    server = await listenOnEphemeralPort(app);
+    const address = server.address();
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    // Phone identity skips the process-local QR debounce; the 10 s DB window still applies.
+    const basePayload = { event_id: event.event_id, phone: fixture.phone, user_id: fixture.userId, confirmed: true, allow_repeat: false };
+    const haircuts = { ...basePayload, stand_id: event.haircuts_stand_id };
+    const dental = { ...basePayload, stand_id: event.dental_stand_id };
+
+    // ---- stand without check-out: the second scan of the day is refused ----
+    const first = await postScan(baseUrl, token, haircuts);
+    assert.equal(first.scan_type, 'checkin');
+    assert.equal(first.duplicate, false);
+    assert.equal(first.duplicate_reason, null);
+    const firstId = Number(first.scan_id);
+
+    await delay(DB_WINDOW_EXPIRY_DELAY_MS);
+    const refused = await postScan(baseUrl, token, haircuts);
+    assert.equal(refused.duplicate, true);
+    assert.equal(refused.duplicate_reason, 'already_served_today');
+    assert.equal(refused.scan_type, 'checkin');
+    assert.equal(Number(refused.scan_id), firstId);
+    assert.ok(refused.previous_scan, 'The refused scan reports the one that already counts.');
+    assert.equal(Number(refused.previous_scan.scan_id), firstId);
+    assert.match(String(refused.previous_scan.scanned_at_local), /^\d{2}:\d{2}$/);
+    assert.equal(refused.person.firstname, 'Health Scan');
+    assert.deepEqual(
+      await loadFixtureScans(pool, fixture, event.event_id, event.haircuts_stand_id),
+      [{ id: firstId, scan_type: 'checkin', paired_scan_id: null }],
+      'A stand without check-out must keep a single check-in per person per day.'
+    );
+
+    // A QR frame right after the refusal must not replay it as a plain 'recent'
+    // duplicate: the refusal is not remembered in the process-local debounce.
+    const { formatDailyQrDate } = require('../utils/dailyBeneficiaryQr');
+    const qrHaircuts = {
+      event_id: event.event_id, stand_id: event.haircuts_stand_id, confirmed: true, allow_repeat: false,
+      qr: `B${fixture.userId}.${formatDailyQrDate(new Date(), event.event_timezone)}`
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const qrRefused = await postScan(baseUrl, token, qrHaircuts);
+      assert.equal(qrRefused.duplicate_reason, 'already_served_today');
+      assert.equal(Number(qrRefused.previous_scan.scan_id), firstId);
+    }
+    assert.equal((await loadFixtureScans(pool, fixture, event.event_id, event.haircuts_stand_id)).length, 1);
+
+    // Old clients (no allow_repeat flag) are refused too: the rule is not optional.
+    const { allow_repeat, ...legacyHaircuts } = haircuts;
+    const legacyRefused = await postScan(baseUrl, token, legacyHaircuts);
+    assert.equal(legacyRefused.duplicate_reason, 'already_served_today');
+    assert.equal((await loadFixtureScans(pool, fixture, event.event_id, event.haircuts_stand_id)).length, 1);
+
+    // ---- stand with check-out: check-in, check-out, then explicit confirmation ----
+    const dentalIn = await postScan(baseUrl, token, dental);
+    assert.equal(dentalIn.scan_type, 'checkin');
+    assert.equal(dentalIn.duplicate, false);
+    const dentalInId = Number(dentalIn.scan_id);
+
+    await delay(DB_WINDOW_EXPIRY_DELAY_MS);
+    const dentalOut = await postScan(baseUrl, token, dental);
+    assert.equal(dentalOut.scan_type, 'checkout');
+    assert.equal(dentalOut.duplicate, false);
+    const dentalOutId = Number(dentalOut.scan_id);
+
+    await delay(DB_WINDOW_EXPIRY_DELAY_MS);
+    const asked = await postScan(baseUrl, token, dental);
+    assert.equal(asked.requires_repeat_confirmation, true);
+    assert.equal(asked.scan_id, undefined, 'Nothing is recorded until the volunteer confirms.');
+    assert.equal(Number(asked.previous_visit.scan_id), dentalInId);
+    assert.match(String(asked.previous_visit.checkin_at_local), /^\d{2}:\d{2}$/);
+    assert.match(String(asked.previous_visit.checkout_at_local), /^\d{2}:\d{2}$/);
+    assert.deepEqual(
+      await loadFixtureScans(pool, fixture, event.event_id, event.dental_stand_id),
+      [
+        { id: dentalInId, scan_type: 'checkin', paired_scan_id: null },
+        { id: dentalOutId, scan_type: 'checkout', paired_scan_id: dentalInId }
+      ]
+    );
+
+    const confirmed = await postScan(baseUrl, token, { ...dental, allow_repeat: true });
+    assert.equal(confirmed.scan_type, 'checkin');
+    assert.equal(confirmed.duplicate, false);
+    assert.ok(Number(confirmed.scan_id) > dentalOutId);
+    assert.equal((await loadFixtureScans(pool, fixture, event.event_id, event.dental_stand_id)).length, 3);
+  } catch (error) {
+    testError = error;
+  } finally {
     try {
-      if (pool) await pool.promise().end();
+      await closeServer(server);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (pool) await cleanupDailyRuleEvent(pool, event);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (pool) await cleanupFixture(pool, fixture);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -443,6 +649,6 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
   const errors = testError ? [testError, ...cleanupErrors] : cleanupErrors;
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) {
-    throw new AggregateError(errors, 'Health scan integration test and/or cleanup failed.');
+    throw new AggregateError(errors, 'Daily-rule integration test and/or cleanup failed.');
   }
 });
