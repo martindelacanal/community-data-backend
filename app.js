@@ -20,6 +20,12 @@ require('dotenv').config({path: './.env'}); // variables de entorno
 
 // ROUTES
 
+const { createRestoreCredentialsRouter } = require('./api/routes/restoreCredentials');
+app.use('/api/auth/restore', createRestoreCredentialsRouter({
+  pool: require('./api/connection/connection').promise(),
+  logger: require('./api/utils/logger'),
+}));
+
 const userRoute = require('./api/routes/user');
 app.use('/api',userRoute);
 

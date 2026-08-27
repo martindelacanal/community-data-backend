@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const mysqlConnection = require('../connection/connection');
+const { setUserEnabledWithRestoreRevocation } = require('../services/restoreCredentialsRepository');
+const { buildRestoreAuthBinding } = require('../utils/restoreAuthBinding');
 const jwt = require('jsonwebtoken');
 const bcryptjs = require('bcryptjs');
 const axios = require('axios');
@@ -272,7 +274,9 @@ router.post('/signin', (req, res) => {
                                   user.reset_password as reset_password, \
                                   role.name AS role, \
                                   user.language as language, \
-                                  user.enabled as enabled\
+                                  user.enabled as enabled,\
+                                  user.deleted AS restore_deleted,\
+                                  user.creation_date AS restore_creation_date\
                                   FROM user \
                                   INNER JOIN role ON role.id = user.role_id \
                                   WHERE user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL) \
@@ -288,6 +292,13 @@ router.post('/signin', (req, res) => {
               const reset_password = row.reset_password;
               let creation_date_aux = row.creation_date;
               let last_name_aux = row.lastname;
+              const restore_auth_binding = process.env.JWT_SECRET
+                ? buildRestoreAuthBinding({
+                  ...row, deleted: row.restore_deleted, creation_date: row.restore_creation_date,
+                }, process.env.JWT_SECRET)
+                : undefined;
+              delete row.restore_deleted;
+              delete row.restore_creation_date;
               delete row.reset_password;
               delete row.password;
               delete row.zipcode;
@@ -295,7 +306,7 @@ router.post('/signin', (req, res) => {
               delete row.creation_date;
               let data = JSON.stringify(row);
               try {
-                const token = await jwtSignAsync({ data }, process.env.JWT_SECRET, { expiresIn: '6h' });
+                const token = await jwtSignAsync({ data, restore_auth_binding }, process.env.JWT_SECRET, { expiresIn: '6h' });
                 validUsers.push({
                   id: row.id,
                   firstname: row.firstname,
@@ -333,7 +344,7 @@ router.get('/refresh-token', verifyToken, (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager' || cabecera.role === 'eventvolunteer') {
-    jwt.sign({ data: req.data.data }, process.env.JWT_SECRET, { expiresIn: '6h' }, (err, token) => {
+    jwt.sign({ data: req.data.data, restore_auth_binding: req.data.restore_auth_binding }, process.env.JWT_SECRET, { expiresIn: '6h' }, (err, token) => {
       res.status(200).json({ token: token });
     });
   } else {
@@ -24323,10 +24334,11 @@ router.put('/enable-disable/:id', verifyToken, async (req, res) => {
 
     if (id && table && enabled) {
       try {
-        const [rows] = await mysqlConnection.promise().query(
-          `update ${table} set enabled = ? where id = ?`,
-          [enabled, id]
-        );
+        const rows = typeof table === 'string' && table.toLowerCase() === 'user' && enabled !== 'Y'
+          ? await setUserEnabledWithRestoreRevocation(mysqlConnection.promise(), id, enabled)
+          : (await mysqlConnection.promise().query(
+            `update ${table} set enabled = ? where id = ?`, [enabled, id]
+          ))[0];
         if (rows.affectedRows > 0) {
           res.json('Registro actualizado correctamente');
         } else {
