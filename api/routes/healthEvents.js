@@ -45,6 +45,14 @@ const {
   shouldIncludeBeneficiaryEvent
 } = require('../utils/postEventSurvey');
 const healthEventAnalytics = require('../services/healthEventAnalytics');
+const {
+  PROFILE_MAPS_TO,
+  isCatalogProfileMap,
+  catalogTableFor,
+  applyProfileAnswers
+} = require('../services/healthEventProfileSync');
+// Values accepted in health_event_question.maps_to: event logistics + participant profile fields.
+const MAPS_TO_VALUES = new Set(['attend_date', 'priority_service', ...PROFILE_MAPS_TO]);
 
 const router = express.Router();
 
@@ -351,6 +359,7 @@ async function fetchForms(eventId, audience, standId = null) {
       is_other: option.is_other,
       event_date: toSqlDateString(option.event_date),
       service_key: option.service_key,
+      profile_option_id: option.profile_option_id == null ? null : Number(option.profile_option_id),
       sort_order: option.sort_order
     });
   }
@@ -1089,6 +1098,8 @@ router.post('/health-events/:slug/register', async (req, res) => {
     }
 
     await upsertAnswers(connection, registrationId, answers, questionsById, 'web-register');
+    // Mapped demographic answers also complete the Bienestar profile (empty fields only).
+    await applyProfileAnswers(connection, userId, questionsById, answers);
     await syncRegistrationDates(connection, registrationId, answers, questionsById);
     await bookAppointments(connection, registrationId, appointments);
 
@@ -1228,6 +1239,8 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     const registrationId = regInsert.insertId;
 
     await upsertAnswers(connection, registrationId, answers, questionsById, 'web-register');
+    // Mapped demographic answers also complete the Bienestar profile (empty fields only).
+    await applyProfileAnswers(connection, userId, questionsById, answers);
     await connection.commit();
 
     // Registrant emails (best effort, after commit): credentials plus the same
@@ -1486,6 +1499,7 @@ router.post('/health-events/:eventId(\\d+)/answers', verifyToken, requireBenefic
       questionsById,
       'beneficiary-home'
     );
+    await applyProfileAnswers(connection, req.currentUser.id, questionsById, normalizedAnswers);
     if (!ended) {
       await syncRegistrationDates(connection, registration.id, normalizedAnswers, questionsById);
     }
@@ -2706,7 +2720,7 @@ router.put('/health-events/:id(\\d+)/forms/:audience', verifyToken, requireAdmin
           // A notice is never answerable — required='Y' would block registration.
           (questionType === 'notice' || question.required === 'N') ? 'N' : 'Y',
           question.allow_other === 'Y' ? 'Y' : 'N',
-          question.maps_to ? String(question.maps_to).slice(0, 40) : null,
+          MAPS_TO_VALUES.has(question.maps_to) ? question.maps_to : null,
           question.config_json != null ? JSON.stringify(question.config_json) : null,
           Number.parseInt(question.sort_order, 10) || 1,
           question.enabled === 'N' ? 'N' : 'Y'
@@ -2731,25 +2745,36 @@ router.put('/health-events/:id(\\d+)/forms/:audience', verifyToken, requireAdmin
         const [existingOptions] = await connection.query(
           'SELECT id FROM health_event_question_option WHERE question_id = ?', [questionId]);
         const keptOptionIds = new Set();
+        // Profile mappings: each option may point at an app catalogue row
+        // (gender/ethnicity/language). Only ids that exist in that catalogue
+        // are stored; anything else is saved as "not copied to the profile".
+        const mapsTo = MAPS_TO_VALUES.has(question.maps_to) ? question.maps_to : null;
+        let catalogIds = null;
+        if (isCatalogProfileMap(mapsTo)) {
+          const [catalogRows] = await connection.query(`SELECT id FROM ${catalogTableFor(mapsTo)} WHERE enabled = 'Y'`);
+          catalogIds = new Set(catalogRows.map(row => Number(row.id)));
+        }
         for (const option of options) {
           const tempOptionId = option.id;
           let optionId = Number.parseInt(option.id, 10);
+          const profileOptionId = Number.parseInt(option.profile_option_id, 10);
           const optionValues = [
             String(option.name_en || '').slice(0, 500), String(option.name_es || '').slice(0, 500),
             option.is_other === 'Y' ? 'Y' : 'N',
             option.event_date ? toSqlDateString(option.event_date) : null,
             option.service_key ? String(option.service_key).slice(0, 40) : null,
+            catalogIds && catalogIds.has(profileOptionId) ? profileOptionId : null,
             Number.parseInt(option.sort_order, 10) || 1,
             option.enabled === 'N' ? 'N' : 'Y'
           ];
           if (Number.isInteger(optionId) && optionId > 0 && existingOptions.some(o => o.id === optionId)) {
             await connection.query(
-              'UPDATE health_event_question_option SET name_en=?, name_es=?, is_other=?, event_date=?, service_key=?, sort_order=?, enabled=? WHERE id=?',
+              'UPDATE health_event_question_option SET name_en=?, name_es=?, is_other=?, event_date=?, service_key=?, profile_option_id=?, sort_order=?, enabled=? WHERE id=?',
               [...optionValues, optionId]);
           } else {
             const [inserted] = await connection.query(
-              'INSERT INTO health_event_question_option(question_id, name_en, name_es, is_other, event_date, service_key, sort_order, enabled) \
-               VALUES (?,?,?,?,?,?,?,?)', [questionId, ...optionValues]);
+              'INSERT INTO health_event_question_option(question_id, name_en, name_es, is_other, event_date, service_key, profile_option_id, sort_order, enabled) \
+               VALUES (?,?,?,?,?,?,?,?,?)', [questionId, ...optionValues]);
             optionId = inserted.insertId;
           }
           optionIdMap.set(tempOptionId, optionId);
