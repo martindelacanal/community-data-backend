@@ -24,6 +24,13 @@ const SAME_DAY_RANGE_CONDITION = `
  * database session time zone. Convert the LA day boundaries to that time zone
  * so this works both in UTC production and SYSTEM-time development, while the
  * indexed creation_date column remains unwrapped.
+ *
+ * Passing @@session.time_zone straight into CONVERT_TZ is safe even when it holds
+ * the literal 'SYSTEM': MySQL resolves it to the server's system zone. Verified on
+ * 8.0.45 (production, session UTC) and 8.0.35 (development, session SYSTEM at
+ * -03:00) — both return the correct LA day boundaries, never NULL. Do NOT "harden"
+ * this into a fixed numeric offset: that would snapshot the current offset and get
+ * the boundaries wrong on the session zone's DST transition day.
  */
 const SAME_DAY_APPROVED_DELIVERIES_QUERY = `
   SELECT

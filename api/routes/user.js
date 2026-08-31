@@ -43,6 +43,7 @@ const {
   getParticipantRegisterSummary: getSharedParticipantRegisterSummary
 } = require('../services/participantRegistrationMetrics');
 const {
+  FOOD_DELIVERY_TIME_ZONE,
   getLatestSameDayDelivery,
   getSameDayApprovedDeliveries
 } = require('../services/sameDayDelivery');
@@ -4044,13 +4045,19 @@ async function processDeliveryTicket({ deliveringUserId, receivingUserId, approv
 
     // Quitar únicamente asociaciones temporales de hoy y marcar/crear de forma
     // atómica la asociación correcta. El upsert evita colisiones por reintentos.
+    // "Hoy" es el día de California, no el del servidor: con curdate() (UTC) una
+    // asociación temporal creada por la mañana ya no se limpiaba si el escaneo
+    // ocurría después de las 5 PM del Pacífico. creation_date se escribe en la zona
+    // de la sesión, así que se convierte desde @@session.time_zone (mismo criterio
+    // que services/sameDayDelivery.js).
     await connection.query(
       `delete from client_user
         where user_id = ?
           and client_id <> ?
-          and date(creation_date) = curdate()
+          and date(CONVERT_TZ(creation_date, @@session.time_zone, ?))
+              = date(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', ?))
           and checked = 'N'`,
-      [receivingUserId, clientId]
+      [receivingUserId, clientId, FOOD_DELIVERY_TIME_ZONE, FOOD_DELIVERY_TIME_ZONE]
     );
     await connection.query(
       `insert into client_user(user_id, client_id, checked)
