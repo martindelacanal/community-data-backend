@@ -2097,6 +2097,16 @@ router.post('/health-events/scan/:scanId(\\d+)/answers', verifyToken, requireVol
 router.get('/health-events/stand/:standId(\\d+)/attending', verifyToken, requireVolunteer, async (req, res) => {
   try {
     const standId = Number(req.params.standId);
+    // El día se resuelve en la zona horaria del EVENTO, igual que el guard de escaneos
+    // (findTodayHealthCheckins). Con DATE(s.scanned_at) = CURDATE() (servidor en UTC) la
+    // lista se vaciaba a las 5 PM de California con gente todavía dentro del puesto, y a
+    // la mañana siguiente arrastraba a los asistentes de la noche anterior.
+    const [standRows] = await mysqlConnection.promise().query(
+      `SELECT he.timezone AS event_timezone
+       FROM health_event_stand s
+       INNER JOIN health_event he ON he.id = s.health_event_id
+       WHERE s.id = ? LIMIT 1`, [standId]);
+    const timezone = (standRows.length && standRows[0].event_timezone) || 'America/Los_Angeles';
     const [rows] = await mysqlConnection.promise().query(
       `SELECT s.id AS scan_id, s.scanned_user_id AS user_id, u.firstname, u.lastname,
               s.scanned_at AS checked_in_at, s.service_id, ss.name_en AS service_name_en,
@@ -2106,10 +2116,12 @@ router.get('/health-events/stand/:standId(\\d+)/attending', verifyToken, require
        INNER JOIN user u ON u.id = s.scanned_user_id
        INNER JOIN user vu ON vu.id = s.volunteer_user_id
        LEFT JOIN health_event_stand_service ss ON ss.id = s.service_id
-       WHERE s.stand_id = ? AND s.scan_type = 'checkin' AND DATE(s.scanned_at) = CURDATE()
+       WHERE s.stand_id = ? AND s.scan_type = 'checkin'
+         AND DATE(COALESCE(CONVERT_TZ(s.scanned_at, @@session.time_zone, ?), s.scanned_at))
+           = DATE(COALESCE(CONVERT_TZ(NOW(), @@session.time_zone, ?), NOW()))
          AND NOT EXISTS (SELECT 1 FROM health_event_scan c WHERE c.paired_scan_id = s.id)
        ORDER BY s.scanned_at DESC
-       LIMIT 100`, [standId]);
+       LIMIT 100`, [standId, timezone, timezone]);
     res.status(200).json({ attending: rows });
   } catch (error) {
     logger.error('GET /health-events/stand/:id/attending error: ' + error.message);

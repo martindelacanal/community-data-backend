@@ -4342,12 +4342,33 @@ router.get('/locations', verifyToken, async (req, res) => {
   const withFilterEvent = req.query.withFilterEvent === 'true';
   if (cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'director') {
     try {
-      let query = 'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location';
+      const baseColumns = 'id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude';
+      let extraColumns = '';
       let whereClause = '';
       let params = [];
 
-      // Si es delivery y withFilterEvent es true, filtrar por eventos del día actual
+      // Si es delivery y withFilterEvent es true, filtrar por eventos del día actual.
+      // A diferencia del beneficiario, la sede NO se oculta cuando el día está marcado
+      // sin reparto: si el calendario estuviera mal cargado el voluntario se quedaría
+      // sin poder registrar en el campo. Se devuelve la marca no_distribution_today
+      // para que la app lo avise antes de registrar entregas.
       if (cabecera.role === 'delivery' && withFilterEvent) {
+        extraColumns = `, (
+          EXISTS (
+            SELECT 1 FROM calendar_event ce
+            WHERE ce.location_id = location.id
+              AND ce.date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
+              AND ce.enabled = 'Y'
+              AND ce.no_distribution = 1
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM calendar_event ce2
+            WHERE ce2.location_id = location.id
+              AND ce2.date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
+              AND ce2.enabled = 'Y'
+              AND ce2.no_distribution = 0
+          )
+        ) AS no_distribution_today`;
         whereClause = ` where (
           id IN (
             SELECT location_id
@@ -4367,7 +4388,7 @@ router.get('/locations', verifyToken, async (req, res) => {
         params.push(cabecera.id);
       }
 
-      query += whereClause + ' order by community_city';
+      const query = `select ${baseColumns}${extraColumns} from location${whereClause} order by community_city`;
 
       const [rows] = await mysqlConnection.promise().query(query, params);
       res.json(rows);
@@ -4639,8 +4660,18 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
   try {
     await connection.beginTransaction();
 
+    // Mismo criterio que POST /onBoard: el onboarding del delivery de HOY resuelto en
+    // horario del Pacífico (CURDATE() corre en UTC y a partir de las 5 PM apuntaba al
+    // día siguiente), quedándose con el más reciente y descartando los offboardings.
     const [rows_client_id] = await connection.query(
-      'SELECT client_id FROM delivery_log WHERE date(creation_date) = CURDATE() and location_id = ?',
+      `SELECT dl.client_id
+       FROM delivery_log AS dl
+       WHERE date(CONVERT_TZ(dl.creation_date, '+00:00', 'America/Los_Angeles')) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
+         AND dl.operation_id = 3
+         AND dl.client_id IS NOT NULL
+         AND dl.location_id = ?
+       ORDER BY dl.creation_date DESC
+       LIMIT 1`,
       [location_id]
     );
     let client_id = null;
