@@ -4432,7 +4432,7 @@ router.get('/locations', verifyToken, async (req, res) => {
       } else {
         if (cabecera.role === 'beneficiary') {
           try {
-            let query = 'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y"';
+            let query = 'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y" and signup_enabled = "Y"';
 
             // Si withFilterEvent es true, filtrar por eventos del día actual.
             // no_distribution = 1 marca un día publicado en el calendario SIN reparto
@@ -4501,7 +4501,7 @@ router.get('/register/locations', async (req, res) => {
 
   try {
     const [rows] = await mysqlConnection.promise().query(
-      'select id,organization,community_city,address from location where enabled = "Y" order by community_city'
+      'select id,organization,community_city,address from location where enabled = "Y" and signup_enabled = "Y" order by community_city'
     );
     res.json(rows);
   } catch (err) {
@@ -18196,7 +18196,7 @@ async function getParticipantRegisterHistory(cabecera, rawFilters, language = 'e
 async function getParticipantLocationNewRecurring(cabecera, rawFilters, language = 'en') {
   const filters = await normalizeParticipantMetricFilters(rawFilters, { resolveDateRange: true });
   const cacheKey = buildParticipantMetricsCacheKey(
-    'participant-location-new-recurring',
+    'participant-location-new-recurring-v2',
     cabecera,
     filters,
     { language }
@@ -18379,9 +18379,10 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
         [...newUsersParams, ...recurringUsersParams]
       ),
       mysqlConnection.promise().query(
-        `SELECT location_id, SUM(participations_count) AS participations_count
+        `SELECT location_id, kind, SUM(participations_count) AS participations_count
          FROM (
            SELECT
+             'delivery' AS kind,
              db.location_id AS location_id,
              COUNT(db.id) AS participations_count
            FROM delivery_beneficiary db
@@ -18390,6 +18391,7 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
            GROUP BY db.location_id
            UNION ALL
            SELECT
+             'registration' AS kind,
              u_reg.first_location_id AS location_id,
              COUNT(DISTINCT u_reg.id) AS participations_count
            FROM user u_reg
@@ -18416,7 +18418,7 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
              )
            GROUP BY u_reg.first_location_id
          ) AS participations_union
-         GROUP BY location_id`,
+         GROUP BY location_id, kind`,
         [...deliveryParticipationParams, ...registrationParticipationParams]
       )
     ]);
@@ -18429,7 +18431,8 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
         new_users: 0,
         recurring_users: 0,
         recurring_without_new_users: 0,
-        participations: 0
+        food_pickups: 0,
+        signups_without_pickup: 0
       });
     });
 
@@ -18448,7 +18451,12 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
 
     participationsResult[0].forEach(row => {
       if (row.location_id && locationsMap.has(row.location_id)) {
-        locationsMap.get(row.location_id).participations = Number(row.participations_count || 0);
+        const bucket = locationsMap.get(row.location_id);
+        if (row.kind === 'delivery') {
+          bucket.food_pickups = Number(row.participations_count || 0);
+        } else {
+          bucket.signups_without_pickup = Number(row.participations_count || 0);
+        }
       }
     });
 
@@ -18468,8 +18476,12 @@ async function getParticipantLocationNewRecurring(cabecera, rawFilters, language
           data: orderedLocations.map(location => location.recurring_without_new_users)
         },
         {
-          name: language === 'en' ? 'Participations' : 'Participaciones',
-          data: orderedLocations.map(location => location.participations)
+          name: language === 'en' ? 'Food pickups' : 'Retiros de comida',
+          data: orderedLocations.map(location => location.food_pickups)
+        },
+        {
+          name: language === 'en' ? 'Sign-ups without pickup' : 'Registros sin retiro',
+          data: orderedLocations.map(location => location.signups_without_pickup)
         }
       ],
       categories: orderedLocations.map(location => location.name)
@@ -18574,11 +18586,15 @@ function sortParticipantLocationMetrics(result, requestedSortBy, requestedSortDi
     new: 0,
     recurring: 1,
     recurring_without_new: 2,
-    participations: 3
+    food_pickups: 3,
+    signups_without_pickup: 4
   };
+  // 'participations' predates the split: it still sorts by the total of both.
+  const sumIndexesBySort = { participations: [3, 4] };
   const normalizedSortBy = String(requestedSortBy || 'alphabetical').toLowerCase();
   const sortBy = normalizedSortBy === 'alphabetical' ||
-    Object.prototype.hasOwnProperty.call(seriesIndexBySort, normalizedSortBy)
+    Object.prototype.hasOwnProperty.call(seriesIndexBySort, normalizedSortBy) ||
+    Object.prototype.hasOwnProperty.call(sumIndexesBySort, normalizedSortBy)
     ? normalizedSortBy
     : 'alphabetical';
   const normalizedDirection = String(requestedSortDirection || 'asc').toLowerCase();
@@ -18601,8 +18617,9 @@ function sortParticipantLocationMetrics(result, requestedSortBy, requestedSortDi
       return collator.compare(String(left.category || ''), String(right.category || '')) * directionMultiplier;
     }
 
-    const seriesIndex = seriesIndexBySort[sortBy];
-    const valueComparison = (Number(left.values[seriesIndex] || 0) - Number(right.values[seriesIndex] || 0)) * directionMultiplier;
+    const indexes = sumIndexesBySort[sortBy] || [seriesIndexBySort[sortBy]];
+    const total = row => indexes.reduce((sum, index) => sum + Number(row.values[index] || 0), 0);
+    const valueComparison = (total(left) - total(right)) * directionMultiplier;
     return valueComparison || collator.compare(String(left.category || ''), String(right.category || ''));
   });
 
