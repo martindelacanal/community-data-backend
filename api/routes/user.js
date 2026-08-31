@@ -29904,8 +29904,11 @@ router.get('/search', async (req, res) => {
     const eventsQuery = `
       SELECT
         ce.id,
-        ce.date,
+        DATE_FORMAT(ce.date, "%Y-%m-%d") AS date,
         ce.time,
+        ce.no_distribution,
+        ce.message_en,
+        ce.message_es,
         ce.location_id,
         l.organization as location_name,
         l.community_city as location_city,
@@ -30144,6 +30147,11 @@ router.get('/search', async (req, res) => {
         id: event.id,
         date: event.date,
         time: event.time,
+        // Los días publicados sin reparto deben poder distinguirse en los
+        // resultados, igual que en el calendario y en la home pública.
+        no_distribution: event.no_distribution === 1 || event.no_distribution === true,
+        message_en: event.message_en ?? '',
+        message_es: event.message_es ?? '',
         location_id: event.location_id,
         location_name: event.location_name,
         location_city: event.location_city,
