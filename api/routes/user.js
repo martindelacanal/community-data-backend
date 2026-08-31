@@ -4406,13 +4406,16 @@ router.get('/locations', verifyToken, async (req, res) => {
           try {
             let query = 'select id,organization,community_city,address, ST_Y(coordinates) as latitude, ST_X(coordinates) as longitude from location where enabled = "Y"';
 
-            // Si withFilterEvent es true, filtrar por eventos del día actual
+            // Si withFilterEvent es true, filtrar por eventos del día actual.
+            // no_distribution = 1 marca un día publicado en el calendario SIN reparto
+            // (feriado, pausa, etc.): esa sede no debe ofrecerse para generar el QR.
             if (withFilterEvent) {
               query += ` AND id IN (
-                SELECT location_id 
-                FROM calendar_event 
+                SELECT location_id
+                FROM calendar_event
                 WHERE date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))
                 AND enabled = 'Y'
+                AND no_distribution = 0
               )`;
             }
 
@@ -29394,6 +29397,17 @@ function mapCalendarEventRow(row) {
   };
 }
 
+// El servidor de base de datos corre en UTC, pero los repartos ocurren en horario
+// del Pacífico. Usar CURDATE() hacía que a partir de las 5 PM de California (medianoche
+// UTC) los eventos de HOY desaparecieran del calendario y de la búsqueda, mientras que
+// la pantalla del QR (que sí calcula el día en America/Los_Angeles) seguía ofreciendo
+// la sede: el usuario veía una sede que "no estaba en el calendario".
+const CALENDAR_TIMEZONE = 'America/Los_Angeles';
+
+function getCalendarToday() {
+  return moment.tz(CALENDAR_TIMEZONE).format('YYYY-MM-DD');
+}
+
 // ============ CALENDAR EVENTS ENDPOINTS ============
 
 // GET /calendar/events - Get all calendar events with optional filters
@@ -29467,7 +29481,8 @@ router.get('/calendar/events', async (req, res) => {
 
     // Filter by date range: from today onwards with optional days limit
     if (fromToday === 'true') {
-      whereConditions.push('ce.date >= CURDATE()');
+      whereConditions.push('ce.date >= ?');
+      queryParams.push(getCalendarToday());
 
       if (daysLimit && !isNaN(daysLimit)) {
         const limit = parseInt(daysLimit);
@@ -29901,7 +29916,7 @@ router.get('/search', async (req, res) => {
       FROM calendar_event ce
       INNER JOIN location l ON ce.location_id = l.id
       WHERE ce.enabled = 'Y'
-        AND ce.date >= CURDATE()
+        AND ce.date >= ?
         AND (
           l.organization LIKE ?
           OR l.community_city LIKE ?
@@ -29913,7 +29928,7 @@ router.get('/search', async (req, res) => {
 
     const [calendarEvents] = await mysqlConnection.promise().query(
       eventsQuery,
-      [searchTerm, searchTerm, searchTerm, maxEvents]
+      [getCalendarToday(), searchTerm, searchTerm, searchTerm, maxEvents]
     );
 
     // ===== SEARCH ARTICLES =====
