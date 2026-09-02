@@ -43,6 +43,13 @@ const {
   getParticipantRegisterSummary: getSharedParticipantRegisterSummary
 } = require('../services/participantRegistrationMetrics');
 const {
+  ENGAGEMENT_ORDER_COLUMNS,
+  buildParticipantEngagementSql,
+  describeVisitScope,
+  hydrateParticipantEngagement,
+  normalizeEngagementFilters
+} = require('../services/participantEngagement');
+const {
   FOOD_DELIVERY_TIME_ZONE,
   getLatestSameDayDelivery,
   getSameDayApprovedDeliveries
@@ -144,6 +151,54 @@ function buildTableOrder(req, orderColumns, defaultOrderBy = 'id') {
     orderType,
     queryOrderBy: `${orderColumns[orderBy]} ${orderType}`
   };
+}
+
+/** Etiquetas legibles del clasificador app/web para los CSV de participantes. */
+const APP_PLATFORM_CSV_LABELS = {
+  app_both: 'iOS + Android',
+  app_android: 'Android',
+  app_ios: 'iOS',
+  no_app_detected: ''
+};
+
+/**
+ * Filtro por respuestas del formulario de registro, compartido por la tabla de
+ * Participants y su CSV (antes solo lo tenía la tabla, así que el archivo
+ * descargado no coincidía con lo que se veía en pantalla).
+ *
+ * `register_form` llega como { question_id: answer_id | [answer_ids] }. Se toma
+ * siempre la última respuesta de cada pregunta (MAX(uq.id)) porque el historial
+ * guarda todas las ediciones.
+ */
+function buildRegisterFormCondition(register_form) {
+  if (!register_form || typeof register_form !== 'object') {
+    return '';
+  }
+  const conditions = [];
+  for (const [question_id, content] of Object.entries(register_form)) {
+    const questionId = Number(question_id);
+    if (!Number.isInteger(questionId) || questionId <= 0) {
+      continue;
+    }
+    const answerIds = (Array.isArray(content) ? content : [content])
+      .map(Number)
+      .filter((id) => Number.isInteger(id) && id > 0);
+    if (answerIds.length === 0) {
+      continue;
+    }
+    conditions.push(`u.id IN (
+                              SELECT uq.user_id
+                              FROM user_question AS uq
+                              INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
+                              WHERE uqa.answer_id IN (${answerIds.join()}) AND uq.question_id = ${questionId}
+                                AND uq.id = (
+                                  SELECT MAX(uq2.id)
+                                  FROM user_question AS uq2
+                                  WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
+                                )
+                            )`);
+  }
+  return conditions.length > 0 ? `AND (${conditions.join(' AND ')})` : '';
 }
 
 const MOBILE_APP_VERSION_REGEX = /^\d+(\.\d+){1,2}$/;
@@ -13164,12 +13219,22 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
-      const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
       const min_age = filters.min_age || 0;
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
+
+      // Recurrencia (visitas por sede) y uso de app: mismos filtros que la
+      // tabla, para que lo que se ve en pantalla sea lo que baja en el archivo.
+      const engagement = normalizeEngagementFilters(filters, {
+        clientId: cabecera.role === 'client' ? cabecera.client_id : null
+      });
+      const engagementSql = buildParticipantEngagementSql(engagement, {
+        withColumns: true,
+        withVisitedLocations: true,
+        aggregated: true
+      });
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -13186,11 +13251,6 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       var query_to_date = '';
       if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
-      if (locations.length > 0) {
-        // query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-        query_locations = 'AND (u.first_location_id IN (' + locations.join() + '))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -13220,6 +13280,24 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       if (Array.isArray(filters.languages) && filters.languages.length > 0) {
         query_languages = 'AND u.language_id IN (' + filters.languages.map(Number).join() + ')';
       }
+      const query_register_form = buildRegisterFormCondition(filters.register_form);
+
+      // Nombre de las sedes elegidas, para estampar en el archivo sobre qué
+      // universo se contaron las visitas.
+      let visitScopeLocationNames = [];
+      if (engagement.locations.length > 0) {
+        // Un admin de cliente solo ve el nombre de sus propias sedes: si no,
+        // el propio encabezado del archivo revelaría sedes de otra organización.
+        const clientScopeSql = engagement.clientId
+          ? ' AND id IN (SELECT cl.location_id FROM client_location AS cl WHERE cl.client_id = ?)'
+          : '';
+        const [locationRows] = await mysqlConnection.promise().query(
+          `SELECT community_city FROM location WHERE id IN (${engagement.locations.join(',')})${clientScopeSql} ORDER BY community_city`,
+          engagement.clientId ? [engagement.clientId] : []
+        );
+        visitScopeLocationNames = locationRows.map((row) => row.community_city).filter(Boolean);
+      }
+      const visits_scope = describeVisitScope(engagement, visitScopeLocationNames);
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id,
@@ -13247,7 +13325,8 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS creation_date,
                         DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS creation_time,
         DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS modification_date,
-                        DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time
+                        DATE_FORMAT(CONVERT_TZ(u.modification_date, '+00:00', 'America/Los_Angeles'), '%T') AS modification_time,
+                ${engagementSql.selects}
         FROM user as u
         INNER JOIN ethnicity as e ON u.ethnicity_id = e.id
         INNER JOIN gender as g ON u.gender_id = g.id
@@ -13256,8 +13335,8 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         LEFT JOIN client as c ON u.client_id = c.id
         LEFT JOIN client_user as cu ON u.id = cu.user_id
         LEFT JOIN location as l ON u.location_id = l.id
+        ${engagementSql.joins}
         WHERE u.role_id = 5 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-        ${query_locations}
         ${query_genders}
         ${query_ethnicities}
         ${query_second_ethnicities}
@@ -13265,11 +13344,25 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
+        ${query_register_form}
         ${cabecera.role === 'client' ? ' AND cu.client_id = ?' : ''}
+        ${engagementSql.conditions}
         GROUP BY u.id
         ORDER BY u.id`,
-        [from_date, to_date, cabecera.client_id]
+        [
+          ...engagementSql.joinParams,
+          from_date,
+          to_date,
+          ...(cabecera.role === 'client' ? [cabecera.client_id] : []),
+          ...engagementSql.conditionParams
+        ]
       );
+
+      for (const row of rows) {
+        row.visits_scope = visits_scope;
+        row.app_user = row.app_usage && row.app_usage !== 'no_app_detected' ? 'Yes' : 'No';
+        row.app_platform = APP_PLATFORM_CSV_LABELS[row.app_usage] || '';
+      }
 
       var headers_array = [
         { id: 'id', title: 'ID' },
@@ -13297,7 +13390,24 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
         { id: 'creation_date', title: 'Creation date' },
         { id: 'creation_time', title: 'Creation time' },
         { id: 'modification_date', title: 'Modification date' },
-        { id: 'modification_time', title: 'Modification time' }
+        { id: 'modification_time', title: 'Modification time' },
+        // Recurrencia. Una visita = un día distinto con actividad en la sede,
+        // no una fila de delivery_beneficiary (un doble escaneo no cuenta dos veces).
+        { id: 'visits_scope', title: 'Visits counted at' },
+        { id: 'visit_days', title: 'Visits (days)' },
+        { id: 'visit_days_with_pickup', title: 'Visits with food pickup' },
+        { id: 'visit_months', title: 'Months with visits' },
+        { id: 'first_visit', title: 'First visit' },
+        { id: 'last_visit', title: 'Last visit' },
+        { id: 'days_since_last_visit', title: 'Days since last visit' },
+        { id: 'avg_days_between_visits', title: 'Avg days between visits' },
+        { id: 'visited_locations', title: 'Locations visited' },
+        // App vs web. "No" significa "sin señal de app": el registro empieza en
+        // marzo 2026 y no hay backfill, así que no prueba que la persona no la use.
+        { id: 'app_user', title: 'App user' },
+        { id: 'app_platform', title: 'App platform' },
+        { id: 'app_version', title: 'App version' },
+        { id: 'app_last_seen', title: 'App last activity' }
       ];
 
       const csvStringifier = createCsvStringifier({
@@ -13327,12 +13437,20 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
       let to_date = filters.to_date || '2100-01-01';
-      const locations = filters.locations || [];
       const genders = filters.genders || [];
       const ethnicities = filters.ethnicities || [];
       const min_age = filters.min_age || 0;
       const max_age = filters.max_age || 150;
       const zipcode = filters.zipcode || null;
+
+      // Mismos filtros de sede/recurrencia/app que la tabla, sin agregar
+      // columnas: el archivo tiene que seguir entrando tal cual en Mailchimp.
+      // Solo admin llega a esta ruta, pero se pasa el scope igual para que el
+      // criterio de recurrencia sea el mismo en los tres endpoints.
+      const engagement = normalizeEngagementFilters(filters, {
+        clientId: cabecera.role === 'client' ? cabecera.client_id : null
+      });
+      const engagementSql = buildParticipantEngagementSql(engagement, { withColumns: false });
 
       // Convertir a formato ISO y obtener solo la fecha
       if (filters.from_date) {
@@ -13349,11 +13467,6 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
       var query_to_date = '';
       if (filters.to_date) {
         query_to_date = 'AND CONVERT_TZ(u.creation_date, \'+00:00\', \'America/Los_Angeles\') < DATE_ADD(\'' + to_date + '\', INTERVAL 1 DAY)';
-      }
-      var query_locations = '';
-      if (locations.length > 0) {
-        // query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-        query_locations = 'AND (u.first_location_id IN (' + locations.join() + '))';
       }
       var query_genders = '';
       if (genders.length > 0) {
@@ -13375,6 +13488,7 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
       if (filters.zipcode) {
         query_zipcode = 'AND u.zipcode = ' + zipcode;
       }
+      const query_register_form = buildRegisterFormCondition(filters.register_form);
 
       const [rows] = await mysqlConnection.promise().query(
         `SELECT u.id,
@@ -13390,16 +13504,18 @@ router.post('/table/user/beneficiary/download-csv-mailchimp', verifyToken, async
         FROM user as u
         INNER JOIN ethnicity as e ON u.ethnicity_id = e.id
         INNER JOIN gender as g ON u.gender_id = g.id
+        ${engagementSql.joins}
         WHERE u.role_id = 5 AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') >= ? AND CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles') < DATE_ADD(?, INTERVAL 1 DAY)
-        ${query_locations}
         ${query_genders}
         ${query_ethnicities}
         ${query_min_age}
         ${query_max_age}
         ${query_zipcode}
+        ${query_register_form}
+        ${engagementSql.conditions}
         GROUP BY u.id
         ORDER BY u.id`,
-        [from_date, to_date]
+        [...engagementSql.joinParams, from_date, to_date, ...engagementSql.conditionParams]
       );
 
       var headers_array = [
@@ -20533,7 +20649,28 @@ router.post('/table/user', verifyToken, async (req, res) => {
     const min_age = filters.min_age || 0;
     const max_age = filters.max_age || 150;
     const zipcode = filters.zipcode || null;
-    const register_form = filters.register_form || null;
+
+    // Recurrencia + uso de app. Solo aplica a la pestaña de participantes: para
+    // usuarios de sistema y clientes no existe el concepto de "visitas".
+    //
+    // Las columnas NUNCA salen de esta consulta: se hidratan después, ya
+    // paginadas. Agrupar delivery_beneficiary entera para mostrar 10 filas
+    // llevaba la pantalla de ~250ms a ~1.3s. Los JOIN se agregan solo cuando
+    // algún filtro u orden los necesita de verdad.
+    const isParticipantTable = req.query.tableRole === 'beneficiary';
+    const engagement = normalizeEngagementFilters(isParticipantTable ? filters : {}, {
+      clientId: cabecera.role === 'client' ? cabecera.client_id : null
+    });
+    const noEngagementSql = { joins: '', joinParams: [], selects: '', conditions: '', conditionParams: [] };
+    const ordersByEngagement = isParticipantTable
+      && Object.prototype.hasOwnProperty.call(ENGAGEMENT_ORDER_COLUMNS, String(req.query.orderBy || ''));
+    const engagementSql = isParticipantTable
+      ? buildParticipantEngagementSql(engagement, { withColumns: false, forceJoins: ordersByEngagement })
+      : noEngagementSql;
+    // El COUNT no ordena, así que nunca necesita los JOIN por orden.
+    const engagementCountSql = isParticipantTable
+      ? buildParticipantEngagementSql(engagement, { withColumns: false })
+      : noEngagementSql;
 
     // Convertir a formato ISO y obtener solo la fecha
     if (filters.from_date) {
@@ -20604,7 +20741,10 @@ router.post('/table/user', verifyToken, async (req, res) => {
       role: 'role.name',
       enabled: 'u.enabled',
       mailchimp_error: 'u.mailchimp_error',
-      creation_date: 'u.creation_date'
+      creation_date: 'u.creation_date',
+      // Ordenar por recurrencia solo tiene sentido (y solo tiene JOIN) en la
+      // pestaña de participantes.
+      ...(isParticipantTable ? ENGAGEMENT_ORDER_COLUMNS : {})
     });
     var orderBy = userOrder.orderBy;
     var orderType = userOrder.orderType;
@@ -20631,45 +20771,10 @@ router.post('/table/user', verifyToken, async (req, res) => {
           break;
         case 'beneficiary':
           queryTableRole = 'AND role.id = 5';
-          if (locations.length > 0) {
-            // query_locations = 'AND (u.first_location_id IN (' + locations.join() + ') OR u.id IN (SELECT DISTINCT(db.receiving_user_id) FROM delivery_beneficiary db WHERE db.location_id IN (' + locations.join() + ')))';
-            query_locations = 'AND (u.first_location_id IN (' + locations.join() + '))';
-          }
-          if (filters.register_form) {
-            const conditions = [];
-            for (const [question_id, content] of Object.entries(register_form)) {
-              if (Array.isArray(content)) {
-                if (content.length > 0) {
-                  conditions.push(`u.id IN (
-                                          SELECT uq.user_id 
-                                          FROM user_question AS uq
-                                          INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-                                          WHERE uqa.answer_id IN (${content.join()}) AND uq.question_id = ${question_id}
-                                            AND uq.id = (
-                                              SELECT MAX(uq2.id)
-                                              FROM user_question AS uq2
-                                              WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
-                                            )
-                                        )`);
-                }
-              } else if (content) {
-                  conditions.push(`u.id IN (
-                                          SELECT uq.user_id 
-                                          FROM user_question AS uq
-                                          INNER JOIN user_question_answer AS uqa ON uq.id = uqa.user_question_id
-                                          WHERE uqa.answer_id = ${content} AND uq.question_id = ${question_id}
-                                            AND uq.id = (
-                                              SELECT MAX(uq2.id)
-                                              FROM user_question AS uq2
-                                              WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
-                                            )
-                                        )`);
-              }
-            }
-            if (conditions.length > 0) {
-              query_register_form = `AND (${conditions.join(' AND ')})`;
-            }
-          }
+          // El filtro de sedes lo resuelve participantEngagement: según
+          // location_match matchea la sede de registro (comportamiento
+          // histórico), la sede a la que la persona realmente asiste, o ambas.
+          query_register_form = buildRegisterFormCondition(filters.register_form);
 
           if (cabecera.role === 'client') {
             queryTableRole += ' AND client_user.client_id = ' + cabecera.client_id;
@@ -20703,7 +20808,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
       INNER JOIN role ON u.role_id = role.id
       ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON u.id = client_user.user_id' : ''}
       ${tableRole === 'client' ? 'INNER JOIN client as c ON u.client_id = c.id LEFT JOIN client_location as cl ON c.id = cl.client_id' : ''}
-      WHERE 1=1 
+      ${engagementSql.joins}
+      WHERE 1=1
       ${queryBuscar}
       ${queryTableRole}
       ${query_from_date}
@@ -20717,13 +20823,17 @@ router.post('/table/user', verifyToken, async (req, res) => {
       ${query_max_age}
       ${query_zipcode}
       ${query_register_form}
+      ${engagementSql.conditions}
       ${tableRole === 'client' ? 'GROUP BY u.id' : ''}
       ORDER BY ${queryOrderBy}
       LIMIT ?, ?`
 
       const [rows] = await mysqlConnection.promise().query(
         query
-        , [start, resultsPerPage]);
+        , [...engagementSql.joinParams, ...engagementSql.conditionParams, start, resultsPerPage]);
+      if (isParticipantTable) {
+        await hydrateParticipantEngagement(mysqlConnection, rows, engagement);
+      }
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
           SELECT COUNT(*) as count
@@ -20731,6 +20841,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
           INNER JOIN role ON u.role_id = role.id
           ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON u.id = client_user.user_id' : ''}
           ${tableRole === 'client' ? 'INNER JOIN client as c ON u.client_id = c.id LEFT JOIN client_location as cl ON c.id = cl.client_id' : ''}
+          ${engagementCountSql.joins}
           WHERE 1=1
           ${queryBuscar}
           ${queryTableRole}
@@ -20745,8 +20856,9 @@ router.post('/table/user', verifyToken, async (req, res) => {
           ${query_max_age}
           ${query_zipcode}
           ${query_register_form}
+          ${engagementCountSql.conditions}
           ${tableRole === 'client' ? 'GROUP BY u.id' : ''}
-        `);
+        `, [...engagementCountSql.joinParams, ...engagementCountSql.conditionParams]);
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
