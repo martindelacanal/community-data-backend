@@ -13,6 +13,8 @@
  * Every scan is stored with millisecond timestamps for future metrics.
  */
 const express = require('express');
+const { issueSessionForUser } = require('../services/beneficiarySession');
+const { assignBeneficiaryUsername } = require('../utils/beneficiaryUsername');
 const jwt = require('jsonwebtoken');
 const bcryptjs = require('bcryptjs');
 const crypto = require('crypto');
@@ -97,7 +99,7 @@ healthQrSlidingDebounceCleanup.unref();
 // (self-registrations, admin-created volunteers, password resets). Matches the
 // Jotform import default so on-site staff can always tell people one password.
 // Accounts created with it get reset_password='Y' → first-login change prompt.
-const DEFAULT_HEALTH_PASSWORD = 'bienestarcommunity';
+const DEFAULT_HEALTH_PASSWORD = 'bienestar';
 
 // ============ AUTH MIDDLEWARE ============
 
@@ -618,17 +620,8 @@ async function bookAppointments(connection, registrationId, appointments) {
 
 /** Build the same signin token the /signin endpoint issues, for auto-login after registration. */
 async function buildSigninToken(userId) {
-  const [rows] = await mysqlConnection.promise().query(
-    'SELECT user.id, user.firstname, user.username, user.email, user.client_id AS client_id, \
-            role.name AS role, user.language AS language, user.enabled AS enabled \
-     FROM user INNER JOIN role ON role.id = user.role_id WHERE user.id = ? LIMIT 1', [userId]);
-  if (!rows.length) return null;
-  const data = JSON.stringify(rows[0]);
-  return new Promise((resolve, reject) => {
-    jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '6h' }, (err, token) => {
-      if (err) reject(err); else resolve(token);
-    });
-  });
+  const session = await issueSessionForUser(userId, mysqlConnection.promise(), process.env.JWT_SECRET);
+  return session.token;
 }
 
 function normalizeForUsername(text) {
@@ -1016,15 +1009,15 @@ router.post('/health-events/:slug/register', async (req, res) => {
     if (authUser && authUser.role === 'beneficiary') {
       userId = authUser.id;
     } else {
-      const username = String(account.username || '').trim();
+      let username = String(account.username || '').trim() || null;
       // Password is optional since 2026-08: when the form does not send one the
       // account gets the shared default and a first-login change prompt. Old
       // bundles / native apps that still send a user-chosen password keep it.
       const providedPassword = String(account.password || '');
       const password = providedPassword || DEFAULT_HEALTH_PASSWORD;
-      if (!username || (providedPassword && providedPassword.length < 4) || !account.firstName || !account.phone) {
+      if ((providedPassword && providedPassword.length < 4) || !account.firstName || !account.phone) {
         await connection.rollback();
-        logger.error('POST /health-events/:slug/register 400 INVALID_ACCOUNT_DATA (missing username/name/phone or short password)');
+        logger.error('POST /health-events/:slug/register 400 INVALID_ACCOUNT_DATA (missing name/phone or short password)');
         return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
       }
       const email = account.email ? String(account.email).trim() : null;
@@ -1073,6 +1066,7 @@ router.post('/health-events/:slug/register', async (req, res) => {
         uiLanguage: account.uiLanguage,
         resetPassword: providedPassword ? 'N' : 'Y'
       });
+      if (!username) username = await assignBeneficiaryUsername(connection, userId, account.firstName);
       createdAccount = true;
       createdWithDefaultPassword = !providedPassword;
       createdUsername = username;

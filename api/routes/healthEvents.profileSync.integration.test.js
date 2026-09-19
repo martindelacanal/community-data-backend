@@ -212,6 +212,30 @@ test('public registration copies mapped answers into the new account profile wit
       'SELECT gender_id, zipcode FROM user WHERE username = ? LIMIT 1', [username2]);
     assert.equal(user2.gender_id, null, 'an unmapped option copies nothing');
     assert.equal(user2.zipcode, '90001', 'the zip code typed in the account form is never overwritten by the question');
+
+    // New forms omit username entirely; generate it after INSERT and preserve
+    // the answers so opening the QR never immediately repeats registration.
+    const phone3 = await uniquePhone(pool);
+    const registered3 = await postJson(baseUrl, `/api/health-events/${fixture.slug}/register`, {
+      account: { firstName: 'María', lastName: 'Automatic Test', phone: phone3, uiLanguage: 'es' },
+      answers: [
+        { question_id: fixture.genderQuestionId, answer: fixture.femaleOptionId },
+        { question_id: fixture.zipQuestionId, answer: '92220' }
+      ], appointments: []
+    });
+    const [[user3]] = await pool.promise().query('SELECT id, username FROM user WHERE phone = ? LIMIT 1', [phone3]);
+    if (user3) usernames.push(user3.username);
+    assert.equal(registered3.status, 200, JSON.stringify(registered3.body));
+    assert.equal(user3.username, `maria${user3.id}`);
+    assert.equal(registered3.body.credentials.username, user3.username);
+    assert.equal(registered3.body.credentials.password, 'bienestar');
+    assert.ok(registered3.body.token, 'session is issued after the generated account commits');
+    const pendingResponse = await fetch(`${baseUrl}/api/health-events/${fixture.eventId}/pending-questions`, {
+      headers: { authorization: `Bearer ${registered3.body.token}` }
+    });
+    assert.equal(pendingResponse.status, 200);
+    const pending = await pendingResponse.json();
+    assert.deepEqual(pending.forms, [], 'answers from registration are not asked again at the QR gate');
   } catch (error) {
     testError = error;
   } finally {

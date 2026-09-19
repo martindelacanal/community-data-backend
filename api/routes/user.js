@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router();
+const { assignBeneficiaryUsername } = require('../utils/beneficiaryUsername');
+const { selectPendingSurveyQuestions } = require('../utils/pendingSurveyQuestions');
 const mysqlConnection = require('../connection/connection');
 const { setUserEnabledWithRestoreRevocation } = require('../services/restoreCredentialsRepository');
 const { buildRestoreAuthBinding } = require('../utils/restoreAuthBinding');
+const { renewSession, issueSessionForUser } = require('../services/beneficiarySession');
 const jwt = require('jsonwebtoken');
 const bcryptjs = require('bcryptjs');
 const axios = require('axios');
@@ -396,15 +399,17 @@ router.post('/signin', (req, res) => {
   )
 });
 
-router.get('/refresh-token', verifyToken, (req, res) => {
-  const cabecera = JSON.parse(req.data.data);
-
-  if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager' || cabecera.role === 'eventvolunteer') {
-    jwt.sign({ data: req.data.data, restore_auth_binding: req.data.restore_auth_binding }, process.env.JWT_SECRET, { expiresIn: '6h' }, (err, token) => {
-      res.status(200).json({ token: token });
-    });
-  } else {
-    res.status(401).json('Unauthorized');
+router.get('/refresh-token', async (req, res) => {
+  const authorization = req.headers.authorization || '';
+  if (!authorization.startsWith('Bearer ')) return res.status(401).json('Unauthorized');
+  try {
+    const session = await renewSession(authorization.substring(7).trim(), mysqlConnection.promise(), process.env.JWT_SECRET);
+    res.set('Cache-Control', 'no-store');
+    return res.status(200).json(session);
+  } catch (error) {
+    if (error.status === 401) return res.status(401).json('Unauthorized');
+    logger.error('Unable to renew session', error);
+    return res.status(503).json({ error: 'Session renewal temporarily unavailable' });
   }
 });
 
@@ -575,10 +580,8 @@ function isMailchimpMemberExistsError(err) {
 }
 
 router.post('/signup', async (req, res) => {
-  console.log(req.body);
-
-  firstForm = req.body.firstForm;
-  secondForm = req.body.secondForm;
+  const firstForm = req.body.firstForm || {};
+  const secondForm = Array.isArray(req.body.secondForm) ? [...new Map(req.body.secondForm.map(item => [Number(item.question_id), item])).values()] : [];
 
   // Validate legal consent - must be strictly true
   if (firstForm.legalConsentAccepted !== true) {
@@ -628,7 +631,7 @@ router.post('/signup', async (req, res) => {
   }
 
   const role_id = 5;
-  const username = firstForm.username || null;
+  let username = firstForm.username || null;
   let passwordHash = await bcryptjs.hash(firstForm.password, 8);
   const firstname = firstForm.firstName || null;
   const lastname = firstForm.lastName || null;
@@ -698,6 +701,7 @@ router.post('/signup', async (req, res) => {
 
     // Guardar el ID del usuario insertado
     const user_id = rows.insertId;
+    if (!username) username = await assignBeneficiaryUsername(connection, user_id, firstname);
 
     // Insertar en tabla client_user si client_id no es null
     if (client_id) {
@@ -786,7 +790,7 @@ router.post('/signup', async (req, res) => {
     await connection.commit();
 
     // Responder éxito antes de procesar Mailchimp (para no afectar la transacción)
-    res.status(200).json('Data inserted successfully');
+    res.status(200).json({ message: 'Data inserted successfully', username });
 
     // Después del commit exitoso, procesar Mailchimp (fuera de la transacción)
     try {
@@ -2613,6 +2617,9 @@ router.put('/volunteer/notification-recipients', verifyToken, async (req, res) =
   }
 });
 
+router.use('/delivery/beneficiaries', verifyToken,
+  require('./deliveryBeneficiaries').createDeliveryBeneficiariesRouter(mysqlConnection, bcryptjs));
+
 router.put('/beneficiary/reset-password', async (req, res) => {
 
   try {
@@ -2626,13 +2633,13 @@ router.put('/beneficiary/reset-password', async (req, res) => {
     const [rows] = await mysqlConnection.promise().query('SELECT user.id \
                                                           FROM user \
                                                           INNER JOIN role ON role.id = user.role_id \
-                                                          WHERE (user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL)) and user.date_of_birth = ?',
+                                                          WHERE (user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL)) and user.date_of_birth = ? and role.name = "beneficiary" and user.enabled = "Y" and user.deleted = "N"',
       [email, email, email, dateOfBirth]);
 
     if (rows.length > 0) {
 
       // const newPassword = Math.random().toString(36).slice(-8);
-      const newPassword = 'communitydata';
+      const newPassword = 'bienestar';
       let passwordHash = await bcryptjs.hash(newPassword, 8);
 
       const [rows2] = await mysqlConnection.promise().query('update user set password = ?, reset_password = "Y" where id = ?',
@@ -2672,7 +2679,11 @@ router.put('/change-password/:idUser', verifyToken, async (req, res) => {
         [passwordHash, idUser]);
 
       if (rows.affectedRows > 0) {
-        res.json('Password updated successfully');
+        if (Number(idUser) === Number(cabecera.id)) {
+          res.json(await issueSessionForUser(idUser, mysqlConnection.promise(), process.env.JWT_SECRET));
+        } else {
+          res.json('Password updated successfully');
+        }
       } else {
         res.status(500).json('Could not update password');
       }
@@ -2693,7 +2704,7 @@ router.delete('/user/reset-password/:idUser', verifyToken, async (req, res) => {
       const { idUser } = req.params;
 
       // const newPassword = Math.random().toString(36).slice(-8);
-      const newPassword = 'communitydata';
+      const newPassword = 'bienestar';
       let passwordHash = await bcryptjs.hash(newPassword, 8);
 
       const [rows2] = await mysqlConnection.promise().query('update user set password = ?, reset_password = "Y" where id = ?',
@@ -4053,7 +4064,7 @@ async function processDeliveryTicket({ deliveringUserId, receivingUserId, approv
   }
 
   const [beneficiaryRows] = await mysqlConnection.promise().query(
-    `select firstname, lastname
+    `select id, firstname, lastname
        from user
       where id = ?
         and role_id = 5
@@ -4262,7 +4273,7 @@ router.post('/upload/beneficiaryPhone/:locationId/:clientId', verifyToken, async
           ]);
           if (pending_questions > 0 || same_day_deliveries.length > 0) {
             const [beneficiaryRows] = await mysqlConnection.promise().query(
-              'select firstname, lastname from user where id = ?', [receiving_user_id]
+              'select id, firstname, lastname from user where id = ?', [receiving_user_id]
             );
             return res.status(200).json({
               requires_confirmation: true,
@@ -4701,9 +4712,27 @@ router.get('/roles', verifyToken, async (req, res) => {
   }
 });
 
+// Staff may assist only while onboarded at the selected distribution location.
+async function resolveOnboardSurveyUser(cabecera, beneficiaryId, locationId) {
+  if (cabecera.role === 'beneficiary') return { userId: cabecera.id };
+  if (cabecera.role !== 'delivery') return { status: 403, error: 'Unauthorized' };
+  const targetId = parseSurveyPositiveInt(beneficiaryId);
+  if (!targetId || !locationId) return { status: 400, error: 'beneficiary_id and location_id are required' };
+  const [staffRows] = await mysqlConnection.promise().query(
+    `SELECT u.id FROM user u INNER JOIN role r ON r.id = u.role_id
+     WHERE u.id = ? AND r.name = 'delivery' AND u.enabled = 'Y' AND u.deleted = 'N'
+       AND u.user_status_id = 3 AND u.location_id = ? LIMIT 1`, [cabecera.id, locationId]);
+  if (!staffRows.length) return { status: 403, error: 'Delivery must be onboarded at this location' };
+  const [targetRows] = await mysqlConnection.promise().query(
+    `SELECT u.id FROM user u INNER JOIN role r ON r.id = u.role_id
+     WHERE u.id = ? AND r.name = 'beneficiary' AND u.enabled = 'Y' AND u.deleted = 'N' LIMIT 1`, [targetId]);
+  if (!targetRows.length) return { status: 404, error: 'Beneficiary not found' };
+  return { userId: targetId };
+}
+
 router.post('/onBoard/answers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'beneficiary') {
+  if (!['beneficiary', 'delivery'].includes(cabecera.role)) {
     return res.status(401).json('Unauthorized');
   }
 
@@ -4717,10 +4746,25 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
     return res.status(400).json('location_id query param is required and must be a positive integer');
   }
 
-  const user_id = cabecera.id;
+  let target;
+  try {
+    target = await resolveOnboardSurveyUser(cabecera, req.query.beneficiary_id, location_id);
+  } catch (error) {
+    logger.error(error);
+    return res.status(500).json('Internal server error');
+  }
+  if (target.error) return res.status(target.status).json(target.error);
+  const user_id = target.userId;
   const connection = await mysqlConnection.promise().getConnection();
   try {
     await connection.beginTransaction();
+    // Serialize assisted and self-service submissions for this beneficiary.
+    await connection.query('SELECT id FROM user WHERE id = ? FOR UPDATE', [user_id]);
+    let delegatedPendingIds = null;
+    if (cabecera.role === 'delivery') {
+      const pending = await buildOnboardPendingQuestions(user_id, location_id, true, connection);
+      delegatedPendingIds = new Set(pending.filter(question => !question.previously_answered).map(question => question.id));
+    }
 
     // Mismo criterio que POST /onBoard: el onboarding del delivery de HOY resuelto en
     // horario del Pacífico (CURDATE() corre en UTC y a partir de las 5 PM apuntaba al
@@ -4770,6 +4814,10 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
         return res.status(400).json(`question_id invalid at index ${i}`);
       }
 
+      if (delegatedPendingIds && !delegatedPendingIds.has(question_id)) {
+        await connection.rollback();
+        return res.status(403).json('Delivery may answer pending questions only');
+      }
       const sourceParsed = parseSurveySource(answerItem.source);
       if (sourceParsed.error) {
         await connection.rollback();
@@ -4957,12 +5005,12 @@ router.post('/onBoard/answers', verifyToken, async (req, res) => {
         question_id,
         old_answer_json: previousSnapshot ? JSON.stringify(previousSnapshot) : null,
         new_answer_json: JSON.stringify(newSnapshot),
-        source: sourceParsed.value || BENEFICIARY_ANSWER_SOURCE_DEFAULT,
+        source: cabecera.role === 'delivery' ? 'delivery-assisted-ui' : sourceParsed.value || BENEFICIARY_ANSWER_SOURCE_DEFAULT,
         submitted_at_client: submittedAtParsed.value
       });
     }
 
-    if (secondForm.length > 0) {
+    if (secondForm.length > 0 && cabecera.role === 'beneficiary') {
       await clearUnreachableOnboardAnswers(connection, {
         user_id,
         location_id,
@@ -5231,7 +5279,7 @@ router.post('/onBoard', verifyToken, async (req, res) => {
             enabled: 'Y'
           };
           let data = JSON.stringify(object_token);
-          jwt.sign({ data }, process.env.JWT_SECRET, { expiresIn: '8h' }, (err, token) => {
+          jwt.sign({ data, restore_auth_binding: req.data.restore_auth_binding }, process.env.JWT_SECRET, { expiresIn: '8h' }, (err, token) => {
             if (err) {
               console.error('Error signing token: ', err);
               res.status(500).json({ error: 'Error signing token' });
@@ -7841,6 +7889,7 @@ async function validateRequiredSurveyAnswersForUser(connection, payload) {
       `select uq.question_id, uqa.answer_id
        from user_question_answer uqa
        inner join user_question uq on uq.id = uqa.user_question_id
+       inner join answer a on a.id = uqa.answer_id and a.question_id = uq.question_id and a.enabled = 'Y'
        where uqa.user_question_id in (${userQuestionPlaceholders})`,
       latestUserQuestionIds
     );
@@ -7893,7 +7942,7 @@ async function validateRequiredSurveyAnswersForUser(connection, payload) {
 
     const latestUserRow = latestUserRowByQuestionId.get(question.id);
     const selectedCount = selectedAnswerIdsByQuestionId.get(question.id)?.size || 0;
-    const hasMeaningfulAnswer = hasMeaningfulUserAnswerState(question.answer_type_id, {
+    const hasMeaningfulAnswer = latestUserRow?.answer_type_id === question.answer_type_id && hasMeaningfulUserAnswerState(question.answer_type_id, {
       answer_text: latestUserRow?.answer_text,
       answer_number: latestUserRow?.answer_number,
       selected_answer_count: selectedCount
@@ -9947,405 +9996,58 @@ router.get('/survey/questions', verifyToken, async (req, res) => {
  * (QR/PIN/phone) can also ask "does this beneficiary still owe answers at this
  * location?" for an arbitrary user id (the volunteer's JWT is not the beneficiary's).
  */
-async function buildOnboardPendingQuestions(userId, locationId, includeGenealogy) {
-      const [rows] = await mysqlConnection.promise().query(
-        `SELECT
-          q.id as question_id,
-          q.name AS question_name_en,
-          q.name_es AS question_name_es,
-          q.\`order\` AS question_order,
-          q.answer_type_id,
-          q.\`required\` as question_required,
-          q.depends_on_question_id,
-          q.depends_on_answer_id,
-          a.id as answer_id,
-          a.\`order\` AS answer_order,
-          a.name AS answer_name_en,
-          a.name_es AS answer_name_es,
-          GREATEST(
-            COALESCE(q.updated_at, q.created_at, '2000-01-01'),
-            COALESCE(ql.updated_at, ql.created_at, '2000-01-01')
-          ) AS available_since
-        FROM question as q
-        INNER JOIN question_location as ql ON q.id = ql.question_id
-        LEFT JOIN answer as a ON q.id = a.question_id AND a.enabled = 'Y'
-        WHERE q.enabled = 'Y' AND (ql.location_id = ? AND ql.enabled = 'Y')
-        ORDER BY q.\`order\` ASC, q.id ASC, a.\`order\` ASC, a.id ASC`,
-        [locationId]
-      );
-
-      const questionById = new Map();
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        if (!questionById.has(row.question_id)) {
-          questionById.set(row.question_id, {
-            id: row.question_id,
-            name_en: row.question_name_en,
-          name_es: row.question_name_es,
-            order: row.question_order,
-            depends_on_question_id: row.depends_on_question_id,
-            depends_on_answer_id: row.depends_on_answer_id,
-            answer_type_id: row.answer_type_id,
-            required: normalizeSurveyRequired(row.question_required) || 'N',
-            available_since: row.available_since || null,
-            answers: []
-          });
-        }
-
-        if (row.answer_id) {
-          questionById.get(row.question_id).answers.push({
-            question_id: row.question_id,
-            id: row.answer_id,
-            order: row.answer_order,
-            name_en: row.answer_name_en,
-          name_es: row.answer_name_es
-          });
-        }
-      }
-
-      const childQuestionIdsByParentId = new Map();
-      for (const question of questionById.values()) {
-        const parentQuestionId = parseSurveyNullablePositiveInt(question.depends_on_question_id);
-        if (!parentQuestionId) {
-          continue;
-        }
-        if (!childQuestionIdsByParentId.has(parentQuestionId)) {
-          childQuestionIdsByParentId.set(parentQuestionId, []);
-        }
-        childQuestionIdsByParentId.get(parentQuestionId).push(question.id);
-      }
-
-      const [latestUserQuestionRows] = await mysqlConnection.promise().query(
-        `select
-           uq.id,
-           uq.question_id,
-           uq.answer_type_id,
-           uq.answer_text,
-           uq.answer_number,
-           coalesce(uq.updated_at, uq.creation_date) as last_answered_at,
-           (select count(1) from user_question_answer uqa where uqa.user_question_id = uq.id) as selected_answer_count
-         from user_question uq
-         where uq.user_id = ?
-           and uq.id = (
-             select max(uq2.id)
-             from user_question uq2
-             where uq2.user_id = uq.user_id and uq2.question_id = uq.question_id
-           )`,
-        [userId]
-      );
-      const respondedQuestionIds = new Set();
-      const answeredQuestionIds = new Set();
-      const lastAnsweredAtByQuestionId = new Map();
-      for (let i = 0; i < latestUserQuestionRows.length; i++) {
-        const row = latestUserQuestionRows[i];
-        respondedQuestionIds.add(row.question_id);
-        lastAnsweredAtByQuestionId.set(row.question_id, row.last_answered_at);
-        if (hasMeaningfulUserAnswerState(row.answer_type_id, row)) {
-          answeredQuestionIds.add(row.question_id);
-        }
-      }
-
-      const pendingQuestionIds = [];
-      // Answered questions that were modified after the user's last answer
-      // (e.g., admin added new answer options) — need to be re-shown
-      const answeredModifiedQuestionIds = [];
-      for (const questionId of questionById.keys()) {
-        if (!answeredQuestionIds.has(questionId)) {
-          pendingQuestionIds.push(questionId);
-        } else if (includeGenealogy) {
-          const q = questionById.get(questionId);
-          const lastAnswered = lastAnsweredAtByQuestionId.get(questionId);
-          if (q && q.available_since && lastAnswered &&
-              new Date(q.available_since) > new Date(lastAnswered)) {
-            answeredModifiedQuestionIds.push(questionId);
-          }
-        }
-      }
-      const pendingQuestionIdSet = new Set(pendingQuestionIds);
-
-      const selectedQuestionIds = new Set();
-      const genealogyInjectedQuestionIds = new Set();
-      if (includeGenealogy) {
-        // Collect all ancestor question IDs that have been previously answered
-        // so we can query the user's actual answer choices for reachability checks
-        const answeredAncestorIds = new Set();
-        // Collect ancestors for pending questions
-        for (let i = 0; i < pendingQuestionIds.length; i++) {
-          const pq = questionById.get(pendingQuestionIds[i]);
-          if (pq && pq.depends_on_question_id) {
-            let curId = pq.depends_on_question_id;
-            const vis = new Set();
-            while (curId && !vis.has(curId)) {
-              vis.add(curId);
-              if (respondedQuestionIds.has(curId)) {
-                answeredAncestorIds.add(curId);
-              }
-              const cur = questionById.get(curId);
-              if (!cur || !cur.depends_on_question_id) break;
-              curId = cur.depends_on_question_id;
-            }
-          }
-        }
-        // Also collect ancestors for answered-but-modified questions
-        for (let i = 0; i < answeredModifiedQuestionIds.length; i++) {
-          const mq = questionById.get(answeredModifiedQuestionIds[i]);
-          if (mq && mq.depends_on_question_id) {
-            let curId = mq.depends_on_question_id;
-            const vis = new Set();
-            while (curId && !vis.has(curId)) {
-              vis.add(curId);
-              if (respondedQuestionIds.has(curId)) {
-                answeredAncestorIds.add(curId);
-              }
-              const cur = questionById.get(curId);
-              if (!cur || !cur.depends_on_question_id) break;
-              curId = cur.depends_on_question_id;
-            }
-          }
-        }
-
-        // Query the user's latest answer_ids for each answered ancestor
-        // (only for selectable types, used for reachability check)
-        const userAnswersByQuestionId = new Map();
-        if (answeredAncestorIds.size > 0) {
-          const ancestorIdArr = [...answeredAncestorIds];
-          const ph = ancestorIdArr.map(() => '?').join(',');
-          const [userAnswerRows] = await mysqlConnection.promise().query(
-            `SELECT uq.question_id, uqa.answer_id
-             FROM user_question uq
-             INNER JOIN user_question_answer uqa ON uq.id = uqa.user_question_id
-             WHERE uq.user_id = ? AND uq.question_id IN (${ph})
-             AND uq.id = (
-               SELECT MAX(uq2.id)
-               FROM user_question uq2
-               WHERE uq2.user_id = uq.user_id AND uq2.question_id = uq.question_id
-             )`,
-            [userId, ...ancestorIdArr]
-          );
-          for (let i = 0; i < userAnswerRows.length; i++) {
-            const row = userAnswerRows[i];
-            if (!userAnswersByQuestionId.has(row.question_id)) {
-              userAnswersByQuestionId.set(row.question_id, new Set());
-            }
-            userAnswersByQuestionId.get(row.question_id).add(row.answer_id);
-          }
-        }
-
-        // Check if a question is reachable through the user's current answer chain
-        const reachabilityCache = new Map();
-        function isQuestionReachable(questionId, visited) {
-          if (reachabilityCache.has(questionId)) return reachabilityCache.get(questionId);
-          if (!visited) visited = new Set();
-          if (visited.has(questionId)) {
-            reachabilityCache.set(questionId, false);
-            return false;
-          }
-          visited.add(questionId);
-          const question = questionById.get(questionId);
-          if (!question) {
-            reachabilityCache.set(questionId, false);
-            return false;
-          }
-          // Root question (no dependency) → always reachable
-          if (!question.depends_on_question_id) {
-            reachabilityCache.set(questionId, true);
-            return true;
-          }
-          // Check if user answered the parent with the required answer
-          const parentAnswers = userAnswersByQuestionId.get(question.depends_on_question_id);
-          if (!parentAnswers || !parentAnswers.has(question.depends_on_answer_id)) {
-            reachabilityCache.set(questionId, false);
-            return false;
-          }
-          // Parent has correct answer – check if parent itself is reachable
-          const parentReachable = isQuestionReachable(question.depends_on_question_id, visited);
-          reachabilityCache.set(questionId, parentReachable);
-          return parentReachable;
-        }
-
-        for (let i = 0; i < pendingQuestionIds.length; i++) {
-          const pendingQuestionId = pendingQuestionIds[i];
-          const pendingQuestion = questionById.get(pendingQuestionId);
-
-          // No dependency → always include as regular pending question
-          if (!pendingQuestion || !pendingQuestion.depends_on_question_id) {
-            selectedQuestionIds.add(pendingQuestionId);
-            continue;
-          }
-
-          // If the question is currently reachable through the user's answer chain,
-          // check if it was modified after ancestors were last answered.
-          // If so, include its genealogy for re-answering (e.g., admin added new answer options).
-          if (isQuestionReachable(pendingQuestionId)) {
-            const reachableEffectiveDate = pendingQuestion.available_since;
-            if (reachableEffectiveDate && pendingQuestion.depends_on_question_id) {
-              let reachableMaxAncestorDate = null;
-              let reachableCurId = pendingQuestion.depends_on_question_id;
-              const reachableAncestorChain = [];
-              const reachableVisited = new Set();
-
-              while (reachableCurId && !reachableVisited.has(reachableCurId)) {
-                reachableVisited.add(reachableCurId);
-                reachableAncestorChain.push(reachableCurId);
-                const lastAnswered = lastAnsweredAtByQuestionId.get(reachableCurId);
-                if (lastAnswered) {
-                  if (!reachableMaxAncestorDate || new Date(lastAnswered) > new Date(reachableMaxAncestorDate)) {
-                    reachableMaxAncestorDate = lastAnswered;
-                  }
-                }
-                const curQuestion = questionById.get(reachableCurId);
-                if (!curQuestion || !curQuestion.depends_on_question_id) break;
-                reachableCurId = curQuestion.depends_on_question_id;
-              }
-
-              // Question was modified AFTER ancestors were last answered → include genealogy
-              if (!reachableMaxAncestorDate || new Date(reachableMaxAncestorDate) < new Date(reachableEffectiveDate)) {
-                selectedQuestionIds.add(pendingQuestionId);
-                for (let j = 0; j < reachableAncestorChain.length; j++) {
-                  selectedQuestionIds.add(reachableAncestorChain[j]);
-                  if (respondedQuestionIds.has(reachableAncestorChain[j])) {
-                    genealogyInjectedQuestionIds.add(reachableAncestorChain[j]);
-                  }
-                }
-                continue;
-              }
-            }
-
-            selectedQuestionIds.add(pendingQuestionId);
-            continue;
-          }
-
-          // Question is NOT reachable → check if the ancestry was already addressed
-          // by comparing ancestor answer dates with the question's available_since date
-          const effectiveDate = pendingQuestion.available_since;
-          let maxAncestorAnswerDate = null;
-          let currentQuestionId = pendingQuestion.depends_on_question_id;
-          const ancestorChain = [];
-          const visitedTimestamp = new Set();
-
-          while (currentQuestionId && !visitedTimestamp.has(currentQuestionId)) {
-            visitedTimestamp.add(currentQuestionId);
-            ancestorChain.push(currentQuestionId);
-            const lastAnswered = lastAnsweredAtByQuestionId.get(currentQuestionId);
-            if (lastAnswered) {
-              if (!maxAncestorAnswerDate || new Date(lastAnswered) > new Date(maxAncestorAnswerDate)) {
-                maxAncestorAnswerDate = lastAnswered;
-              }
-            }
-            const currentQuestion = questionById.get(currentQuestionId);
-            if (!currentQuestion || !currentQuestion.depends_on_question_id) break;
-            currentQuestionId = currentQuestion.depends_on_question_id;
-          }
-
-          // If any ancestor was answered AFTER the question became available,
-          // the user already had the chance to unlock it and chose not to → skip
-          if (effectiveDate && maxAncestorAnswerDate && new Date(maxAncestorAnswerDate) >= new Date(effectiveDate)) {
-            continue;
-          }
-
-          // Otherwise, include the pending question and its genealogy for re-answering
-          selectedQuestionIds.add(pendingQuestionId);
-          for (let j = 0; j < ancestorChain.length; j++) {
-            selectedQuestionIds.add(ancestorChain[j]);
-            if (respondedQuestionIds.has(ancestorChain[j])) {
-              genealogyInjectedQuestionIds.add(ancestorChain[j]);
-            }
-          }
-        }
-
-        // Include answered-but-modified questions and their ancestor chains
-        // so users can update answers after admin modifications (e.g., new options added)
-        for (let i = 0; i < answeredModifiedQuestionIds.length; i++) {
-          const modifiedQId = answeredModifiedQuestionIds[i];
-          selectedQuestionIds.add(modifiedQId);
-          genealogyInjectedQuestionIds.add(modifiedQId);
-
-          const modifiedQ = questionById.get(modifiedQId);
-          if (modifiedQ && modifiedQ.depends_on_question_id) {
-            let curId = modifiedQ.depends_on_question_id;
-            const vis = new Set();
-            while (curId && !vis.has(curId)) {
-              vis.add(curId);
-              selectedQuestionIds.add(curId);
-              if (respondedQuestionIds.has(curId)) {
-                genealogyInjectedQuestionIds.add(curId);
-              }
-              const cur = questionById.get(curId);
-              if (!cur || !cur.depends_on_question_id) break;
-              curId = cur.depends_on_question_id;
-            }
-          }
-
-          // Include descendant chain (children/grandchildren) so dependent
-          // questions are also re-evaluated after parent edits.
-          const descendantVisited = new Set();
-          const descendantQueue = [modifiedQId];
-          while (descendantQueue.length > 0) {
-            const currentId = descendantQueue.shift();
-            if (!currentId || descendantVisited.has(currentId)) {
-              continue;
-            }
-            descendantVisited.add(currentId);
-
-            const childIds = childQuestionIdsByParentId.get(currentId) || [];
-            for (let j = 0; j < childIds.length; j++) {
-              const childId = childIds[j];
-              descendantQueue.push(childId);
-              selectedQuestionIds.add(childId);
-              if (respondedQuestionIds.has(childId)) {
-                genealogyInjectedQuestionIds.add(childId);
-              }
-            }
-          }
-        }
-      } else {
-        for (let i = 0; i < pendingQuestionIds.length; i++) {
-          selectedQuestionIds.add(pendingQuestionIds[i]);
-        }
-      }
-
-      // Safety pass: ensure all parents of selected questions are included
-      // so the frontend can always render the full dependency chain
-      if (includeGenealogy) {
-        const questionsToCheck = [...selectedQuestionIds];
-        for (let i = 0; i < questionsToCheck.length; i++) {
-          const q = questionById.get(questionsToCheck[i]);
-          if (q && q.depends_on_question_id && questionById.has(q.depends_on_question_id)) {
-            if (!selectedQuestionIds.has(q.depends_on_question_id)) {
-              selectedQuestionIds.add(q.depends_on_question_id);
-              questionsToCheck.push(q.depends_on_question_id);
-              if (respondedQuestionIds.has(q.depends_on_question_id)) {
-                genealogyInjectedQuestionIds.add(q.depends_on_question_id);
-              }
-            }
-          }
-        }
-      }
-
-      const questions = [...questionById.values()]
-        .filter(question => selectedQuestionIds.has(question.id))
-        .sort((a, b) => {
-          if (a.order !== b.order) return a.order - b.order;
-          return a.id - b.id;
-        })
-        .map(question => {
-          const previouslyAnswered = respondedQuestionIds.has(question.id);
-          const requiresReanswer = includeGenealogy
-            ? pendingQuestionIdSet.has(question.id) || (previouslyAnswered && genealogyInjectedQuestionIds.has(question.id))
-            : false;
-
-          return {
-            ...question,
-            requires_reanswer: requiresReanswer,
-            previously_answered: previouslyAnswered,
-            answers: [...question.answers].sort((a, b) => {
-              if (a.order !== b.order) return a.order - b.order;
-              return a.id - b.id;
-            })
-          };
-        });
-
-      return questions;
+async function buildOnboardPendingQuestions(userId, locationId, includeGenealogy, connection = mysqlConnection.promise()) {
+  const [rows] = await connection.query(
+    `SELECT q.id AS question_id, q.name AS name_en, q.name_es, q.\`order\` AS question_order,
+       q.answer_type_id, q.\`required\` AS question_required,
+       q.depends_on_question_id, q.depends_on_answer_id,
+       a.id AS answer_id, a.\`order\` AS answer_order, a.name AS answer_name_en, a.name_es AS answer_name_es
+     FROM question q
+     LEFT JOIN answer a ON a.question_id = q.id AND a.enabled = 'Y'
+     WHERE q.enabled = 'Y' AND EXISTS (
+       SELECT 1 FROM question_location ql WHERE ql.question_id = q.id AND ql.location_id = ? AND ql.enabled = 'Y'
+     ) ORDER BY q.\`order\`, q.id, a.\`order\`, a.id`, [locationId]);
+  const questionById = new Map();
+  for (const row of rows) {
+    if (!questionById.has(row.question_id)) {
+      questionById.set(row.question_id, {
+        id: row.question_id, name_en: row.name_en, name_es: row.name_es,
+        order: row.question_order, answer_type_id: row.answer_type_id,
+        required: normalizeSurveyRequired(row.question_required) || 'N',
+        depends_on_question_id: row.depends_on_question_id,
+        depends_on_answer_id: row.depends_on_answer_id, answers: []
+      });
+    }
+    if (row.answer_id) questionById.get(row.question_id).answers.push({
+      question_id: row.question_id, id: row.answer_id, order: row.answer_order,
+      name_en: row.answer_name_en, name_es: row.answer_name_es
+    });
+  }
+  const [answerRows] = await connection.query(
+    `SELECT uq.question_id, uq.answer_type_id, uq.answer_text, uq.answer_number, a.id AS answer_id
+     FROM user_question uq
+     LEFT JOIN user_question_answer uqa ON uqa.user_question_id = uq.id
+     LEFT JOIN answer a ON a.id = uqa.answer_id AND a.question_id = uq.question_id AND a.enabled = 'Y'
+     WHERE uq.user_id = ? AND uq.id = (
+       SELECT MAX(latest.id) FROM user_question latest WHERE latest.user_id = uq.user_id AND latest.question_id = uq.question_id
+     )`, [userId]);
+  const answersById = new Map();
+  for (const row of answerRows) {
+    const question = questionById.get(row.question_id);
+    if (!question || Number(question.answer_type_id) !== Number(row.answer_type_id)) continue;
+    if (row.answer_type_id === 1 && row.answer_text != null && String(row.answer_text).trim()) {
+      answersById.set(row.question_id, row.answer_text);
+    } else if (row.answer_type_id === 2 && row.answer_number != null) {
+      answersById.set(row.question_id, Number(row.answer_number));
+    } else if (row.answer_type_id === 3 && row.answer_id) {
+      answersById.set(row.question_id, row.answer_id);
+    } else if (row.answer_type_id === 4 && row.answer_id) {
+      const selected = answersById.get(row.question_id) || [];
+      if (!selected.includes(row.answer_id)) selected.push(row.answer_id);
+      answersById.set(row.question_id, selected);
+    }
+  }
+  return selectPendingSurveyQuestions([...questionById.values()], answersById, includeGenealogy);
 }
 
 /**
@@ -10372,19 +10074,17 @@ async function countPendingOnboardQuestions(userId, locationId) {
 
 router.get('/onBoard/questions', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-
-  if (cabecera.role === 'beneficiary') {
-    const location_id = req.query.location_id || null;
+  const locationId = parseSurveyPositiveInt(req.query.location_id);
+  if (!locationId) return res.status(400).json('location_id is required');
+  try {
+    const target = await resolveOnboardSurveyUser(cabecera, req.query.beneficiary_id, locationId);
+    if (target.error) return res.status(target.status).json(target.error);
     const includeGenealogy = String(req.query.include_genealogy || 'false').toLowerCase() === 'true';
-    try {
-      const questions = await buildOnboardPendingQuestions(cabecera.id, location_id, includeGenealogy);
-      res.json(questions);
-    } catch (error) {
-      console.log(error);
-      res.status(500).json('Internal server error');
-    }
-  } else {
-    res.status(401).json('Unauthorized');
+    const questions = await buildOnboardPendingQuestions(target.userId, locationId, includeGenealogy);
+    res.json(questions);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json('Internal server error');
   }
 });
 
@@ -10417,10 +10117,9 @@ router.get('/register/questions', verifyTokenOptional, async (req, res) => {
                   a.name AS answer_name_en,
                   a.name_es AS answer_name_es
                   FROM question as q
-                  ${location_id ? 'INNER JOIN question_location as ql ON q.id = ql.question_id' : ''}
                   LEFT JOIN answer as a ON q.id = a.question_id
                   WHERE q.enabled = 'Y' AND (a.enabled = 'Y' OR a.id IS NULL) 
-                  ${location_id ? 'AND (ql.location_id = ? AND ql.enabled = \'Y\')' : 'AND q.answer_type_id IN (3, 4)'}
+                  ${location_id ? 'AND EXISTS (SELECT 1 FROM question_location ql WHERE ql.question_id = q.id AND ql.location_id = ? AND ql.enabled = \'Y\')' : 'AND q.answer_type_id IN (3, 4)'}
                   ${client_questions}
                   ORDER BY q.\`order\` ASC, q.id ASC, a.\`order\` ASC, a.id ASC`;
     const queryParams = location_id ? [location_id] : [];
@@ -11907,7 +11606,7 @@ router.put('/settings/password', verifyToken, async (req, res) => {
               'update user set password = ? where id = ?', [passwordHash, user_id]
             );
             if (rows2.affectedRows > 0) {
-              res.json('Password updated successfully');
+              res.json(await issueSessionForUser(user_id, mysqlConnection.promise(), process.env.JWT_SECRET));
             } else {
               res.status(500).json('Could not update password');
             }
