@@ -2505,12 +2505,12 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Volunteer registration notification recipients (admin only)
+// Volunteer registration notification recipients (admin and operations manager)
 // These emails receive a copy of every new volunteer registration form.
 // ---------------------------------------------------------------------------
 router.get('/volunteer/notification-recipients', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
     return res.status(401).json('No autorizado');
   }
 
@@ -2525,7 +2525,7 @@ router.get('/volunteer/notification-recipients', verifyToken, async (req, res) =
 
 router.put('/volunteer/notification-recipients', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role !== 'admin') {
+  if (cabecera.role !== 'admin' && cabecera.role !== 'opsmanager') {
     return res.status(401).json('No autorizado');
   }
 
@@ -20579,7 +20579,7 @@ router.post('/table/user', verifyToken, async (req, res) => {
 router.post('/table/volunteer', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     const filters = req.body;
     let from_date = filters.from_date || '1970-01-01';
     let to_date = filters.to_date || '2100-01-01';
@@ -20735,7 +20735,7 @@ router.post('/table/volunteer', verifyToken, async (req, res) => {
 
 router.post('/table/volunteer/download-csv', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin' || cabecera.role === 'client') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'client') {
     try {
       const filters = req.body;
       let from_date = filters.from_date || '1970-01-01';
@@ -20841,7 +20841,7 @@ router.post('/table/volunteer/download-csv', verifyToken, async (req, res) => {
       let csvData = csvStringifier.getHeaderString();
       csvData += csvStringifier.stringifyRecords(rows);
 
-      res.setHeader('Content-disposition', 'attachment; filename=participants-table.csv');
+      res.setHeader('Content-disposition', 'attachment; filename=volunteers-table.csv');
       res.setHeader('Content-type', 'text/csv; charset=utf-8');
       res.send(csvData);
 
@@ -20849,6 +20849,8 @@ router.post('/table/volunteer/download-csv', verifyToken, async (req, res) => {
       console.log(err);
       res.status(500).json('Internal server error');
     }
+  } else {
+    res.status(401).json('No autorizado');
   }
 }
 );
@@ -24118,7 +24120,7 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
 
 router.get('/view/volunteer/:idVolunteer', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
     try {
       const { idVolunteer } = req.params;
       const language = req.query.language || 'en';
@@ -24168,7 +24170,7 @@ router.get('/view/volunteer/images/:idVolunteer', verifyToken, async (req, res) 
   const cabecera = JSON.parse(req.data.data);
   const { idVolunteer } = req.params;
 
-  if (cabecera.role === 'admin') {
+  if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
 
     const [rows] = await mysqlConnection.promise().query(`
                           select id, file, DATE_FORMAT(CONVERT_TZ(creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') AS creation_date
