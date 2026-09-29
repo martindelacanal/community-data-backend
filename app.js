@@ -29,6 +29,12 @@ app.use('/api/auth/restore', createRestoreCredentialsRouter({
 const userRoute = require('./api/routes/user');
 app.use('/api',userRoute);
 
+const { createTicketAnalysisRouter } = require('./api/routes/ticketAnalysis');
+app.use('/api', createTicketAnalysisRouter({
+  pool: require('./api/connection/connection').promise(),
+  logger: require('./api/utils/logger'),
+}));
+
 const alertsRoute = require('./api/routes/alerts');
 app.use('/api',alertsRoute);
 
