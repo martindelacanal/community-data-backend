@@ -98,35 +98,41 @@ function validateCsvDriveSyncConfig(label, config) {
 }
 
 async function syncCsvStreamToDrive({ label, folderId, fileId, fileName, body, getRowCount }) {
-  validateCsvDriveSyncConfig(label, { folderId, fileId });
-  const existingFile = await getGoogleDriveFileMetadata(fileId);
-  const parents = Array.isArray(existingFile.parents) ? existingFile.parents : [];
-  if (parents.length > 0 && !parents.includes(folderId)) {
-    throw new Error(
-      `Google Drive file ${fileId} is not inside folder ${folderId}.`
+  try {
+    validateCsvDriveSyncConfig(label, { folderId, fileId });
+    const existingFile = await getGoogleDriveFileMetadata(fileId);
+    const parents = Array.isArray(existingFile.parents) ? existingFile.parents : [];
+    if (parents.length > 0 && !parents.includes(folderId)) {
+      throw new Error(
+        `Google Drive file ${fileId} is not inside folder ${folderId}.`
+      );
+    }
+
+    const updatedFile = await updateGoogleDriveFile({
+      fileId,
+      fileName,
+      body,
+      mimeType: 'text/csv; charset=utf-8'
+    });
+
+    const rowCount = typeof getRowCount === 'function' ? getRowCount() : 0;
+    logger.info(
+      `${label} Drive sync completed. fileId=${updatedFile.id || fileId}, rows=${rowCount}`
     );
+
+    return {
+      label,
+      skipped: false,
+      fileId: updatedFile.id || fileId,
+      fileName: updatedFile.name || fileName,
+      rowCount,
+      webViewLink: updatedFile.webViewLink || existingFile.webViewLink || null
+    };
+  } finally {
+    // Failed metadata validation or upload must not leave a generator/query
+    // running after the scheduled task moves on to its next export.
+    body?.destroy();
   }
-
-  const updatedFile = await updateGoogleDriveFile({
-    fileId,
-    fileName,
-    body,
-    mimeType: 'text/csv; charset=utf-8'
-  });
-
-  const rowCount = typeof getRowCount === 'function' ? getRowCount() : 0;
-  logger.info(
-    `${label} Drive sync completed. fileId=${updatedFile.id || fileId}, rows=${rowCount}`
-  );
-
-  return {
-    label,
-    skipped: false,
-    fileId: updatedFile.id || fileId,
-    fileName: updatedFile.name || fileName,
-    rowCount,
-    webViewLink: updatedFile.webViewLink || existingFile.webViewLink || null
-  };
 }
 
 async function syncHealthMetricsCsvToDrive({ ignoreEnabledFlag = false } = {}) {

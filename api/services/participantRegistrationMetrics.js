@@ -1,12 +1,13 @@
 const mysqlConnection = require('../connection/connection');
 const { EXCLUDED_REPORT_USER_IDS } = require('./rawDataReport');
+const { createBoundedAsyncCache } = require('./boundedAsyncCache');
 
 const PARTICIPANT_LA_TIME_ZONE_SQL = "'America/Los_Angeles'";
 const PARTICIPANT_UTC_TIME_ZONE_SQL = "'+00:00'";
-const PARTICIPANT_REGISTER_CACHE_TTL_MS = 5000;
+const PARTICIPANT_REGISTER_CACHE_TTL_MS = 30000;
 const PARTICIPANT_REGISTER_CACHE_MAX_ENTRIES = 100;
 
-const participantRegisterCache = new Map();
+const participantRegisterCache = createBoundedAsyncCache({ maxEntries: PARTICIPANT_REGISTER_CACHE_MAX_ENTRIES });
 
 function parseDateOnly(value) {
   if (!value) {
@@ -298,57 +299,8 @@ function buildRegisterDetailsQuery(clientId, filters, excludedUserIds) {
   return { sql, params };
 }
 
-function cleanupParticipantRegisterCache() {
-  if (participantRegisterCache.size <= PARTICIPANT_REGISTER_CACHE_MAX_ENTRIES) {
-    return;
-  }
-
-  const now = Date.now();
-  for (const [cacheKey, cacheEntry] of participantRegisterCache.entries()) {
-    if (cacheEntry.expiresAt <= now && !cacheEntry.promise) {
-      participantRegisterCache.delete(cacheKey);
-    }
-  }
-}
-
 async function getCachedParticipantRegisterMetrics(cacheKey, computeFn) {
-  cleanupParticipantRegisterCache();
-
-  const now = Date.now();
-  const cachedEntry = participantRegisterCache.get(cacheKey);
-
-  if (cachedEntry) {
-    if (cachedEntry.value !== undefined && cachedEntry.expiresAt > now) {
-      return cachedEntry.value;
-    }
-
-    if (cachedEntry.promise) {
-      return cachedEntry.promise;
-    }
-
-    participantRegisterCache.delete(cacheKey);
-  }
-
-  const pendingPromise = (async () => {
-    try {
-      const value = await computeFn();
-      participantRegisterCache.set(cacheKey, {
-        value,
-        expiresAt: Date.now() + PARTICIPANT_REGISTER_CACHE_TTL_MS
-      });
-      return value;
-    } catch (error) {
-      participantRegisterCache.delete(cacheKey);
-      throw error;
-    }
-  })();
-
-  participantRegisterCache.set(cacheKey, {
-    promise: pendingPromise,
-    expiresAt: now + PARTICIPANT_REGISTER_CACHE_TTL_MS
-  });
-
-  return pendingPromise;
+  return participantRegisterCache.getOrCompute(cacheKey, PARTICIPANT_REGISTER_CACHE_TTL_MS, computeFn);
 }
 
 async function fetchParticipantRegisterCounts(clientId, filters, excludedUserIds) {

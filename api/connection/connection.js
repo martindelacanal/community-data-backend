@@ -1,6 +1,16 @@
 // const mysql = require('mysql');
 const mysql = require('mysql2');
 
+function boundedPoolInteger(value, fallback, maximum) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= maximum ? parsed : fallback;
+}
+
+// Leave room for administration/background jobs on the current 60-connection
+// database. These limits are per Node process, not per deployment.
+const connectionLimit = boundedPoolInteger(process.env.DB_POOL_CONNECTION_LIMIT, 15, 40);
+const queueLimit = boundedPoolInteger(process.env.DB_POOL_QUEUE_LIMIT, 100, 1000);
+
 // const mysqlConnection = mysql.createConnection({
 //   host: process.env.DB_HOST,
 //   user: process.env.DB_USER,
@@ -11,7 +21,9 @@ const mysql = require('mysql2');
 // });
 
 const mysqlConnection = mysql.createPool({
-  connectionLimit : 1000,
+  connectionLimit,
+  maxIdle: Math.min(connectionLimit, 5),
+  idleTimeout: 60000,
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
@@ -22,7 +34,7 @@ const mysqlConnection = mysql.createPool({
   // Increase timeouts for large content operations
   connectTimeout: 60000, // 60 seconds to establish connection
   waitForConnections: true,
-  queueLimit: 0
+  queueLimit
 });
 
 // mysqlConnection.connect( err => {

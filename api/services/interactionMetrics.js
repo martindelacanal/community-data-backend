@@ -278,12 +278,12 @@ function buildScopedFilter({
   const params = [];
 
   if (filters.from_date) {
-    clauses.push(`DATE(${alias}.${dateColumn}) >= ?`);
+    clauses.push(`${alias}.${dateColumn} >= ?`);
     params.push(filters.from_date);
   }
 
   if (filters.to_date) {
-    clauses.push(`DATE(${alias}.${dateColumn}) <= ?`);
+    clauses.push(`${alias}.${dateColumn} < DATE_ADD(?, INTERVAL 1 DAY)`);
     params.push(filters.to_date);
   }
 
@@ -434,14 +434,8 @@ async function fetchInteractionSummary(connection, language = 'en', rawFilters =
     eventScope.params
   );
 
-  const [[actionRow]] = await connection.query(
-    `
-      SELECT COUNT(*) AS total_actions
-      FROM interaction_events e
-      ${eventScope.whereClause}
-    `,
-    eventScope.params
-  );
+  // The daily buckets already contain every action in the same scope.
+  const actionRow = { total_actions: actionsByDayRows.reduce((sum, row) => sum + Number(row.total || 0), 0) };
 
   const [pageTypeRows] = await connection.query(
     `
@@ -1016,12 +1010,12 @@ function buildAcquisitionCohortFilter(filters) {
   const params = [];
 
   if (filters.from_date) {
-    clauses.push('DATE(fs.first_seen_at) >= ?');
+    clauses.push('fs.first_seen_at >= ?');
     params.push(filters.from_date);
   }
 
   if (filters.to_date) {
-    clauses.push('DATE(fs.first_seen_at) <= ?');
+    clauses.push('fs.first_seen_at < DATE_ADD(?, INTERVAL 1 DAY)');
     params.push(filters.to_date);
   }
 
@@ -1051,12 +1045,12 @@ function buildAcquisitionActiveFilter(filters) {
   const params = [];
 
   if (filters.from_date) {
-    clauses.push('DATE(s.started_at) >= ?');
+    clauses.push('s.started_at >= ?');
     params.push(filters.from_date);
   }
 
   if (filters.to_date) {
-    clauses.push('DATE(s.started_at) <= ?');
+    clauses.push('s.started_at < DATE_ADD(?, INTERVAL 1 DAY)');
     params.push(filters.to_date);
   }
 
@@ -1090,37 +1084,41 @@ async function fetchInteractionAcquisition(connection, language = 'en', rawFilte
   const cohort = buildAcquisitionCohortFilter(filters);
   const active = buildAcquisitionActiveFilter(filters);
 
-  // New visitors (first opens) per day and channel, inside the selected range.
-  const [timelineRows] = await connection.query(
+  // Materialize first touch once for both breakdowns. Keep the date/platform
+  // filter AFTER ranking the entire history: an old visitor must stay returning.
+  const [acquisitionRows] = await connection.query(
     `
-      ${FIRST_SESSIONS_CTE}
+      ${FIRST_SESSIONS_CTE}, acquisition_cohort AS (
+        SELECT fs.first_seen_at, fs.first_channel, fs.first_source
+        FROM first_sessions fs
+        ${cohort.whereClause}
+      )
       SELECT
+        'timeline' AS breakdown,
         DATE_FORMAT(fs.first_seen_at, '%Y-%m-%d') AS metric_date,
         COALESCE(NULLIF(fs.first_channel, ''), 'unknown') AS metric_key,
         COUNT(*) AS total_new
-      FROM first_sessions fs
-      ${cohort.whereClause}
+      FROM acquisition_cohort fs
       GROUP BY DATE(fs.first_seen_at), metric_key
-      ORDER BY DATE(fs.first_seen_at) ASC
-    `,
-    cohort.params
-  );
-
-  // Acquisition source (utm_source first-touch) breakdown inside the range.
-  const [sourceRows] = await connection.query(
-    `
-      ${FIRST_SESSIONS_CTE}
+      UNION ALL
       SELECT
-        fs.first_source AS metric_key,
-        COUNT(*) AS total_new
-      FROM first_sessions fs
-      ${cohort.whereClause}
-      GROUP BY fs.first_source
-      ORDER BY total_new DESC
-      LIMIT 12
+        'source' AS breakdown,
+        NULL AS metric_date,
+        sources.metric_key,
+        sources.total_new
+      FROM (
+        SELECT fs.first_source AS metric_key, COUNT(*) AS total_new
+        FROM acquisition_cohort fs
+        GROUP BY fs.first_source
+        ORDER BY total_new DESC
+        LIMIT 12
+      ) sources
     `,
     cohort.params
   );
+  const timelineRows = acquisitionRows.filter(row => row.breakdown === 'timeline');
+  const sourceRows = acquisitionRows.filter(row => row.breakdown === 'source')
+    .sort((a, b) => Number(b.total_new) - Number(a.total_new));
 
   // Distinct visitors that were active (had any session) inside the range.
   const [[activeRow]] = await connection.query(

@@ -1,4 +1,4 @@
-const { Readable } = require('stream');
+const { createReportQuery, createReportReadable } = require('./reportStream');
 const mysqlConnection = require('../connection/connection');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const moment = require('moment-timezone');
@@ -10,6 +10,7 @@ const EVENT_TIME_UNMATCHED_THRESHOLD_HOURS = 1;
 const SURVEY_TRAFFIC_LIGHT_DIRECTION_ASCENDING = 'ascending';
 const SURVEY_TRAFFIC_LIGHT_DIRECTION_DESCENDING = 'descending';
 const NOT_COLLECTED_REPORT_VALUE = 'Not collected';
+const defaultQuery = (...args) => mysqlConnection.promise().query(...args);
 
 function chunkArray(items, chunkSize = HEALTH_METRICS_CHUNK_SIZE) {
   if (!Array.isArray(items) || items.length === 0) {
@@ -341,7 +342,7 @@ function buildHealthMetricUserScope(cabecera, filters) {
   };
 }
 
-async function getHealthMetricQuestionCatalog(cabecera, language) {
+async function getHealthMetricQuestionCatalog(cabecera, language, queryRows = defaultQuery) {
   const localizedQuestionName = language === 'es'
     ? 'COALESCE(q.name_es, q.name)'
     : 'COALESCE(q.name, q.name_es)';
@@ -388,7 +389,7 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
     ORDER BY q.\`order\` ASC, q.id ASC, a.\`order\` ASC, a.id ASC
   `;
 
-  const [rows] = await mysqlConnection.promise().query(query, params);
+  const [rows] = await queryRows(query, params);
   const questions = [];
   const questionById = new Map();
 
@@ -437,7 +438,7 @@ async function getHealthMetricQuestionCatalog(cabecera, language) {
   };
 }
 
-async function getHealthMetricUserIds(cabecera, filters) {
+async function getHealthMetricUserIds(cabecera, filters, queryRows = defaultQuery) {
   const { joinSql, whereSql, params } = buildHealthMetricUserScope(cabecera, filters);
   const query = `
     SELECT u.id AS user_id
@@ -447,12 +448,19 @@ async function getHealthMetricUserIds(cabecera, filters) {
     ORDER BY u.id
   `;
 
-  const [rows] = await mysqlConnection.promise().query(query, params);
+  const [rows] = await queryRows(query, params);
   return rows.map(row => row.user_id);
 }
 
-async function getHealthMetricUsers(cabecera, filters) {
-  const { joinSql, whereSql, params } = buildHealthMetricUserScope(cabecera, filters);
+async function getHealthMetricUsers(cabecera, filters, queryRows = defaultQuery, selectedUserIds = null) {
+  // IDs were selected once with the complete report scope. Hydrate only one
+  // bounded page, retaining role and current client membership checks.
+  const scope = selectedUserIds ? {
+    joinSql: cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : '',
+    whereSql: `u.role_id = 5 AND u.id IN (?)${cabecera.role === 'client' ? ' AND cu.client_id = ?' : ''}`,
+    params: cabecera.role === 'client' ? [selectedUserIds, cabecera.client_id] : [selectedUserIds]
+  } : buildHealthMetricUserScope(cabecera, filters);
+  const { joinSql, whereSql, params } = scope;
   const query = `
     SELECT
       u.id AS user_id,
@@ -489,11 +497,11 @@ async function getHealthMetricUsers(cabecera, filters) {
     ORDER BY u.id
   `;
 
-  const [rows] = await mysqlConnection.promise().query(query, params);
+  const [rows] = await queryRows(query, params);
   return rows;
 }
 
-async function getHealthMetricDeliverySummaryByUserIds(userIds, filters) {
+async function getHealthMetricDeliverySummaryByUserIds(userIds, filters, queryRows = defaultQuery) {
   const summaryByUserId = new Map();
   if (!Array.isArray(userIds) || userIds.length === 0) {
     return summaryByUserId;
@@ -502,7 +510,7 @@ async function getHealthMetricDeliverySummaryByUserIds(userIds, filters) {
   const userIdChunks = chunkArray(userIds);
   for (let i = 0; i < userIdChunks.length; i++) {
     const userIdChunk = userIdChunks[i];
-    const [rows] = await mysqlConnection.promise().query(
+    const [rows] = await queryRows(
       `SELECT
          db.receiving_user_id AS user_id,
          GROUP_CONCAT(DISTINCT loc.community_city ORDER BY loc.community_city SEPARATOR ', ') AS locations_visited,
@@ -597,13 +605,13 @@ function getHealthMetricEventTimeValue(eventRow, scannedWindow) {
   return eventRow.event_time || '';
 }
 
-function groupHealthMetricDeliveryEventsByUserId(eventRows) {
+function groupHealthMetricDeliveryEventsByUserId(eventRows, scannedWindows = null) {
   const eventsByUserId = new Map();
-  const scannedWindowByLocationDate = new Map();
+  const scannedWindowByLocationDate = scannedWindows || new Map();
 
   for (let i = 0; i < eventRows.length; i++) {
     const eventRow = eventRows[i];
-    if (eventRow.approved !== 'Y') {
+    if (scannedWindows || eventRow.approved !== 'Y') {
       continue;
     }
 
@@ -658,7 +666,7 @@ function groupHealthMetricDeliveryEventsByUserId(eventRows) {
   return eventsByUserId;
 }
 
-async function getHealthMetricDeliveryEventsByUserIds(userIds, filters) {
+async function getHealthMetricDeliveryEventsByUserIds(userIds, filters, queryRows = defaultQuery, scannedWindows = null) {
   if (!Array.isArray(userIds) || userIds.length === 0) {
     return new Map();
   }
@@ -677,7 +685,7 @@ async function getHealthMetricDeliveryEventsByUserIds(userIds, filters) {
       params.push(filters.locations);
     }
 
-    const [rows] = await mysqlConnection.promise().query(
+    const [rows] = await queryRows(
       `SELECT
          db.id AS delivery_beneficiary_id,
          db.receiving_user_id AS user_id,
@@ -701,10 +709,44 @@ async function getHealthMetricDeliveryEventsByUserIds(userIds, filters) {
     eventRows.push(...rows);
   }
 
-  return groupHealthMetricDeliveryEventsByUserId(eventRows);
+  return groupHealthMetricDeliveryEventsByUserId(eventRows, scannedWindows);
 }
 
-async function getHealthMetricAnswerStateMap(userIds, questionIds, language) {
+// "Unmatched" depends on the first/last approved scan of every selected
+// participant at a location/date. Keep that small aggregate across pages so a
+// scan in a later page can still qualify an earlier participant's event.
+async function getHealthMetricScannedWindows(userIds, filters, queryRows) {
+  const windows = new Map();
+  for (let offset = 0; offset < userIds.length; offset += HEALTH_METRICS_CHUNK_SIZE) {
+    const params = [userIds.slice(offset, offset + HEALTH_METRICS_CHUNK_SIZE), filters.laFromDate, filters.laToDate];
+    if (filters.locations.length) params.push(filters.locations);
+    const [rows] = await queryRows(`SELECT
+        db.location_id,
+        DATE_FORMAT(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles'), '%Y-%m-%d') AS event_date_key,
+        DATE_FORMAT(MIN(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')), '%Y-%m-%d %H:%i:%s') AS first_scan,
+        DATE_FORMAT(MAX(CONVERT_TZ(db.creation_date, '+00:00', 'America/Los_Angeles')), '%Y-%m-%d %H:%i:%s') AS last_scan
+      FROM delivery_beneficiary db
+      WHERE db.receiving_user_id IN (?) AND db.approved = 'Y'
+        AND db.creation_date >= CONVERT_TZ(CONCAT(?, ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+        AND db.creation_date < CONVERT_TZ(CONCAT(DATE_ADD(?, INTERVAL 1 DAY), ' 00:00:00'), 'America/Los_Angeles', '+00:00')
+        ${filters.locations.length ? 'AND db.location_id IN (?)' : ''}
+      GROUP BY db.location_id, event_date_key`, params);
+    for (const row of rows) {
+      const first = moment.tz(row.first_scan, 'YYYY-MM-DD HH:mm:ss', true, HEALTH_METRICS_TIMEZONE);
+      const last = moment.tz(row.last_scan, 'YYYY-MM-DD HH:mm:ss', true, HEALTH_METRICS_TIMEZONE);
+      if (!first.isValid() || !last.isValid()) continue;
+      const key = `${row.location_id}:${row.event_date_key}`;
+      const prior = windows.get(key);
+      windows.set(key, {
+        first: prior && prior.first.isBefore(first) ? prior.first : first,
+        last: prior && prior.last.isAfter(last) ? prior.last : last
+      });
+    }
+  }
+  return windows;
+}
+
+async function getHealthMetricAnswerStateMap(userIds, questionIds, language, queryRows = defaultQuery) {
   const answerStateByUserQuestion = new Map();
   if (!Array.isArray(userIds) || userIds.length === 0 || !Array.isArray(questionIds) || questionIds.length === 0) {
     return answerStateByUserQuestion;
@@ -717,7 +759,7 @@ async function getHealthMetricAnswerStateMap(userIds, questionIds, language) {
   const userIdChunks = chunkArray(userIds);
   for (let i = 0; i < userIdChunks.length; i++) {
     const userIdChunk = userIdChunks[i];
-    const [rows] = await mysqlConnection.promise().query(
+    const [rows] = await queryRows(
       `SELECT
          uq.user_id,
          uq.question_id,
@@ -876,18 +918,21 @@ function streamHealthMetricsCsv({
   language = 'en',
   userFilter = null,
   extraAnswerQuestionIds = [],
-  fileName: fileNameOverride = null
+  fileName: fileNameOverride = null,
+  signal = null
 }) {
   assertHealthMetricsScope(cabecera);
 
   const normalizedFilters = normalizeHealthMetricFilters(filters);
   const fileName = fileNameOverride || 'health-metrics.csv';
   let rowCount = 0;
+  const controller = new AbortController();
+  const queryRows = createReportQuery(mysqlConnection, { signal: controller.signal });
 
   async function* generator() {
-    const [questionCatalog, metricUsers] = await Promise.all([
-      getHealthMetricQuestionCatalog(cabecera, language),
-      getHealthMetricUsers(cabecera, normalizedFilters)
+    const [questionCatalog, metricUserIds] = await Promise.all([
+      getHealthMetricQuestionCatalog(cabecera, language, queryRows),
+      getHealthMetricUserIds(cabecera, normalizedFilters, queryRows)
     ]);
     const { questions, questionIds } = questionCatalog;
     const headers = baseHeaders().concat(
@@ -903,11 +948,10 @@ function streamHealthMetricsCsv({
 
     yield Buffer.from(csvStringifier.getHeaderString(), 'utf8');
 
-    if (metricUsers.length === 0) {
+    if (metricUserIds.length === 0) {
       return;
     }
 
-    const metricUserIds = metricUsers.map(user => user.user_id);
     const reportAnswerQuestionIds = [
       ...new Set([
         ...questionIds,
@@ -917,107 +961,108 @@ function streamHealthMetricsCsv({
           .filter(questionId => Number.isInteger(questionId) && questionId > 0)
       ])
     ];
-    const [
-      deliverySummaryByUserId,
-      deliveryEventsByUserId,
-      answerStateByUserQuestion
-    ] = await Promise.all([
-      getHealthMetricDeliverySummaryByUserIds(metricUserIds, normalizedFilters),
-      getHealthMetricDeliveryEventsByUserIds(metricUserIds, normalizedFilters),
-      getHealthMetricAnswerStateMap(metricUserIds, reportAnswerQuestionIds, language)
-    ]);
+    const scannedWindows = await getHealthMetricScannedWindows(metricUserIds, normalizedFilters, queryRows);
+    for (let offset = 0; offset < metricUserIds.length; offset += HEALTH_METRICS_CHUNK_SIZE) {
+      controller.signal.throwIfAborted();
+      const pageIds = metricUserIds.slice(offset, offset + HEALTH_METRICS_CHUNK_SIZE);
+      const metricUsers = await getHealthMetricUsers(cabecera, normalizedFilters, queryRows, pageIds);
+      const [deliverySummaryByUserId, deliveryEventsByUserId, answerStateByUserQuestion] = await Promise.all([
+        getHealthMetricDeliverySummaryByUserIds(pageIds, normalizedFilters, queryRows),
+        getHealthMetricDeliveryEventsByUserIds(pageIds, normalizedFilters, queryRows, scannedWindows),
+        getHealthMetricAnswerStateMap(pageIds, reportAnswerQuestionIds, language, queryRows)
+      ]);
+      let batch = [];
 
-    let batch = [];
+      for (let userIndex = 0; userIndex < metricUsers.length; userIndex++) {
+        const user = metricUsers[userIndex];
 
-    for (let userIndex = 0; userIndex < metricUsers.length; userIndex++) {
-      const user = metricUsers[userIndex];
+        if (typeof userFilter === 'function' && !userFilter(user, answerStateByUserQuestion)) {
+          continue;
+        }
 
-      if (typeof userFilter === 'function' && !userFilter(user, answerStateByUserQuestion)) {
-        continue;
-      }
+        const deliverySummary = deliverySummaryByUserId.get(user.user_id) || {
+          locations_visited: '',
+          delivery_count: 0,
+          delivery_count_scanned: 0,
+          delivery_count_not_scanned: 0,
+          delivery_count_between_dates: 0,
+          delivery_count_between_dates_scanned: 0,
+          delivery_count_between_dates_not_scanned: 0
+        };
 
-      const deliverySummary = deliverySummaryByUserId.get(user.user_id) || {
-        locations_visited: '',
-        delivery_count: 0,
-        delivery_count_scanned: 0,
-        delivery_count_not_scanned: 0,
-        delivery_count_between_dates: 0,
-        delivery_count_between_dates_scanned: 0,
-        delivery_count_between_dates_not_scanned: 0
-      };
+        const baseRow = {
+          user_id: user.user_id,
+          username: user.username,
+          email: user.email,
+          firstname: user.firstname,
+          lastname: user.lastname,
+          language: user.language,
+          date_of_birth: user.date_of_birth,
+          age: user.age,
+          phone: user.phone,
+          zipcode: user.zipcode,
+          household_size: user.household_size,
+          gender: user.gender,
+          ethnicity: user.ethnicity,
+          other_ethnicity: user.other_ethnicity,
+          second_ethnicity: user.second_ethnicity,
+          other_second_ethnicity: user.other_second_ethnicity,
+          preferred_language: user.preferred_language,
+          other_language: user.other_language,
+          first_location_visited: user.first_location_visited,
+          last_location_visited: user.last_location_visited,
+          locations_visited: deliverySummary.locations_visited,
+          delivery_count: deliverySummary.delivery_count,
+          delivery_count_scanned: deliverySummary.delivery_count_scanned,
+          delivery_count_not_scanned: deliverySummary.delivery_count_not_scanned,
+          delivery_count_between_dates: deliverySummary.delivery_count_between_dates,
+          delivery_count_between_dates_scanned: deliverySummary.delivery_count_between_dates_scanned,
+          delivery_count_between_dates_not_scanned: deliverySummary.delivery_count_between_dates_not_scanned,
+          registration_date: user.registration_date,
+          registration_time: user.registration_time
+        };
 
-      const baseRow = {
-        user_id: user.user_id,
-        username: user.username,
-        email: user.email,
-        firstname: user.firstname,
-        lastname: user.lastname,
-        language: user.language,
-        date_of_birth: user.date_of_birth,
-        age: user.age,
-        phone: user.phone,
-        zipcode: user.zipcode,
-        household_size: user.household_size,
-        gender: user.gender,
-        ethnicity: user.ethnicity,
-        other_ethnicity: user.other_ethnicity,
-        second_ethnicity: user.second_ethnicity,
-        other_second_ethnicity: user.other_second_ethnicity,
-        preferred_language: user.preferred_language,
-        other_language: user.other_language,
-        first_location_visited: user.first_location_visited,
-        last_location_visited: user.last_location_visited,
-        locations_visited: deliverySummary.locations_visited,
-        delivery_count: deliverySummary.delivery_count,
-        delivery_count_scanned: deliverySummary.delivery_count_scanned,
-        delivery_count_not_scanned: deliverySummary.delivery_count_not_scanned,
-        delivery_count_between_dates: deliverySummary.delivery_count_between_dates,
-        delivery_count_between_dates_scanned: deliverySummary.delivery_count_between_dates_scanned,
-        delivery_count_between_dates_not_scanned: deliverySummary.delivery_count_between_dates_not_scanned,
-        registration_date: user.registration_date,
-        registration_time: user.registration_time
-      };
+        for (let qIndex = 0; qIndex < questions.length; qIndex++) {
+          const question = questions[qIndex];
+          baseRow[String(question.id)] = getHealthMetricReportAnswerValue({
+            answerStateByUserQuestion,
+            userId: user.user_id,
+            question
+          });
+        }
 
-      for (let qIndex = 0; qIndex < questions.length; qIndex++) {
-        const question = questions[qIndex];
-        baseRow[String(question.id)] = getHealthMetricReportAnswerValue({
-          answerStateByUserQuestion,
-          userId: user.user_id,
-          question
-        });
-      }
+        const userEvents = deliveryEventsByUserId.get(user.user_id) || [{
+          event_date: '',
+          event_time: '',
+          event_location: ''
+        }];
 
-      const userEvents = deliveryEventsByUserId.get(user.user_id) || [{
-        event_date: '',
-        event_time: '',
-        event_location: ''
-      }];
+        for (let eIndex = 0; eIndex < userEvents.length; eIndex++) {
+          const eventRow = userEvents[eIndex];
+          batch.push({
+            ...baseRow,
+            event_date: eventRow.event_date,
+            event_time: eventRow.event_time,
+            event_location: eventRow.event_location
+          });
 
-      for (let eIndex = 0; eIndex < userEvents.length; eIndex++) {
-        const eventRow = userEvents[eIndex];
-        batch.push({
-          ...baseRow,
-          event_date: eventRow.event_date,
-          event_time: eventRow.event_time,
-          event_location: eventRow.event_location
-        });
-
-        if (batch.length >= HEALTH_METRICS_CSV_BATCH_SIZE) {
-          rowCount += batch.length;
-          yield Buffer.from(csvStringifier.stringifyRecords(batch), 'utf8');
-          batch = [];
+          if (batch.length >= HEALTH_METRICS_CSV_BATCH_SIZE) {
+            rowCount += batch.length;
+            yield Buffer.from(csvStringifier.stringifyRecords(batch), 'utf8');
+            batch = [];
+          }
         }
       }
-    }
 
-    if (batch.length > 0) {
-      rowCount += batch.length;
-      yield Buffer.from(csvStringifier.stringifyRecords(batch), 'utf8');
+      if (batch.length > 0) {
+        rowCount += batch.length;
+        yield Buffer.from(csvStringifier.stringifyRecords(batch), 'utf8');
+      }
     }
   }
 
   return {
-    body: Readable.from(generator(), { objectMode: false }),
+    body: createReportReadable(generator(), controller, signal),
     getRowCount: () => rowCount,
     fileName
   };

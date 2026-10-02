@@ -23,16 +23,13 @@ const {
   uploadImageWithVariants
 } = require('../services/imageVariants');
 const {
-  buildHealthMetricsCsv,
   getHealthMetricAnswerCountMap: getHealthMetricAnswerCountMapService,
   getHealthMetricQuestionCatalog: getHealthMetricQuestionCatalogService,
   getHealthMetricUserIds: getHealthMetricUserIdsService,
   normalizeHealthMetricFilters: normalizeHealthMetricFiltersService
 } = require('../services/healthMetrics');
 const {
-  buildAllSpecificReports: buildAllSpecificReportsService
-} = require('../services/specificHealthReports');
-const {
+  normalizeInteractionMetricFilters,
   fetchInteractionSummary,
   fetchInteractionRoutes,
   fetchInteractionContent,
@@ -42,6 +39,7 @@ const {
   fetchInteractionAcquisition
 } = require('../services/interactionMetrics');
 const { resolveInteractionGeoFromIp } = require('../services/interactionGeo');
+const { createBoundedAsyncCache } = require('../services/boundedAsyncCache');
 const {
   getParticipantRegisterSummary: getSharedParticipantRegisterSummary
 } = require('../services/participantRegistrationMetrics');
@@ -12266,6 +12264,10 @@ async function getHealthMetricAnswerCountMap(userIds, questionIds) {
   return answerCountByKey;
 }
 
+const { sendReportDownload } = require('../services/reportStream');
+const { streamHealthMetricsCsv } = require('../services/healthMetrics');
+const { streamAllSpecificReportsZip } = require('../services/specificHealthReports');
+
 router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
   let cabecera = {};
   try {
@@ -12279,307 +12281,12 @@ router.post('/metrics/health/download-csv', verifyToken, async (req, res) => {
   if (cabecera.role === 'client' && !cabecera.client_id) {
     return res.status(400).json({ error: 'client_id requerido para role=client' });
   }
-
-  try {
-    const language = req.query.language || 'en';
-    const { csvData: healthMetricsCsvData } = await buildHealthMetricsCsv({
-      cabecera,
-      filters: req.body || {},
-      language
-    });
-
-    res.setHeader('Content-Disposition', 'attachment; filename=health-metrics.csv');
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    return res.send(healthMetricsCsvData);
-
-    // Ventana de fechas (interpretar como días en America/Los_Angeles)
-    // El front manda YYYY-MM-DD; NO lo convertimos en JS.
-    // En SQL convertimos [from 00:00 LA, (to+1) 00:00 LA) a UTC para comparar con columnas UTC.
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 1) Preguntas visibles (para armar headers)
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 2) Usuarios + métricas (sin multiplicar por pregunta)
-    //    Nota: pasamos los parámetros TZ sobre los parámetros, no sobre columnas.
-    // ─────────────────────────────────────────────────────────────────────────────
-    let usersSql = `
-      SELECT
-        u.id AS user_id, u.username, u.email, u.firstname, u.lastname, u.language,
-        DATE_FORMAT(u.date_of_birth, '%m/%d/%Y') AS date_of_birth,
-        TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) AS age,
-        u.phone, u.zipcode, u.household_size,
-        g.name AS gender, eth.name AS ethnicity, u.other_ethnicity,
-        first_loc.community_city AS first_location_visited,
-        loc.community_city AS last_location_visited,
-        (
-          SELECT GROUP_CONCAT(DISTINCT loc2.community_city ORDER BY loc2.community_city SEPARATOR ', ')
-          FROM delivery_beneficiary dbv
-          LEFT JOIN location loc2 ON dbv.location_id = loc2.id
-          WHERE dbv.receiving_user_id = u.id
-        ) AS locations_visited,
-        /* Conteos globales */
-        (SELECT COUNT(*) FROM delivery_beneficiary db WHERE db.receiving_user_id = u.id) AS delivery_count,
-        (SELECT COUNT(*) FROM delivery_beneficiary db WHERE db.receiving_user_id = u.id AND db.delivering_user_id IS NOT NULL) AS delivery_count_scanned,
-        (SELECT COUNT(*) FROM delivery_beneficiary db WHERE db.receiving_user_id = u.id AND db.delivering_user_id IS NULL) AS delivery_count_not_scanned,
-        /* Conteos en rango LA [start, end) */
-        (SELECT COUNT(*)
-           FROM delivery_beneficiary db2
-          WHERE db2.receiving_user_id = u.id
-            AND db2.creation_date >= CONVERT_TZ(?, 'America/Los_Angeles', '+00:00')
-            AND db2.creation_date <  CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), 'America/Los_Angeles', '+00:00')
-        ) AS delivery_count_between_dates,
-        (SELECT COUNT(*)
-           FROM delivery_beneficiary db2
-          WHERE db2.receiving_user_id = u.id
-            AND db2.delivering_user_id IS NOT NULL
-            AND db2.creation_date >= CONVERT_TZ(?, 'America/Los_Angeles', '+00:00')
-            AND db2.creation_date <  CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), 'America/Los_Angeles', '+00:00')
-        ) AS delivery_count_between_dates_scanned,
-        (SELECT COUNT(*)
-           FROM delivery_beneficiary db2
-          WHERE db2.receiving_user_id = u.id
-            AND db2.delivering_user_id IS NULL
-            AND db2.creation_date >= CONVERT_TZ(?, 'America/Los_Angeles', '+00:00')
-            AND db2.creation_date <  CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), 'America/Los_Angeles', '+00:00')
-        ) AS delivery_count_between_dates_not_scanned,
-        DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y') AS registration_date,
-        DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%T') AS registration_time
-      FROM user u
-        ${cabecera.role === 'client' ? 'INNER JOIN client_user cu ON u.id = cu.user_id' : ''}
-        INNER JOIN gender g ON g.id = u.gender_id
-        INNER JOIN ethnicity eth ON eth.id = u.ethnicity_id
-        LEFT JOIN location first_loc ON first_loc.id = u.first_location_id
-        LEFT JOIN location loc ON loc.id = u.location_id
-      WHERE u.role_id = 5
-        AND (
-          (u.creation_date >= CONVERT_TZ(?, 'America/Los_Angeles', '+00:00')
-           AND u.creation_date <  CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), 'America/Los_Angeles', '+00:00'))
-          OR EXISTS (
-            SELECT 1
-            FROM delivery_beneficiary db3
-            WHERE db3.receiving_user_id = u.id
-              AND db3.creation_date >= CONVERT_TZ(?, 'America/Los_Angeles', '+00:00')
-              AND db3.creation_date <  CONVERT_TZ(DATE_ADD(?, INTERVAL 1 DAY), 'America/Los_Angeles', '+00:00')
-              ${locations.length ? ' AND db3.location_id IN (?)' : ''}
-          )
-        )
-    `;
-    const usersParams = [
-      // conteos en rango (3 veces)
-      laFromDate, laToDate,
-      laFromDate, laToDate,
-      laFromDate, laToDate,
-      // registro en rango
-      laFromDate, laToDate,
-      // entregas en rango del EXISTS
-      laFromDate, laToDate
-    ];
-    if (locations.length) usersParams.push(locations);
-
-    if (cabecera.role === 'client') {
-      usersSql += ` AND cu.client_id = ?`;
-      usersParams.push(cabecera.client_id);
-    }
-    if (locations.length) {
-      usersSql += `
-        AND (
-          u.first_location_id IN (?)
-          OR EXISTS (
-            SELECT 1 FROM delivery_beneficiary dbx
-            WHERE dbx.receiving_user_id = u.id AND dbx.location_id IN (?)
-          )
-        )
-      `;
-      usersParams.push(locations, locations);
-    }
-    if (genders.length) {
-      usersSql += ` AND u.gender_id IN (?)`;
-      usersParams.push(genders);
-    }
-    if (ethnicities.length) {
-      usersSql += ` AND u.ethnicity_id IN (?)`;
-      usersParams.push(ethnicities);
-    }
-    if (filters.min_age != null && filters.min_age !== '') {
-      usersSql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) >= ?`;
-      usersParams.push(min_age);
-    }
-    if (filters.max_age != null && filters.max_age !== '') {
-      usersSql += ` AND TIMESTAMPDIFF(YEAR, u.date_of_birth, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', 'America/Los_Angeles'))) <= ?`;
-      usersParams.push(max_age);
-    }
-    if (zipcode !== null && zipcode !== '') {
-      usersSql += ` AND u.zipcode = ?`;
-      usersParams.push(zipcode);
-    }
-
-    // Filtros por respuestas (EXISTS) — sólo si hay filtros
-    const answerExistsClauses = [];
-    const answerExistsParams = [];
-    for (const [qidStr, ids] of Object.entries(answerFilters)) {
-      const qid = Number(qidStr);
-      if (!ids.length) continue;
-      answerExistsClauses.push(`
-        EXISTS (
-          SELECT 1
-          FROM user_question uqf
-          JOIN user_question_answer uqaf ON uqf.id = uqaf.user_question_id
-          WHERE uqf.user_id = u.id
-            AND uqf.question_id = ?
-            AND uqf.id = (
-              SELECT MAX(uqf2.id)
-              FROM user_question uqf2
-              WHERE uqf2.user_id = uqf.user_id AND uqf2.question_id = uqf.question_id
-            )
-            AND uqaf.answer_id IN (?)
-        )
-      `);
-      answerExistsParams.push(qid, ids);
-    }
-    if (answerExistsClauses.length) {
-      usersSql += ' AND ' + answerExistsClauses.join(' AND ');
-      usersParams.push(...answerExistsParams);
-    }
-
-    usersSql += ` ORDER BY u.id`;
-
-    const [users] = await mysqlConnection.promise().query(usersSql, usersParams);
-
-    // Si no hay usuarios, devolvemos CSV vacío con headers base (+ preguntas)
-    if (users.length === 0) {
-      const csvStringifier = createObjectCsvStringifier({
-        header: baseHeaders().concat(questions.map(q => ({ id: String(q.id), title: q.question }))),
-        fieldDelimiter: ';'
-      });
-      res.setHeader('Content-Disposition', 'attachment; filename=health-metrics.csv');
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      return res.send(csvStringifier.getHeaderString());
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // 3) Respuestas para los usuarios encontrados (pivot en memoria)
-    // ─────────────────────────────────────────────────────────────────────────────
-    let answersRows = [];
-    if (questionIds.length > 0) {
-      const userIds = users.map(u => u.user_id);
-      // Si por alguna razón no hay userIds (no debería), saltamos
-      if (userIds.length > 0) {
-        const answersSql = `
-          SELECT
-            uq.user_id,
-            uq.question_id,
-            at.id AS answer_type_id,
-            uq.answer_text,
-            uq.answer_number,
-            a.name AS answer_name
-          FROM user_question uq
-          INNER JOIN (
-            SELECT user_id, question_id, MAX(id) AS max_id
-            FROM user_question
-            WHERE user_id IN (?) AND question_id IN (?)
-            GROUP BY user_id, question_id
-          ) uq_latest ON uq_latest.max_id = uq.id
-          JOIN question q ON q.id = uq.question_id
-          LEFT JOIN answer_type at ON at.id = q.answer_type_id
-          LEFT JOIN user_question_answer uqa ON uqa.user_question_id = uq.id
-          LEFT JOIN answer a ON a.id = uqa.answer_id AND a.question_id = uq.question_id
-        `;
-        const [rowsAns] = await mysqlConnection.promise().query(answersSql, [userIds, questionIds]);
-        answersRows = rowsAns;
-      }
-    }
-
-    // Pivot: mapear "userId:questionId" a valor (multi-select dedup por coma)
-    const answersByUserQuestion = new Map();
-    for (const r of answersRows) {
-      const key = `${r.user_id}:${r.question_id}`;
-      let val = null;
-      if (r.answer_type_id === 1) val = r.answer_text;
-      else if (r.answer_type_id === 2) val = r.answer_number;
-      else if (r.answer_type_id === 3) val = r.answer_name;
-      else if (r.answer_type_id === 4) val = r.answer_name; // multi-select
-
-      if (val == null || val === '') continue;
-
-      if (r.answer_type_id === 4) {
-        const prev = answersByUserQuestion.get(key);
-        if (prev) {
-          const set = new Set(String(prev).split(', ').concat(String(val)));
-          answersByUserQuestion.set(key, Array.from(set).join(', '));
-        } else {
-          answersByUserQuestion.set(key, String(val));
-        }
-      } else {
-        if (!answersByUserQuestion.has(key)) {
-          answersByUserQuestion.set(key, String(val));
-        }
-      }
-    }
-
-    // Headers CSV
-    const headers = baseHeaders().concat(
-      questions.map(q => ({ id: String(q.id), title: q.question }))
-    );
-
-    // Filas CSV
-    const rowsForCsv = users.map(u => {
-      const row = {
-        user_id: u.user_id,
-        username: u.username,
-        email: u.email,
-        firstname: u.firstname,
-        lastname: u.lastname,
-        language: u.language,
-        date_of_birth: u.date_of_birth,
-        age: u.age,
-        phone: u.phone,
-        zipcode: u.zipcode,
-        household_size: u.household_size,
-        gender: u.gender,
-        ethnicity: u.ethnicity,
-        other_ethnicity: u.other_ethnicity,
-        first_location_visited: u.first_location_visited,
-        last_location_visited: u.last_location_visited,
-        locations_visited: u.locations_visited,
-        delivery_count: u.delivery_count,
-        delivery_count_scanned: u.delivery_count_scanned,
-        delivery_count_not_scanned: u.delivery_count_not_scanned,
-        delivery_count_between_dates: u.delivery_count_between_dates,
-        delivery_count_between_dates_scanned: u.delivery_count_between_dates_scanned,
-        delivery_count_between_dates_not_scanned: u.delivery_count_between_dates_not_scanned,
-        registration_date: u.registration_date,
-        registration_time: u.registration_time
-      };
-      for (const q of questions) {
-        const k = `${u.user_id}:${q.id}`;
-        row[String(q.id)] = answersByUserQuestion.get(k) || '';
-      }
-      return row;
-    });
-
-    // CSV
-    const csvStringifier = createObjectCsvStringifier({
-      header: headers,
-      fieldDelimiter: ';'
-    });
-    let csvData = csvStringifier.getHeaderString();
-    csvData += csvStringifier.stringifyRecords(rowsForCsv);
-
-    res.setHeader('Content-Disposition', 'attachment; filename=health-metrics.csv');
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    return res.send(csvData);
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json('Internal server error');
-  }
+  return sendReportDownload(req, res, signal => streamHealthMetricsCsv({
+    cabecera, filters: req.body || {}, language: req.query.language || 'en', signal
+  }));
 });
 
-// Admin-only: download the "specific" health reports (Eligibility + Members
-// Exclusive) for IEHP and Molina, bundled as a single ZIP of 4 CSV files.
-// The same dialog filters as the regular health CSV download are honored.
+// Specific reports retain the same admin permission and client-specific scopes.
 router.post('/metrics/health/download-specific-csv', verifyToken, async (req, res) => {
   let cabecera = {};
   try {
@@ -12590,31 +12297,9 @@ router.post('/metrics/health/download-specific-csv', verifyToken, async (req, re
   if (cabecera.role !== 'admin') {
     return res.status(403).json({ error: 'Forbidden' });
   }
-
-  try {
-    const language = req.query.language || 'en';
-    const reports = await buildAllSpecificReportsService({
-      filters: req.body || {},
-      language
-    });
-
-    const zip = new JSZip();
-    reports.forEach(report => {
-      zip.file(report.fileName, report.csvData);
-    });
-
-    const zipBuffer = await zip.generateAsync({
-      type: 'nodebuffer',
-      compression: 'DEFLATE'
-    });
-
-    res.setHeader('Content-Disposition', 'attachment; filename=specific-reports.zip');
-    res.setHeader('Content-Type', 'application/zip');
-    return res.send(zipBuffer);
-  } catch (err) {
-    console.error('Error in /metrics/health/download-specific-csv:', err);
-    return res.status(500).json('Internal server error');
-  }
+  return sendReportDownload(req, res, signal => streamAllSpecificReportsZip({
+    filters: req.body || {}, language: req.query.language || 'en', signal
+  }));
 });
 
 // Headers base para CSV
@@ -14785,27 +14470,34 @@ router.post('/metrics/health/questions', verifyToken, async (req, res) => {
     try {
       const healthMetricFilters = normalizeHealthMetricFiltersService(req.body || {});
       const healthMetricLanguage = req.query.language || 'en';
-      const [healthQuestionCatalog, healthMetricUserIds] = await Promise.all([
-        getHealthMetricQuestionCatalogService(cabecera, healthMetricLanguage),
-        getHealthMetricUserIdsService(cabecera, healthMetricFilters)
-      ]);
-      const healthAnswerCountByKey = await getHealthMetricAnswerCountMapService(
-        healthMetricUserIds,
-        healthQuestionCatalog.questionIds
+      const healthCacheKey = buildParticipantMetricsCacheKey(
+        'health-questions', cabecera, healthMetricFilters, { language: healthMetricLanguage }
       );
+      const healthQuestionsResponse = await getCachedParticipantMetrics(
+        healthCacheKey, PARTICIPANT_METRICS_CACHE_TTL_MS, async () => {
+          const [healthQuestionCatalog, healthMetricUserIds] = await Promise.all([
+            getHealthMetricQuestionCatalogService(cabecera, healthMetricLanguage),
+            getHealthMetricUserIdsService(cabecera, healthMetricFilters)
+          ]);
+          const healthAnswerCountByKey = await getHealthMetricAnswerCountMapService(
+            healthMetricUserIds,
+            healthQuestionCatalog.questionIds
+          );
 
-      const healthQuestionsResponse = healthQuestionCatalog.questions.map(question => ({
-        question_id: question.id,
-        question: question.question,
-        traffic_light_enabled: question.traffic_light_enabled,
-        traffic_light_direction: question.traffic_light_direction,
-        answers: question.answers.map(answer => ({
-          answer_id: answer.answer_id,
-          answer: answer.answer,
-          order: answer.order,
-          total: healthAnswerCountByKey.get(`${question.id}:${answer.answer_id}`) || 0
-        }))
-      }));
+          return healthQuestionCatalog.questions.map(question => ({
+            question_id: question.id,
+            question: question.question,
+            traffic_light_enabled: question.traffic_light_enabled,
+            traffic_light_direction: question.traffic_light_direction,
+            answers: question.answers.map(answer => ({
+              answer_id: answer.answer_id,
+              answer: answer.answer,
+              order: answer.order,
+              total: healthAnswerCountByKey.get(`${question.id}:${answer.answer_id}`) || 0
+            }))
+          }));
+        }
+      );
 
       return res.json(healthQuestionsResponse);
 
@@ -15081,13 +14773,13 @@ function buildDemographicWhere(cabecera, filters) {
     `u.enabled = 'Y'`,
     // Usuario entra si se creó en el rango O tuvo al menos una entrega en el rango
     `(
-       (CONVERT_TZ(u.creation_date,'+00:00','America/Los_Angeles') >= ? 
-        AND CONVERT_TZ(u.creation_date,'+00:00','America/Los_Angeles') < ?)
+       (u.creation_date >= CONVERT_TZ(?,'America/Los_Angeles','+00:00')
+        AND u.creation_date < CONVERT_TZ(?,'America/Los_Angeles','+00:00'))
        OR EXISTS (
           SELECT 1 FROM delivery_beneficiary db_r
           WHERE db_r.receiving_user_id = u.id
-            AND CONVERT_TZ(db_r.creation_date,'+00:00','America/Los_Angeles') >= ?
-            AND CONVERT_TZ(db_r.creation_date,'+00:00','America/Los_Angeles') < ?
+            AND db_r.creation_date >= CONVERT_TZ(?,'America/Los_Angeles','+00:00')
+            AND db_r.creation_date < CONVERT_TZ(?,'America/Los_Angeles','+00:00')
        )
      )`
   ];
@@ -15200,7 +14892,13 @@ async function demographicMetric(dimensionType, cabecera, filters, language) {
     ORDER BY ${orderExpr}
   `;
 
-  const [rows] = await mysqlConnection.promise().query(sql, params);
+  const cacheKey = buildParticipantMetricsCacheKey(
+    `demographic-${dimensionType}`, cabecera, { params }, { language }
+  );
+  const rows = await getCachedParticipantMetrics(cacheKey, PARTICIPANT_METRICS_CACHE_TTL_MS, async () => {
+    const [resultRows] = await mysqlConnection.promise().query(sql, params);
+    return resultRows;
+  });
 
   if (dimensionType === 'household' || dimensionType === 'age') {
     // Calcular average y median con las frecuencias agregadas
@@ -15238,11 +14936,8 @@ async function demographicMetric(dimensionType, cabecera, filters, language) {
       median = (m1 + (m2 ?? m1)) / 2;
     }
 
-    // Convertimos name a string para front consistente
-    for (const r of rows) {
-      r.name = String(r.name);
-    }
-    return { average, median, data: rows };
+    // Do not mutate the shared cached rows while formatting a response.
+    return { average, median, data: rows.map(row => ({ ...row, name: String(row.name) })) };
   }
 
   // Para gender / ethnicity sólo devolvemos la lista simple
@@ -15619,68 +15314,19 @@ router.post('/metrics/volunteer/age', verifyToken, async (req, res) => {
 }
 );
 
-const PARTICIPANT_METRICS_CACHE_TTL_MS = 5000;
+const PARTICIPANT_METRICS_CACHE_TTL_MS = 30000;
 const PARTICIPANT_DATE_RANGE_CACHE_TTL_MS = 60000;
 const PARTICIPANT_CACHE_MAX_ENTRIES = 200;
 const PARTICIPANT_LA_TIME_ZONE_SQL = "'America/Los_Angeles'";
 const PARTICIPANT_UTC_TIME_ZONE_SQL = "'+00:00'";
-const participantMetricsCache = new Map();
+const participantMetricsCache = createBoundedAsyncCache({ maxEntries: PARTICIPANT_CACHE_MAX_ENTRIES });
 
 function invalidateTicketMetricsCache() {
   participantMetricsCache.clear();
 }
 
-function cleanupParticipantMetricsCache() {
-  if (participantMetricsCache.size <= PARTICIPANT_CACHE_MAX_ENTRIES) {
-    return;
-  }
-
-  const now = Date.now();
-  for (const [cacheKey, cacheEntry] of participantMetricsCache.entries()) {
-    if (cacheEntry.expiresAt <= now && !cacheEntry.promise) {
-      participantMetricsCache.delete(cacheKey);
-    }
-  }
-}
-
 async function getCachedParticipantMetrics(cacheKey, ttlMs, computeFn) {
-  cleanupParticipantMetricsCache();
-
-  const now = Date.now();
-  const cachedEntry = participantMetricsCache.get(cacheKey);
-
-  if (cachedEntry) {
-    if (cachedEntry.value !== undefined && cachedEntry.expiresAt > now) {
-      return cachedEntry.value;
-    }
-
-    if (cachedEntry.promise) {
-      return cachedEntry.promise;
-    }
-
-    participantMetricsCache.delete(cacheKey);
-  }
-
-  const pendingPromise = (async () => {
-    try {
-      const value = await computeFn();
-      participantMetricsCache.set(cacheKey, {
-        value,
-        expiresAt: Date.now() + ttlMs
-      });
-      return value;
-    } catch (error) {
-      participantMetricsCache.delete(cacheKey);
-      throw error;
-    }
-  })();
-
-  participantMetricsCache.set(cacheKey, {
-    promise: pendingPromise,
-    expiresAt: now + ttlMs
-  });
-
-  return pendingPromise;
+  return participantMetricsCache.getOrCompute(cacheKey, ttlMs, computeFn);
 }
 
 function buildParticipantMetricsCacheKey(scope, cabecera, filters, extra = {}) {
@@ -29066,6 +28712,12 @@ router.post('/interaction/event', verifyTokenLenientOptional, async (req, res) =
   }
 });
 
+function getCachedInteractionMetric(metric, cabecera, language, rawFilters, compute) {
+  const filters = normalizeInteractionMetricFilters(rawFilters);
+  const cacheKey = buildParticipantMetricsCacheKey(`interaction-${metric}`, cabecera, filters, { language });
+  return getCachedParticipantMetrics(cacheKey, 60000, () => compute(filters));
+}
+
 router.post('/metrics/interaction/summary', verifyToken, async (req, res) => {
   try {
     const cabecera = JSON.parse(req.data.data);
@@ -29075,7 +28727,8 @@ router.post('/metrics/interaction/summary', verifyToken, async (req, res) => {
     }
 
     const language = normalizeInteractionLanguage(req.query.language);
-    const response = await fetchInteractionSummary(mysqlConnection.promise(), language, req.body || {});
+    const response = await getCachedInteractionMetric('summary', cabecera, language, req.body || {}, filters =>
+      fetchInteractionSummary(mysqlConnection.promise(), language, filters));
     return res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching interaction summary metrics:', error);
@@ -29093,7 +28746,8 @@ router.post('/metrics/interaction/routes', verifyToken, async (req, res) => {
     }
 
     const language = normalizeInteractionLanguage(req.query.language);
-    const response = await fetchInteractionRoutes(mysqlConnection.promise(), language, req.body || {});
+    const response = await getCachedInteractionMetric('routes', cabecera, language, req.body || {}, filters =>
+      fetchInteractionRoutes(mysqlConnection.promise(), language, filters));
     return res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching interaction route metrics:', error);
@@ -29111,7 +28765,8 @@ router.post('/metrics/interaction/content', verifyToken, async (req, res) => {
     }
 
     const language = normalizeInteractionLanguage(req.query.language);
-    const response = await fetchInteractionContent(mysqlConnection.promise(), language, req.body || {});
+    const response = await getCachedInteractionMetric('content', cabecera, language, req.body || {}, filters =>
+      fetchInteractionContent(mysqlConnection.promise(), language, filters));
     return res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching interaction content metrics:', error);
@@ -29128,7 +28783,8 @@ router.post('/metrics/interaction/users', verifyToken, async (req, res) => {
       return res.status(401).json('Unauthorized');
     }
 
-    const response = await fetchInteractionUsers(mysqlConnection.promise(), req.body || {});
+    const response = await getCachedInteractionMetric('users', cabecera, null, req.body || {}, filters =>
+      fetchInteractionUsers(mysqlConnection.promise(), filters));
     return res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching interaction user metrics:', error);
@@ -29146,7 +28802,8 @@ router.post('/metrics/interaction/actions', verifyToken, async (req, res) => {
     }
 
     const language = normalizeInteractionLanguage(req.query.language);
-    const response = await fetchInteractionActions(mysqlConnection.promise(), language, req.body || {});
+    const response = await getCachedInteractionMetric('actions', cabecera, language, req.body || {}, filters =>
+      fetchInteractionActions(mysqlConnection.promise(), language, filters));
     return res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching interaction action metrics:', error);
@@ -29164,7 +28821,8 @@ router.post('/metrics/interaction/audience', verifyToken, async (req, res) => {
     }
 
     const language = normalizeInteractionLanguage(req.query.language);
-    const response = await fetchInteractionAudience(mysqlConnection.promise(), language, req.body || {});
+    const response = await getCachedInteractionMetric('audience', cabecera, language, req.body || {}, filters =>
+      fetchInteractionAudience(mysqlConnection.promise(), language, filters));
     return res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching interaction audience metrics:', error);
@@ -29182,7 +28840,8 @@ router.post('/metrics/interaction/acquisition', verifyToken, async (req, res) =>
     }
 
     const language = normalizeInteractionLanguage(req.query.language);
-    const response = await fetchInteractionAcquisition(mysqlConnection.promise(), language, req.body || {});
+    const response = await getCachedInteractionMetric('acquisition', cabecera, language, req.body || {}, filters =>
+      fetchInteractionAcquisition(mysqlConnection.promise(), language, filters));
     return res.status(200).json(response);
   } catch (error) {
     console.error('Error fetching interaction acquisition metrics:', error);

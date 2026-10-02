@@ -1,6 +1,8 @@
 const mysqlConnection = require('../connection/connection');
 const logger = require('../utils/logger');
-const { buildHealthMetricsCsv } = require('./healthMetrics');
+const { streamHealthMetricsCsv } = require('./healthMetrics');
+const { createReportQuery } = require('./reportStream');
+const archiver = require('archiver');
 const { EXCLUDED_REPORT_USER_IDS } = require('./rawDataReport');
 
 // ---------------------------------------------------------------------------
@@ -80,8 +82,8 @@ function isYesAnswerName(name) {
  * Resolve, per question id, the answer ids that satisfy each condition we use.
  * Returns a map: questionId -> { yes: number[], notYes: number[], byName: Map }.
  */
-async function resolveReportAnswerIds() {
-  const [rows] = await mysqlConnection.promise().query(
+async function resolveReportAnswerIds(queryRows = (...args) => mysqlConnection.promise().query(...args)) {
+  const [rows] = await queryRows(
     `SELECT id, question_id, name, name_es
        FROM answer
       WHERE question_id IN (?)
@@ -203,13 +205,13 @@ function buildReportUserFilter(reportType, answerIdsByQuestion, planAnswerIds) {
  * Build a single specific report CSV for one client.
  * @returns {{ fileName: string, csvData: string, rowCount: number }}
  */
-async function buildSpecificHealthReportCsv({ clientId, reportType, filters = {}, language = 'en', answerIdsByQuestion = null }) {
+async function streamSpecificHealthReportCsv({ clientId, reportType, filters = {}, language = 'en', answerIdsByQuestion = null, signal = null }) {
   const clientConfig = SPECIFIC_REPORT_CLIENTS.find(client => Number(client.clientId) === Number(clientId));
   if (!clientConfig) {
     throw new Error(`Specific reports are not configured for client_id ${clientId}`);
   }
 
-  const resolvedAnswerIds = answerIdsByQuestion || (await resolveReportAnswerIds());
+  const resolvedAnswerIds = answerIdsByQuestion || (await resolveReportAnswerIds(createReportQuery(mysqlConnection, { signal })));
   const planAnswerIds = answerIdsForName(resolvedAnswerIds, QUESTION.WHICH_HEALTH_PLAN, clientConfig.plan);
 
   if (reportType === REPORT_TYPE.MEMBERS && planAnswerIds.length === 0) {
@@ -219,16 +221,22 @@ async function buildSpecificHealthReportCsv({ clientId, reportType, filters = {}
   const userFilter = buildReportUserFilter(reportType, resolvedAnswerIds, planAnswerIds);
   const fileName = `${clientConfig.shortName}-${reportType}.csv`;
 
-  const { csvData, rowCount } = await buildHealthMetricsCsv({
+  return streamHealthMetricsCsv({
     cabecera: { role: 'client', client_id: clientConfig.clientId },
     filters,
     language,
     userFilter,
     extraAnswerQuestionIds: REPORT_CONDITION_QUESTION_IDS,
-    fileName
+    fileName,
+    signal
   });
+}
 
-  return { fileName, csvData, rowCount };
+async function buildSpecificHealthReportCsv(options) {
+  const report = await streamSpecificHealthReportCsv(options);
+  const chunks = [];
+  for await (const chunk of report.body) chunks.push(chunk);
+  return { fileName: report.fileName, csvData: Buffer.concat(chunks).toString('utf8'), rowCount: report.getRowCount() };
 }
 
 /**
@@ -276,6 +284,43 @@ async function buildAllSpecificReports({ filters = {}, language = 'en' }) {
   return allReports;
 }
 
+// Archiver consumes queued CSV bodies serially and propagates downstream
+// backpressure. No full CSV strings or completed ZIP buffer are retained.
+async function streamAllSpecificReportsZip({ filters = {}, language = 'en', signal = null } = {}) {
+  const answerIdsByQuestion = await resolveReportAnswerIds(createReportQuery(mysqlConnection, { signal }));
+  signal?.throwIfAborted();
+  const archive = archiver('zip', { zlib: { level: 6 } });
+  const bodies = [];
+  const cleanup = () => {
+    for (const body of bodies) body.destroy();
+  };
+  archive.once('close', cleanup);
+  archive.once('error', cleanup);
+  try {
+    for (const client of SPECIFIC_REPORT_CLIENTS) {
+      for (const reportType of [REPORT_TYPE.ELIGIBILITY, REPORT_TYPE.MEMBERS]) {
+        const report = await streamSpecificHealthReportCsv({
+          clientId: client.clientId, reportType, filters, language, answerIdsByQuestion, signal
+        });
+        bodies.push(report.body);
+        // Archiver installs its source error handler only when an entry starts.
+        // Queued entries can already receive an AbortSignal, so every source
+        // must have a listener before it is appended (including during setup).
+        report.body.on('error', error => {
+          if (!archive.destroyed) archive.destroy(error);
+        });
+        archive.append(report.body, { name: report.fileName });
+      }
+    }
+    archive.finalize().catch(error => archive.destroy(error));
+    return { body: archive, fileName: 'specific-reports.zip', contentType: 'application/zip' };
+  } catch (error) {
+    cleanup();
+    archive.abort();
+    throw error;
+  }
+}
+
 module.exports = {
   REPORT_TYPE,
   SPECIFIC_REPORT_CLIENTS,
@@ -283,5 +328,7 @@ module.exports = {
   resolveReportAnswerIds,
   buildSpecificHealthReportCsv,
   buildSpecificReportsForClient,
-  buildAllSpecificReports
+  buildAllSpecificReports,
+  streamSpecificHealthReportCsv,
+  streamAllSpecificReportsZip
 };
