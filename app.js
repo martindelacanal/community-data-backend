@@ -20,6 +20,9 @@ require('dotenv').config({path: './.env'}); // variables de entorno
 
 // ROUTES
 
+const { createClinicalSandboxRouter } = require('./api/routes/clinicalSandbox');
+app.use('/api/clinical-sandbox', createClinicalSandboxRouter());
+
 const { createRestoreCredentialsRouter } = require('./api/routes/restoreCredentials');
 app.use('/api/auth/restore', createRestoreCredentialsRouter({
   pool: require('./api/connection/connection').promise(),
