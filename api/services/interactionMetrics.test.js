@@ -65,6 +65,10 @@ test('acquisition shares first-touch ranking, preserves cohort scope and output'
   assert.equal(db.statements.length, 2);
   const { sql, params } = db.statements[0];
   assert.equal((sql.match(/ROW_NUMBER\(\)/g) || []).length, 1);
+  // Both references must request the same materialized cohort; otherwise MySQL
+  // may inline them separately and repeat the full-history window calculation.
+  assert.match(sql, /SELECT \/\*\+ NO_MERGE\(fs\) \*\/\s*'timeline' AS breakdown/);
+  assert.match(sql, /SELECT \/\*\+ NO_MERGE\(fs\) \*\/ fs\.first_source AS metric_key/);
   assert.ok(sql.indexOf('WHERE rn = 1') < sql.indexOf('fs.first_seen_at >= ?'), 'first touch is ranked across history before date filtering');
   assert.match(sql, /ORDER BY s.started_at ASC, s.id ASC/);
   assert.match(sql, /fs.first_authenticated = 1/);

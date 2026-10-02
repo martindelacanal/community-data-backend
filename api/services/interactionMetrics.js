@@ -1093,7 +1093,7 @@ async function fetchInteractionAcquisition(connection, language = 'en', rawFilte
         FROM first_sessions fs
         ${cohort.whereClause}
       )
-      SELECT
+      SELECT /*+ NO_MERGE(fs) */
         'timeline' AS breakdown,
         DATE_FORMAT(fs.first_seen_at, '%Y-%m-%d') AS metric_date,
         COALESCE(NULLIF(fs.first_channel, ''), 'unknown') AS metric_key,
@@ -1107,7 +1107,7 @@ async function fetchInteractionAcquisition(connection, language = 'en', rawFilte
         sources.metric_key,
         sources.total_new
       FROM (
-        SELECT fs.first_source AS metric_key, COUNT(*) AS total_new
+        SELECT /*+ NO_MERGE(fs) */ fs.first_source AS metric_key, COUNT(*) AS total_new
         FROM acquisition_cohort fs
         GROUP BY fs.first_source
         ORDER BY total_new DESC
