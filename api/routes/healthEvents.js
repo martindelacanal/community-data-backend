@@ -47,6 +47,8 @@ const {
   shouldIncludeBeneficiaryEvent
 } = require('../utils/postEventSurvey');
 const healthEventAnalytics = require('../services/healthEventAnalytics');
+const healthEventWristbands = require('../services/healthEventWristbands');
+const { normalizeWristbandSource, assertAssignableRegistration, buildHealthStaffDebounceKey, HealthWristbandError } = require('../utils/healthWristband');
 const {
   PROFILE_MAPS_TO,
   isCatalogProfileMap,
@@ -1740,10 +1742,27 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       return res.status(410).json({ error: 'EVENT_ENDED' });
     }
 
-    // ---- Identity resolution: QR (primary) | PIN | phone (manual fallbacks) ----
+    // ---- Identity resolution: wristband | QR | PIN | phone ----
     let scannedUserId = NaN;
     let identityMethod = null;
-    if (req.body.qr != null) {
+    let wristbandIdentity = null;
+    let wristbandSource = null;
+    if (req.body.wristband_uid != null) {
+      if (['qr', 'pin', 'phone'].some(field => req.body[field] != null)) {
+        return res.status(400).json({ error: 'INVALID_DATA' });
+      }
+      identityMethod = 'wristband';
+      wristbandSource = normalizeWristbandSource(req.body.wristband_source);
+      if (!wristbandSource) return res.status(400).json({ error: 'INVALID_DATA' });
+      if (!(await canOperateHealthStand(req.currentUser, eventId, standId))) {
+        return res.status(403).json({ error: 'FORBIDDEN', message: 'Approved event registration and active stand assignment required' });
+      }
+      wristbandIdentity = await healthEventWristbands.resolveWristband(mysqlConnection.promise(), eventId, req.body.wristband_uid);
+      if (wristbandIdentity.registration_role === 'volunteer' && stand.is_entry !== 'Y') {
+        return res.status(400).json({ error: 'VOLUNTEER_ENTRY_ONLY' });
+      }
+      scannedUserId = Number(wristbandIdentity.user_id);
+    } else if (req.body.qr != null) {
       identityMethod = 'qr';
       const qr = parseDailyBeneficiaryQr(req.body.qr);
       scannedUserId = qr ? Number.parseInt(qr.id, 10) : NaN;
@@ -1813,16 +1832,17 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
     const person = { firstname: userRows[0].firstname, lastname: userRows[0].lastname };
 
     // Registration lookup / walk-in auto-registration at the entry stand.
+    const participantRole = wristbandIdentity ? wristbandIdentity.registration_role : 'beneficiary';
     let [regRows] = await connection.query(
-      'SELECT * FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" AND status = "registered" LIMIT 1 FOR UPDATE',
-      [eventId, scannedUserId]);
+      'SELECT * FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = ? AND status = "registered" LIMIT 1 FOR UPDATE',
+      [eventId, scannedUserId, participantRole]);
     let registration = regRows.length ? regRows[0] : null;
     // Walk-ins (registration created right here) skip the pending-questions
     // confirmation below: they obviously haven't answered anything yet and the
     // entry line must keep moving.
     const preExistingRegistration = !!registration;
     if (!registration) {
-      if (stand.is_entry === 'Y') {
+      if (stand.is_entry === 'Y' && !wristbandIdentity) {
         const [regInsert] = await connection.query(
           'INSERT INTO health_event_registration(health_event_id, user_id, registration_role, source, submitted_at) \
            VALUES (?,?,?,?,NOW())', [eventId, scannedUserId, 'beneficiary', 'walkin']);
@@ -1836,11 +1856,34 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       }
     }
 
+    let activeWristband = null;
+    if (wristbandIdentity) {
+      assertAssignableRegistration({ ...registration, user_enabled: userRows[0].enabled, user_deleted: 'N' }, eventId);
+      activeWristband = await healthEventWristbands.lockActiveWristband(
+        connection, eventId, wristbandIdentity.id, registration.id);
+      if (participantRole === 'volunteer') {
+        const staffDebounceKey = buildHealthStaffDebounceKey(eventId, standId, scannedUserId);
+        const replay = healthQrSlidingDebounce.take(staffDebounceKey);
+        const attendance = replay
+          ? { scan_id: replay.scanId, scan_type: replay.scanType, duplicate: true, duplicate_reason: 'recent' }
+          : await healthEventWristbands.recordStaffAttendance(connection, {
+            eventId, registration, credential: activeWristband, standId, operatorId: req.currentUser.id,
+            source: wristbandSource, timezone: stand.event_timezone
+          });
+        await connection.commit();
+        healthQrSlidingDebounce.remember(staffDebounceKey, attendance.scan_id, attendance.scan_type);
+        return res.status(200).json({ ...attendance, participant_role: 'volunteer', attendance_kind: 'staff',
+          credential: healthEventWristbands.credentialShape(activeWristband), person,
+          registration: { id: registration.id, status: registration.status, source: registration.source, dates: [], appointments: [] },
+          checkout_form: null });
+      }
+    }
+
     // Idempotency MUST run before selecting check-in/checkout. QR decoding is
     // continuous, so a process-local sliding window also remains alive while
     // the same paper stays in frame. The DB window is the durable fallback.
     const debounceKey = buildHealthScanDebounceKey(eventId, standId, scannedUserId);
-    let recentScan = identityMethod === 'qr' ? healthQrSlidingDebounce.take(debounceKey) : null;
+    let recentScan = ['qr', 'wristband'].includes(identityMethod) ? healthQrSlidingDebounce.take(debounceKey) : null;
     if (!recentScan) {
       recentScan = await findRecentHealthScan(connection, {
         eventId,
@@ -1936,6 +1979,11 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
           [eventId, standId, Number.isInteger(serviceId) ? serviceId : null, registration.id,
             scannedUserId, req.currentUser.id, scanType, pairedScanId]);
         scanId = scanInsert.insertId;
+        if (activeWristband) {
+          await connection.query(
+            'INSERT INTO health_event_wristband_scan(scan_id, wristband_id, source) VALUES (?,?,?)',
+            [scanId, activeWristband.id, wristbandSource]);
+        }
       }
     }
     await connection.commit();
@@ -1978,6 +2026,8 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       duplicate_reason: duplicate ? duplicateReason : null,
       previous_scan: previousScan,
       person,
+      participant_role: 'beneficiary',
+      credential: activeWristband ? healthEventWristbands.credentialShape(activeWristband) : null,
       registration: {
         id: registration.id,
         status: registration.status,
@@ -1991,6 +2041,7 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
     if (connection) {
       try { await connection.rollback(); } catch (e) { /* noop */ }
     }
+    if (error instanceof HealthWristbandError) return res.status(error.status).json({ error: error.code });
     logger.error('POST /health-events/scan error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
   } finally {
@@ -2158,6 +2209,7 @@ async function hasActiveEntryAssignment(userId, eventId) {
      FROM health_event_volunteer_assignment a
      INNER JOIN health_event_stand st ON st.id = a.stand_id
      WHERE a.user_id = ? AND a.health_event_id = ? AND a.ended_at IS NULL AND st.is_entry = 'Y'
+       AND st.health_event_id = a.health_event_id AND st.enabled = 'Y'
      LIMIT 1`, [userId, eventId]);
   return rows.length > 0;
 }
@@ -2175,11 +2227,139 @@ async function canOperateEntryDesk(currentUser, eventId) {
      FROM health_event_registration r
      INNER JOIN user u ON u.id = r.user_id
      WHERE r.health_event_id = ? AND r.user_id = ? AND r.registration_role = 'volunteer'
-       AND r.status = 'registered' AND u.enabled = 'Y'
+       AND r.status = 'registered' AND u.enabled = 'Y' AND u.deleted = 'N'
      LIMIT 1`, [eventId, currentUser.id]);
   if (!registered.length) return false;
   return hasActiveEntryAssignment(currentUser.id, eventId);
 }
+
+/** A hardware UID never grants an operator permissions by itself. */
+async function canOperateHealthStand(currentUser, eventId, standId) {
+  if (ADMIN_ROLES.includes(currentUser.role)) return true;
+  const [rows] = await mysqlConnection.promise().query(
+    `SELECT r.id FROM health_event_registration r
+     INNER JOIN user u ON u.id = r.user_id
+     INNER JOIN health_event_volunteer_assignment a ON a.health_event_id = r.health_event_id AND a.user_id = r.user_id
+     INNER JOIN health_event_stand st ON st.id = a.stand_id AND st.health_event_id = r.health_event_id
+     WHERE r.health_event_id = ? AND r.user_id = ? AND r.registration_role = 'volunteer'
+       AND r.status = 'registered' AND u.enabled = 'Y' AND u.deleted = 'N'
+       AND a.stand_id = ? AND a.ended_at IS NULL AND st.enabled = 'Y' LIMIT 1`, [eventId, currentUser.id, standId]);
+  return rows.length > 0;
+}
+
+async function authorizeWristbandDesk(req, res) {
+  const eventId = Number(req.params.id);
+  if (!(await canOperateEntryDesk(req.currentUser, eventId))) {
+    res.status(403).json({ error: 'FORBIDDEN', message: 'Approved entry desk assignment required' });
+    return null;
+  }
+  const event = await getEventById(eventId);
+  if (!event) {
+    res.status(404).json({ error: 'EVENT_NOT_FOUND' });
+    return null;
+  }
+  return event;
+}
+
+function wristbandFailure(res, error, operation) {
+  if (error instanceof HealthWristbandError) return res.status(error.status).json({ error: error.code });
+  logger.error(`Health Events wristband ${operation} error: ${error.code || 'INTERNAL'}`);
+  return res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+}
+
+router.get('/health-events/:id(\\d+)/wristbands', verifyToken, requireVolunteer, async (req, res) => {
+  try {
+    const event = await authorizeWristbandDesk(req, res);
+    if (!event) return;
+    const role = req.query.role || 'beneficiary';
+    if (!['beneficiary', 'volunteer'].includes(role)) return res.status(400).json({ error: 'INVALID_DATA' });
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 25, 1), 100);
+    const search = String(req.query.search || '').trim().slice(0, 150);
+    const params = [event.id, role];
+    let filter = '';
+    if (search) {
+      filter = ' AND (u.firstname LIKE ? OR u.lastname LIKE ? OR u.phone LIKE ? OR u.username LIKE ? OR w.uid LIKE ?)';
+      params.push(...Array(5).fill(`%${search}%`));
+    }
+    const base = `FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
+      LEFT JOIN health_event_wristband w ON w.active_registration_id = r.id
+      LEFT JOIN health_event_staff_attendance sa ON sa.id =
+        (SELECT MAX(a.id) FROM health_event_staff_attendance a WHERE a.registration_id = r.id)
+      WHERE r.health_event_id = ? AND r.registration_role = ? AND u.deleted = 'N'${filter}`;
+    const [[count]] = await mysqlConnection.promise().query(`SELECT COUNT(*) AS total ${base}`, params);
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT r.id AS registration_id, r.user_id, r.registration_role, r.status, u.firstname, u.lastname,
+       u.phone, u.enabled AS user_enabled, w.id AS credential_id, w.uid, w.source, w.assigned_at,
+       sa.id AS staff_attendance_id, sa.scan_type AS staff_scan_type, sa.scanned_at AS staff_scanned_at, sa.source AS staff_source
+       ${base} ORDER BY u.firstname, u.lastname, r.id LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    res.json({ total: Number(count.total), page, pageSize, rows: rows.map(row => ({
+      registration_id: row.registration_id, user_id: row.user_id, registration_role: row.registration_role,
+      status: row.status, firstname: row.firstname, lastname: row.lastname, phone: row.phone,
+      user_enabled: row.user_enabled,
+      staff_attendance: row.staff_attendance_id ? { id: Number(row.staff_attendance_id), scan_type: row.staff_scan_type,
+        scanned_at: row.staff_scanned_at, source: row.staff_source } : null,
+      credential: row.credential_id ? healthEventWristbands.credentialShape({ ...row, id: row.credential_id }) : null
+    })) });
+  } catch (error) { wristbandFailure(res, error, 'list'); }
+});
+
+router.get('/health-events/:id(\\d+)/wristbands/staff-attendance', verifyToken, requireVolunteer, async (req, res) => {
+  try {
+    const event = await authorizeWristbandDesk(req, res);
+    if (!event) return;
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 25, 1), 100);
+    const [[count]] = await mysqlConnection.promise().query(
+      'SELECT COUNT(*) AS total FROM health_event_staff_attendance WHERE health_event_id = ?', [event.id]);
+    const [rows] = await mysqlConnection.promise().query(
+      `SELECT a.id, a.registration_id, a.scan_type, a.scanned_at, a.source, a.paired_scan_id,
+              u.firstname, u.lastname, w.uid,
+              DATE_FORMAT(COALESCE(CONVERT_TZ(a.scanned_at, @@session.time_zone, ?), a.scanned_at), '%Y-%m-%d %H:%i:%s') AS scanned_at_local
+       FROM health_event_staff_attendance a INNER JOIN health_event_registration r ON r.id = a.registration_id
+       INNER JOIN user u ON u.id = r.user_id LEFT JOIN health_event_wristband w ON w.id = a.wristband_id
+       WHERE a.health_event_id = ? ORDER BY a.scanned_at DESC, a.id DESC LIMIT ? OFFSET ?`,
+      [event.timezone || 'America/Los_Angeles', event.id, pageSize, (page - 1) * pageSize]);
+    res.json({ rows, total: Number(count.total), page, pageSize });
+  } catch (error) { wristbandFailure(res, error, 'staff attendance'); }
+});
+
+router.post('/health-events/:id(\\d+)/wristbands/assign', verifyToken, requireVolunteer, async (req, res) => {
+  try {
+    const event = await authorizeWristbandDesk(req, res);
+    if (!event) return;
+    if (hasEventEnded(event)) return res.status(410).json({ error: 'EVENT_ENDED' });
+    const result = await healthEventWristbands.assignWristband(mysqlConnection.promise(), {
+      eventId: Number(event.id), registrationId: Number(req.body.registration_id), uid: req.body.uid,
+      source: req.body.source, replace: req.body.replace === true, operatorId: Number(req.currentUser.id)
+    });
+    res.json(result);
+  } catch (error) { wristbandFailure(res, error, 'assign'); }
+});
+
+router.post('/health-events/:id(\\d+)/wristbands/:credentialId(\\d+)/return', verifyToken, requireVolunteer, async (req, res) => {
+  try {
+    const event = await authorizeWristbandDesk(req, res);
+    if (!event) return;
+    // Physical recovery stays available after the event has finished.
+    const result = await healthEventWristbands.returnWristband(mysqlConnection.promise(), {
+      eventId: Number(event.id), credentialId: Number(req.params.credentialId), operatorId: Number(req.currentUser.id)
+    });
+    res.json(result);
+  } catch (error) { wristbandFailure(res, error, 'return'); }
+});
+
+router.post('/health-events/:id(\\d+)/wristbands/resolve', verifyToken, requireVolunteer, async (req, res) => {
+  try {
+    const event = await authorizeWristbandDesk(req, res);
+    if (!event) return;
+    const binding = await healthEventWristbands.resolveWristband(mysqlConnection.promise(), event.id, req.body.uid);
+    res.json({ credential: healthEventWristbands.credentialShape(binding), participant_role: binding.registration_role,
+      person: { firstname: binding.firstname, lastname: binding.lastname },
+      registration: { id: binding.registration_id, user_id: binding.user_id, status: binding.status,
+        registration_role: binding.registration_role } });
+  } catch (error) { wristbandFailure(res, error, 'resolve'); }
+});
 
 /** Paged beneficiary registrant list for entry-stand volunteers (search included). */
 router.get('/health-events/:id(\\d+)/registrants', verifyToken, requireVolunteer, async (req, res) => {
