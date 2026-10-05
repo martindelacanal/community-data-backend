@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const multer = require('multer');
 const v = require('../services/clinicalValidation');
 const {createOpenEmrAdapter} = require('../services/clinicalOpenEmr');
+const {createFhirBundle} = require('../services/clinicalFhir');
 const MANAGERS = ['admin','opsmanager'];
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const bool = value => value === true || value === 1;
@@ -17,6 +18,7 @@ function createClinicalSandboxRouter(options = {}) {
   const enabled = () => env.CLINICAL_SANDBOX_ENABLED === 'true';
   const requestWindows = new Map();
   let uploadsInFlight=0;
+  let fhirExportsInFlight=0;
   const upload = multer({storage:multer.memoryStorage(),limits:{fileSize:5*1024*1024,files:1,fields:3,fieldSize:500}}).single('file');
   const wrap = fn => (req,res,next) => Promise.resolve(fn(req,res)).catch(next);
   async function audit(actor,event,action,record=null,revision=null,connection=db) {
@@ -74,8 +76,8 @@ function createClinicalSandboxRouter(options = {}) {
     })().catch(next);
   });
   router.use((req,res,next)=>{
-    const now=Date.now(),kind=req.path.endsWith('/attachments')&&req.method==='POST'?'upload':req.path.endsWith('/finalize')?'finalize':'request';
-    const key=`${req.clinicalActor.id}:${kind}`,max=kind==='upload'?10:kind==='finalize'?20:180;
+    const now=Date.now(),kind=req.path.endsWith('/export/fhir')?'fhir':req.path.endsWith('/attachments')&&req.method==='POST'?'upload':req.path.endsWith('/finalize')?'finalize':'request';
+    const key=`${req.clinicalActor.id}:${kind}`,max=kind==='fhir'?10:kind==='upload'?10:kind==='finalize'?20:180;
     for(const [k,b] of requestWindows)if(b.end<=now)requestWindows.delete(k);
     const bucket=requestWindows.get(key)||{end:now+60000,n:0};bucket.n++;requestWindows.set(key,bucket);
     if(bucket.n>max){res.set('Retry-After',String(Math.ceil((bucket.end-now)/1000)));return next(new v.ClinicalError('RATE_LIMITED',429));}
@@ -148,6 +150,56 @@ function createClinicalSandboxRouter(options = {}) {
   router.get('/events/:eventId/patients/:patientId/records',wrap((req,res)=>history(req,res,req.params.eventId,req.params.patientId)));
   router.get(['/patients/:patientId/records/export','/patients/:patientId/export'],wrap(async(req,res)=>{const [[p]]=await db.query('SELECT event_id FROM clinical_sandbox_patient WHERE id=? AND is_synthetic=1',[req.params.patientId]);if(!p)v.fail('NOT_FOUND',404);return history(req,res,p.event_id,req.params.patientId,true);}));
   router.get(['/events/:eventId/patients/:patientId/records/export','/events/:eventId/patients/:patientId/export'],wrap((req,res)=>history(req,res,req.params.eventId,req.params.patientId,true)));
+  async function exportFhir(req,res,eventId,patientId){
+    const actor=req.clinicalActor,patient=await patientFor(eventId,patientId,actor),{grant}=await access(eventId,actor);
+    if(fhirExportsInFlight>=2)v.fail('FHIR_EXPORT_BUSY',429);
+    fhirExportsInFlight++;
+    try{
+      const params=[eventId,patientId];let specialtyFilter='';
+      if(!MANAGERS.includes(actor.role)){
+        if(!grant.specialties.length)v.fail('FORBIDDEN',403);
+        specialtyFilter=` AND specialty IN (${grant.specialties.map(()=>'?').join(',')})`;params.push(...grant.specialties);
+      }
+      // MySQL interprets DATETIME in its own session timezone; obtain epoch values
+      // there so a developer's OS timezone cannot shift documentation timestamps.
+      const [records]=await db.query(`SELECT r.*,UNIX_TIMESTAMP(r.created_at)*1000 created_at_ms,UNIX_TIMESTAMP(r.updated_at)*1000 updated_at_ms FROM clinical_sandbox_record r WHERE event_id=? AND patient_id=?${specialtyFilter} ORDER BY created_at,id LIMIT 201`,params);
+      if(records.length>200)v.fail('FHIR_EXPORT_TOO_LARGE',413);
+      for(const record of records){record.created_at=new Date(Number(record.created_at_ms));record.updated_at=new Date(Number(record.updated_at_ms));}
+      // The finalizer is not necessarily the author of the last content edit.
+      // Use the append-only content revision, excluding the finalization snapshot.
+      if(records.length){
+        // Bound to the revision already read, even if another operator saves a
+        // newer draft while this export is assembling its source metadata.
+        const [authors]=await db.query(`SELECT r.record_id,r.actor_user_id,UNIX_TIMESTAMP(r.created_at)*1000 created_at_ms FROM clinical_sandbox_revision r JOIN (SELECT record_id,MAX(id) id FROM clinical_sandbox_revision WHERE (${records.map(()=>'(record_id=? AND revision<=?)').join(' OR ')}) AND action IN ('draft.create','draft.update','amendment.create') GROUP BY record_id) latest ON latest.id=r.id`,records.flatMap(r=>[r.id,r.revision]));
+        const byRecord=new Map(authors.map(r=>[r.record_id,r]));
+        for(const record of records){const source=byRecord.get(record.id);if(!source)v.fail('FHIR_SOURCE_AUTHOR_INVALID',500);record.content_author_id=source.actor_user_id;record.content_authored_at=new Date(Number(source.created_at_ms));}
+      }
+      let attachments=[];
+      if(records.length)[attachments]=await db.query(`SELECT a.*,UNIX_TIMESTAMP(a.created_at)*1000 created_at_ms FROM clinical_sandbox_attachment a WHERE record_id IN (${records.map(()=>'?').join(',')}) ORDER BY created_at,id`,records.map(r=>r.id));
+      if(attachments.length>40||attachments.reduce((total,a)=>total+Number(a.size_bytes),0)>20*1024*1024)v.fail('FHIR_EXPORT_TOO_LARGE',413);
+      const byId=new Map(records.map(r=>[r.id,{...r,attachments:[]} ]));
+      // Bounded, sequential downloads through the existing authenticated bridge. Fail closed,
+      // rather than producing an apparently complete history with missing/corrupt attachments.
+      for(const a of attachments){
+        const record=byId.get(a.record_id);
+        const buffer=await adapter.download(record.openemr_record_uuid,a.openemr_attachment_uuid,actor);
+        if(buffer.length!==Number(a.size_bytes)||v.hash(buffer)!==a.sha256)v.fail('ATTACHMENT_INTEGRITY_ERROR',502);
+        record.attachments.push({...a,created_at:new Date(Number(a.created_at_ms)),buffer});
+      }
+      const bundle=createFhirBundle({patient,records:[...byId.values()],exporterId:actor.id});
+      // Recheck account and grants after potentially slow attachment retrieval.
+      const [[currentActor]]=await db.query("SELECT u.id,r.name role FROM user u JOIN role r ON r.id=u.role_id WHERE u.id=? AND u.enabled='Y' AND u.deleted='N'",[actor.id]);
+      if(!currentActor||![...MANAGERS,'eventvolunteer'].includes(currentActor.role))v.fail('FORBIDDEN',403);
+      await access(eventId,currentActor);
+      for(const specialty of new Set(records.map(r=>r.specialty)))await access(eventId,currentActor,specialty);
+      await audit(actor,eventId,'history.fhir.export');
+      res.set('Content-Type','application/fhir+json');
+      res.set('Content-Disposition',`attachment; filename="clinical-${patient.synthetic_code}.fhir.json"`);
+      res.send(JSON.stringify(bundle));
+    }finally{fhirExportsInFlight--;}
+  }
+  router.get('/patients/:patientId/export/fhir',wrap(async(req,res)=>{const [[p]]=await db.query('SELECT event_id FROM clinical_sandbox_patient WHERE id=? AND is_synthetic=1',[req.params.patientId]);if(!p)v.fail('NOT_FOUND',404);return exportFhir(req,res,p.event_id,req.params.patientId);}));
+  router.get('/events/:eventId/patients/:patientId/export/fhir',wrap((req,res)=>exportFhir(req,res,req.params.eventId,req.params.patientId)));
   async function createRecord(req,res,parent=null){
     const actor=req.clinicalActor,body=req.body;v.synthetic(body);const eventId=req.params.eventId;
     const specialty=parent?parent.specialty:body.specialty,patientId=parent?parent.patient_id:req.params.patientId;

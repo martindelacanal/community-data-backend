@@ -33,6 +33,7 @@ All API paths below start with `/api/clinical-sandbox` and use the existing Bear
 | `GET /patients` or `/events/:eventId/patients` | `{patients}` accessible fictitious fixtures. |
 | `GET /patients/:patientId/records` | `{records}` filtered by current event/specialty access; usable after event dates. |
 | `GET /patients/:patientId/export` | Audited JSON attachment with schema version, unit map and accessible history. `/records/export` is an alias. |
+| `GET /patients/:patientId/export/fhir` | FHIR R4 `Bundle` collection, `application/fhir+json`, including protected attachment bytes. Same event/specialty permissions. |
 | `POST /events/:eventId/patients/:patientId/records` | `{specialty,data,idempotency_key,synthetic_confirmed:true}` creates a draft. |
 | `GET /events/:eventId/records/:recordId` | `{record}` with attachment metadata and finalization state. |
 | `PATCH /events/:eventId/records/:recordId` | `{revision,data,synthetic_confirmed:true}` replaces draft fields with optimistic concurrency. |
