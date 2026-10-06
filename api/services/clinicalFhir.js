@@ -2,6 +2,8 @@
 const crypto = require('node:crypto');
 const {v5: uuid} = require('uuid');
 const v = require('./clinicalValidation');
+const templates = require('./clinicalTemplates');
+const templateFhir = require('./clinicalFhirTemplates');
 
 // These are stable terminology identifiers, not public API endpoints.
 const BASE = 'https://bienestarcommunity.org/fhir/sandbox';
@@ -93,15 +95,25 @@ function createFhirBundle({patient,records,exportedAt=new Date(),exporterId}) {
     gender:({male:'male',female:'female',other:'other',unknown:'unknown'})[String(patient.sex).toLowerCase()]||'unknown',
   });
   add('CodeSystem','terminology',{text:narrative('Local clinical form vocabulary. These codes do not assert equivalence to SNOMED CT or LOINC.'),url:SYSTEM,version:VERSION,name:'CommunityClinicalSandbox',status:'draft',experimental:true,caseSensitive:true,content:'complete',concept:Object.entries(LABELS).map(([code,display])=>({code,display}))});
+  const sourceData=new Map(records.map(record=>[record.id,v.clinicalData(record.specialty,typeof record.data==='string'?JSON.parse(record.data):record.data)]));
+  if([...sourceData.values()].some(data=>data.template_version===2))add('CodeSystem','template-terminology',{text:narrative('Local identifiers for the versioned clinical documentation templates. Their source references do not establish clinical validation.'),...templateFhir.terminology()});
   const practitioner = userId => {
     if(!Number.isSafeInteger(Number(userId))||Number(userId)<1)v.fail('FHIR_SOURCE_AUTHOR_INVALID',500);
     return add('Practitioner',String(userId),{text:narrative(`System operator ${userId}; professional qualification not asserted.`),identifier:[{system:`${BASE}/identifier/operator`,value:String(userId)}]});
   };
   const questionnaires=new Map();
-  for(const specialty of new Set(records.map(r=>r.specialty))){
+  for(const specialty of new Set(records.filter(r=>sourceData.get(r.id).template_version!==2).map(r=>r.specialty))){
     const definition=fields(specialty),url=`${BASE}/Questionnaire/${specialty}`;
     add('Questionnaire',specialty,{text:narrative(`Synthetic ${LABELS[specialty]}. Form version ${VERSION}; requires clinician review before real use.`),url,version:VERSION,name:`Community_${specialty}`,title:LABELS[specialty],status:'draft',experimental:true,subjectType:['Patient'],item:definition});
-    questionnaires.set(specialty,{definition,url});
+    questionnaires.set(specialty,{definition,url,version:VERSION});
+  }
+  for(const record of records){
+    const data=sourceData.get(record.id),template=templates.templateFor(record.specialty,data);
+    if(!template||questionnaires.has(template.id))continue;
+    const url=`${BASE}/Questionnaire/${template.id}`;
+    const sources=template.sources.map(source=>`${source.title}: ${source.url}`).join('\n');
+    add('Questionnaire',template.id,{text:narrative(`${template.en}. Adaptation for synthetic testing; not a clinically validated instrument. ${sources}`),url,version:templateFhir.VERSION,name:'Community_'+template.id.replace(/-/g,'_'),title:template.en,status:'draft',experimental:true,subjectType:['Patient'],description:`${template.description_en}\n${sources}`,item:templateFhir.definition(template)});
+    questionnaires.set(template.id,{url,version:templateFhir.VERSION,template});
   }
   const byId=new Map(records.map(r=>[r.id,r]));
   const rootOf = record => {
@@ -115,22 +127,22 @@ function createFhirBundle({patient,records,exportedAt=new Date(),exporterId}) {
   for(const record of records){
     if(Number(record.patient_id)!==Number(patient.id)||Number(record.event_id)!==Number(patient.event_id))v.fail('FHIR_SOURCE_PATIENT_MISMATCH',500);
     if(!['draft','final'].includes(record.status))v.fail('FHIR_SOURCE_STATUS_INVALID',500);
-    const data=v.clinicalData(record.specialty,typeof record.data==='string'?JSON.parse(record.data):record.data);
+    const data=sourceData.get(record.id),template=templates.templateFor(record.specialty,data);
     const root=rootOf(record),isFinal=record.status==='final',amended=isFinal&&!!record.supersedes_record_id;
     const encounterRef=add('Encounter',root.id,{text:narrative(`Synthetic ${LABELS[record.specialty]}. Encounter time and clinical encounter status were not captured; document status is recorded separately.`),identifier:[{system:`${BASE}/identifier/encounter`,value:root.id}],status:'unknown',class:{system:'http://terminology.hl7.org/CodeSystem/v3-ActCode',code:'AMB',display:'ambulatory'},type:[concept(record.specialty)],subject:patientRef});
-    const recorder=practitioner(record.recorded_by),author=practitioner(record.content_author_id||record.recorded_by),q=questionnaires.get(record.specialty),recorded=instant(record.updated_at||record.created_at);
-    const answers=responseItems(q.definition,data);
+    const recorder=practitioner(record.recorded_by),author=practitioner(record.content_author_id||record.recorded_by),q=questionnaires.get(template?.id||record.specialty),recorded=instant(record.updated_at||record.created_at);
+    const answers=template?templateFhir.answers(template,data):responseItems(q.definition,data);
     const qrRef=add('QuestionnaireResponse',record.id,{
       text:narrative(`Synthetic ${LABELS[record.specialty]}; ${record.status}; revision ${record.revision}. Narrative allergy, medication, diagnosis and treatment entries are clinician text, not coded assertions. See structured answers.`),
-      identifier:{system:`${BASE}/identifier/record`,value:record.id},questionnaire:`${q.url}|${VERSION}`,
+      identifier:{system:`${BASE}/identifier/record`,value:record.id},questionnaire:`${q.url}|${q.version}`,
       status:amended?'amended':isFinal?'completed':'in-progress',subject:patientRef,encounter:encounterRef,authored:instant(record.content_authored_at||record.created_at),author,
       ...(answers.length?{item:answers}:{}),
     });
     const targets=[qrRef];
-    const observation=(key,code,value,unit,side=null,components=null)=>{
-      const resource={text:narrative(`Synthetic ${LABELS[key]||key}. Measurement time and method were not captured. See source questionnaire.`),status:amended?'amended':isFinal?'final':'preliminary',
-        code:code?{coding:[{system:LOINC,code}]}:concept(key),subject:patientRef,encounter:encounterRef,issued:recorded,derivedFrom:[qrRef],
-        note:[{text:'Source form does not capture measurement time or method. Issued is documentation time.'}],
+    const observation=(key,code,value,unit,side=null,components=null,context={})=>{
+      const resource={text:narrative(`Synthetic ${context.label||LABELS[key]||key}. See source questionnaire for measurement context.`),status:amended?'amended':isFinal?'final':'preliminary',
+        code:code?{coding:[{system:LOINC,code}]}:context.label?{coding:[templateFhir.code(key,context.label)]}:concept(key),subject:patientRef,encounter:encounterRef,issued:recorded,derivedFrom:[qrRef],
+        note:[{text:context.label?'Issued is documentation time. Measurement time is included only when explicitly entered in the source form.':'Source form does not capture measurement time or method. Issued is documentation time.'}],
       };
       // R4's vital-sign rules apply to these LOINC codes. Explicitly represent the
       // missing measurement time rather than misusing the documentation timestamp.
@@ -138,6 +150,8 @@ function createFhirBundle({patient,records,exportedAt=new Date(),exporterId}) {
         resource.category=[{coding:[{system:'http://terminology.hl7.org/CodeSystem/observation-category',code:'vital-signs'}]}];
         resource.effectivePeriod={extension:[{url:'http://hl7.org/fhir/StructureDefinition/data-absent-reason',valueCode:'unknown'}]};
       }
+      if(context.effectiveDateTime){delete resource.effectivePeriod;resource.effectiveDateTime=context.effectiveDateTime;}
+      if(context.method)resource.method={text:context.method};
       if(side)resource.bodySite=concept(side);
       if(components)resource.component=components;
       else if(unit)resource.valueQuantity={value,unit,system:UCUM,code:unit};
@@ -154,6 +168,22 @@ function createFhirBundle({patient,records,exportedAt=new Date(),exporterId}) {
     for(const side of ['right_eye','left_eye'])for(const [key,unit] of Object.entries(EYE))if(present(data[side]?.[key]))observation(key,null,data[side][key],unit,side);
     if(present(data.pupillary_distance_mm))observation('pupillary_distance_mm',null,data.pupillary_distance_mm,'mm');
     if(present(data.pain_score))observation('pain_score',null,data.pain_score,null);
+    if(template){
+      const definitions=templates.fields(template),values=data.template_fields;
+      const effectiveKey=definitions.find(field=>field.fhir?.kind==='effectiveDateTime')?.key;
+      const effectiveDateTime=effectiveKey&&values[effectiveKey]||undefined;
+      const pressure=definitions.filter(field=>['8480-6','8462-4'].includes(field.fhir?.loinc));
+      if(pressure.some(field=>present(values[field.key]))){
+        const components=['8480-6','8462-4'].map(code=>{const field=pressure.find(f=>f.fhir.loinc===code),value=field&&values[field.key];return {code:{coding:[{system:LOINC,code}]},...(present(value)?{valueQuantity:{value,unit:'mm[Hg]',system:UCUM,code:'mm[Hg]'}}:{dataAbsentReason:{coding:[{system:'http://terminology.hl7.org/CodeSystem/data-absent-reason',code:'unknown'}]}})};});
+        observation('blood_pressure','85354-9',null,null,null,components,{label:'Blood pressure',effectiveDateTime});
+      }
+      for(const field of definitions){
+        const value=values[field.key],mapping=field.fhir;
+        if(!mapping||mapping.kind==='effectiveDateTime'||pressure.includes(field)||!present(value))continue;
+        const side=({OD:'right_eye',OS:'left_eye',right:'right_eye',left:'left_eye',right_eye:'right_eye',left_eye:'left_eye'})[mapping.bodySite]||null;
+        observation(field.key,mapping.loinc||null,value,mapping.unit||null,side,null,{label:field.en,effectiveDateTime,method:mapping.method});
+      }
+    }
     for(const attachment of record.attachments||[]){
       if(!Buffer.isBuffer(attachment.buffer)||attachment.buffer.length!==Number(attachment.size_bytes)||v.hash(attachment.buffer)!==attachment.sha256)v.fail('ATTACHMENT_INTEGRITY_ERROR',502);
       const a={contentType:attachment.mime_type,data:attachment.buffer.toString('base64'),size:attachment.buffer.length,title:attachment.filename,hash:crypto.createHash('sha1').update(attachment.buffer).digest('base64')};

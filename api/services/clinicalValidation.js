@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('node:crypto');
 const sharp = require('sharp');
+const templates = require('./clinicalTemplates');
 const SPECIALTIES = ['general', 'dental', 'optometry', 'clearance'];
 class ClinicalError extends Error { constructor(code, status = 400) { super(code); this.code = code; this.status = status; } }
 function fail(code = 'INVALID_DATA', status = 400) { throw new ClinicalError(code, status); }
@@ -23,6 +24,7 @@ function number(value, min, max, integer = false) {
 function choice(value, allowed) { if (value == null || value === '') return null; if (!allowed.includes(value)) fail(); return value; }
 function clinicalData(specialty, input) {
   if (!SPECIALTIES.includes(specialty)) fail('INVALID_SPECIALTY');
+  if (input && Object.hasOwn(input, 'template_version')) return templateData(specialty, input);
   const common = ['complaint','findings','assessment','plan','referral','follow_up_date','medications','allergies','not_assessed'];
   const extra = {general:['vitals'],dental:['tooth_notation','teeth','pain_score'],optometry:['right_eye','left_eye','pupillary_distance_mm','acuity_context'],clearance:['vitals','decision','restrictions','reason']}[specialty];
   keys(input, [...common, ...extra]);
@@ -59,6 +61,44 @@ function clinicalData(specialty, input) {
     for (const key of ['restrictions','reason']) if (key in input) output[key] = text(input[key],2000);
   }
   return output;
+}
+function templateData(specialty, input) {
+  const template=templates.templateFor(specialty,input);
+  if(!template)fail('INVALID_CLINICAL_TEMPLATE');
+  keys(input,['template_version','template_id','template_fields','not_assessed',...(template.tooth_chart?['tooth_notation','teeth']:[])]);
+  const definitions=templates.fields(template),known=new Map(definitions.map(f=>[f.key,f]));
+  keys(input.template_fields,[...known.keys()]);
+  const answers={};
+  for(const [key,value] of Object.entries(input.template_fields)){
+    const field=known.get(key);
+    if(field.type==='number') answers[key]=number(value,field.min??-1000000,field.max??1000000);
+    else if(field.type==='select')answers[key]=choice(value,field.options.map(option=>option.value));
+    else if(field.type==='date'){if(typeof value==='string'&&value.startsWith('0000-'))fail();answers[key]=date(value);}
+    else if(field.type==='datetime'){
+      if(value===null||value==='')answers[key]=null;
+      else{
+        if(typeof value!=='string'||value.startsWith('0000-')||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)||!Number.isFinite(Date.parse(value)))fail('INVALID_DATA');
+        // Do not accept normalized impossible calendar dates.
+        if(new Date(value).toISOString().slice(0,19)!==value.slice(0,19))fail('INVALID_DATA');
+        answers[key]=new Date(value).toISOString();
+      }
+    }else answers[key]=text(value,field.maxLength??2000);
+  }
+  const result={template_version:2,template_id:template.id,template_fields:answers};
+  if('not_assessed' in input){
+    if(!Array.isArray(input.not_assessed)||input.not_assessed.length>50||new Set(input.not_assessed).size!==input.not_assessed.length)fail('INVALID_NOT_ASSESSED');
+    const sections=new Set(template.sections.map(section=>section.id));
+    result.not_assessed=input.not_assessed.map(key=>{if(!sections.has(key))fail('INVALID_NOT_ASSESSED');return key;});
+    for(const section of template.sections)if(result.not_assessed.includes(section.id)&&section.fields.some(field=>answers[field.key]!==undefined&&answers[field.key]!==null&&answers[field.key]!==''))fail('INVALID_NOT_ASSESSED');
+  }
+  if(template.tooth_chart){
+    // Preserve the existing explicit numbering rules and pediatric tooth support.
+    const dental={};
+    for(const key of ['tooth_notation','teeth'])if(key in input)dental[key]=input[key];
+    Object.assign(result,clinicalData('dental',dental));
+  }
+  if(Buffer.byteLength(JSON.stringify(result),'utf8')>64*1024)fail('CLINICAL_RECORD_TOO_LARGE',413);
+  return result;
 }
 function idempotency(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{8,100}$/.test(value)) fail('INVALID_IDEMPOTENCY_KEY'); return value; }
 function synthetic(body) {

@@ -6,6 +6,7 @@ const multer = require('multer');
 const v = require('../services/clinicalValidation');
 const {createOpenEmrAdapter} = require('../services/clinicalOpenEmr');
 const {createFhirBundle} = require('../services/clinicalFhir');
+const clinicalTemplates = require('../services/clinicalTemplates');
 const MANAGERS = ['admin','opsmanager'];
 const json = value => typeof value === 'string' ? JSON.parse(value) : value;
 const bool = value => value === true || value === 1;
@@ -89,6 +90,7 @@ function createClinicalSandboxRouter(options = {}) {
     res.json({enabled:enabled(),mode:'synthetic',real_data_enabled:false,openemr:{configured:adapter.configured(),available},attachments:{max_bytes:5*1024*1024,allowed_types:scannerHealthy?['image/png','image/jpeg','application/pdf']:[],scanner_available:scannerHealthy,pdf_available:scannerHealthy}});
   }));
   router.use((req,res,next)=>enabled()?next():next(new v.ClinicalError('CLINICAL_SANDBOX_DISABLED',503)));
+  router.get('/templates',wrap(async(req,res)=>res.json(clinicalTemplates.catalog)));
   router.get('/events',wrap(async(req,res)=>{
     const actor=req.clinicalActor;
     const [rows]=await db.query(`SELECT e.* FROM clinical_sandbox_event e WHERE e.mode='synthetic'${MANAGERS.includes(actor.role)?'':" AND EXISTS(SELECT 1 FROM clinical_sandbox_grant g WHERE g.event_id=e.id AND g.user_id=? AND g.revoked_at IS NULL)"} ORDER BY e.created_at DESC,e.id DESC LIMIT 100`,MANAGERS.includes(actor.role)?[]:[actor.id]);
@@ -205,6 +207,7 @@ function createClinicalSandboxRouter(options = {}) {
     const specialty=parent?parent.specialty:body.specialty,patientId=parent?parent.patient_id:req.params.patientId;
     await access(eventId,actor,specialty,'write');await patientFor(eventId,patientId,actor);
     const data=v.clinicalData(specialty,body.data),key=v.idempotency(body.idempotency_key),reason=parent?v.text(body.reason,1000,true):null;
+    if(parent&&!clinicalTemplates.sameTemplate(json(parent.data),data))v.fail('CLINICAL_TEMPLATE_MISMATCH',409);
     const requestHash=v.hash({patientId:Number(patientId),specialty,data,parent:parent?.id||null,reason});
     let created=false;
     const result=await transaction(async c=>{
@@ -223,14 +226,14 @@ function createClinicalSandboxRouter(options = {}) {
   router.patch('/events/:eventId/records/:recordId',wrap(async(req,res)=>{
     v.synthetic(req.body);const actor=req.clinicalActor;
     const record=await transaction(async c=>{const r=await recordFor(req.params.eventId,req.params.recordId,actor,'write',c,true);if(r.status!=='draft')v.fail('FINAL_RECORD_IMMUTABLE',409);if(r.finalize_key)v.fail('FINALIZATION_PENDING_RETRY',409);if(req.body.revision!==r.revision)v.fail('REVISION_CONFLICT',409);
-      const data=v.clinicalData(r.specialty,req.body.data);await c.query("UPDATE clinical_sandbox_record SET data=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(3),sync_status='pending' WHERE id=?",[JSON.stringify(data),r.id]);await audit(actor,r.event_id,'record.update',r.id,r.revision+1,c);const [[next]]=await c.query('SELECT * FROM clinical_sandbox_record WHERE id=?',[r.id]);await snapshot(c,next,actor,'draft.update');return shapeRecord(next,c);});res.json({record});
+      const data=v.clinicalData(r.specialty,req.body.data);if(!clinicalTemplates.sameTemplate(json(r.data),data))v.fail('CLINICAL_TEMPLATE_MISMATCH',409);await c.query("UPDATE clinical_sandbox_record SET data=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(3),sync_status='pending' WHERE id=?",[JSON.stringify(data),r.id]);await audit(actor,r.event_id,'record.update',r.id,r.revision+1,c);const [[next]]=await c.query('SELECT * FROM clinical_sandbox_record WHERE id=?',[r.id]);await snapshot(c,next,actor,'draft.update');return shapeRecord(next,c);});res.json({record});
   }));
   router.post('/events/:eventId/records/:recordId/finalize',wrap(async(req,res)=>{
     v.synthetic(req.body);const actor=req.clinicalActor,key=v.idempotency(req.body.idempotency_key);
     // Persist the finalization boundary before a remote call. An ambiguous native commit
     // cannot be followed by editing the draft into a different document on retry.
     await transaction(async c=>{const r=await recordFor(req.params.eventId,req.params.recordId,actor,'finalize',c,true);if(r.status==='final')return;
-      if(req.body.revision!==r.revision)v.fail('REVISION_CONFLICT',409);const data=json(r.data);if(!data.assessment?.trim()||!data.plan?.trim())v.fail('ASSESSMENT_AND_PLAN_REQUIRED');
+      if(req.body.revision!==r.revision)v.fail('REVISION_CONFLICT',409);const data=json(r.data);if(!clinicalTemplates.readyToFinalize(r.specialty,data))v.fail(data.template_version===2?'CLINICAL_TEMPLATE_REVIEW_REQUIRED':'ASSESSMENT_AND_PLAN_REQUIRED');
       if(r.finalization_context && json(r.finalization_context).id!==actor.id)v.fail('FINALIZATION_OWNED_BY_ANOTHER_ACTOR',403);
       if(!r.finalize_key){
         const [[recorder]]=await c.query('SELECT r.name role FROM user u JOIN role r ON r.id=u.role_id WHERE u.id=?',[r.recorded_by]);
@@ -243,7 +246,7 @@ function createClinicalSandboxRouter(options = {}) {
       const r=await recordFor(req.params.eventId,req.params.recordId,actor,'finalize',c,true);
       if(r.status==='final'){if(r.finalize_key!==key)v.fail('FINAL_RECORD_IMMUTABLE',409);return shapeRecord(r,c);}
       if(req.body.revision!==r.revision)v.fail('REVISION_CONFLICT',409);
-      const data=json(r.data);if(!data.assessment?.trim()||!data.plan?.trim())v.fail('ASSESSMENT_AND_PLAN_REQUIRED');
+      const data=json(r.data);if(!clinicalTemplates.readyToFinalize(r.specialty,data))v.fail(data.template_version===2?'CLINICAL_TEMPLATE_REVIEW_REQUIRED':'ASSESSMENT_AND_PLAN_REQUIRED');
       const p=await patientFor(r.event_id,r.patient_id,actor,c);
       const nativePatient=await adapter.upsertPatient(p,actor);if(!nativePatient.patient_uuid)v.fail('OPENEMR_UNAVAILABLE',503);
       let supersedes=null,encounter;
@@ -256,7 +259,7 @@ function createClinicalSandboxRouter(options = {}) {
       if(!encounter.encounter_uuid)v.fail('OPENEMR_UNAVAILABLE',503);
       const finalActor=r.finalization_context?json(r.finalization_context):null;
       if(!finalActor||finalActor.id!==actor.id)v.fail('FINALIZATION_OWNED_BY_ANOTHER_ACTOR',403);
-      const saved=await adapter.saveRecord({is_test:true,patient_uuid:nativePatient.patient_uuid,encounter_uuid:encounter.encounter_uuid,specialty:r.specialty,schema_version:1,external_record_id:`CPTEST-${r.id}`,idempotency_key:`final_${r.id}`,status:'final',data,supersedes_record_uuid:supersedes,amendment_reason:r.amendment_reason},finalActor);
+      const saved=await adapter.saveRecord({is_test:true,patient_uuid:nativePatient.patient_uuid,encounter_uuid:encounter.encounter_uuid,specialty:r.specialty,schema_version:data.template_version===2?2:1,external_record_id:`CPTEST-${r.id}`,idempotency_key:`final_${r.id}`,status:'final',data,supersedes_record_uuid:supersedes,amendment_reason:r.amendment_reason},finalActor);
       if(!saved.record_uuid)v.fail('OPENEMR_UNAVAILABLE',503);
       await c.query('UPDATE clinical_sandbox_patient SET openemr_patient_uuid=? WHERE id=?',[nativePatient.patient_uuid,p.id]);
       await c.query("UPDATE clinical_sandbox_record SET status='final',sync_status='synced',revision=revision+1,finalized_by=?,finalized_at=CURRENT_TIMESTAMP(3),updated_at=CURRENT_TIMESTAMP(3),finalize_key=?,openemr_record_uuid=?,openemr_encounter_uuid=? WHERE id=?",[actor.id,key,saved.record_uuid,encounter.encounter_uuid,r.id]);
