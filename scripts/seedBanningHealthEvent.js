@@ -21,6 +21,10 @@ const mysql = require('mysql2/promise');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const { uploadImageWithVariants } = require('../api/services/imageVariants');
+const {
+  lockVolunteerNotificationRecipientSettings,
+  addVolunteerNotificationRecipientsForLocation
+} = require('../api/services/volunteerNotificationRecipients');
 
 const [, , host, user, database, port] = process.argv;
 const password = process.env.PW;
@@ -541,10 +545,19 @@ const SLOT_DATES = ['2026-08-08', '2026-08-09'];
     locationId = locRows[0].id;
     log('location exists:', locationId);
   } else {
-    const [ins] = await c.query(
-      'INSERT INTO location(organization, community_city, address, enabled) VALUES (?,?,?,"Y")',
-      [LOCATION.organization, LOCATION.community_city, LOCATION.address]);
-    locationId = ins.insertId;
+    await c.beginTransaction();
+    try {
+      await lockVolunteerNotificationRecipientSettings(c);
+      const [ins] = await c.query(
+        'INSERT INTO location(organization, community_city, address, enabled) VALUES (?,?,?,"Y")',
+        [LOCATION.organization, LOCATION.community_city, LOCATION.address]);
+      locationId = ins.insertId;
+      await addVolunteerNotificationRecipientsForLocation(c, locationId);
+      await c.commit();
+    } catch (error) {
+      await c.rollback();
+      throw error;
+    }
     log('location created:', locationId);
   }
 

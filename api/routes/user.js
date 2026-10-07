@@ -4,6 +4,10 @@ const { assignBeneficiaryUsername } = require('../utils/beneficiaryUsername');
 const { selectPendingSurveyQuestions } = require('../utils/pendingSurveyQuestions');
 const mysqlConnection = require('../connection/connection');
 const { setUserEnabledWithRestoreRevocation } = require('../services/restoreCredentialsRepository');
+const {
+  lockVolunteerNotificationRecipientSettings,
+  addVolunteerNotificationRecipientsForLocation
+} = require('../services/volunteerNotificationRecipients');
 const { buildRestoreAuthBinding } = require('../utils/restoreAuthBinding');
 const { renewSession, issueSessionForUser } = require('../services/beneficiarySession');
 const jwt = require('jsonwebtoken');
@@ -2272,6 +2276,7 @@ async function fetchVolunteerNotificationRecipients(connection = mysqlConnection
        recipient.id,
        recipient.email,
        recipient.language,
+       recipient.auto_include_new_locations,
        GROUP_CONCAT(recipient_location.location_id ORDER BY location.community_city, recipient_location.location_id) AS location_ids
      FROM volunteer_notification_recipient AS recipient
      LEFT JOIN volunteer_notification_recipient_location AS recipient_location
@@ -2279,7 +2284,7 @@ async function fetchVolunteerNotificationRecipients(connection = mysqlConnection
      LEFT JOIN location
        ON recipient_location.location_id = location.id
      WHERE recipient.enabled = 'Y'
-     GROUP BY recipient.id, recipient.email, recipient.language
+     GROUP BY recipient.id, recipient.email, recipient.language, recipient.auto_include_new_locations
      ORDER BY recipient.id ASC`
   );
 
@@ -2287,6 +2292,7 @@ async function fetchVolunteerNotificationRecipients(connection = mysqlConnection
     id: row.id,
     email: row.email,
     language: row.language === 'es' ? 'es' : 'en',
+    auto_include_new_locations: row.auto_include_new_locations === 1 || row.auto_include_new_locations === true,
     location_ids: row.location_ids
       ? row.location_ids.split(',').map((locationId) => Number(locationId)).filter((locationId) => Number.isInteger(locationId))
       : []
@@ -2295,20 +2301,25 @@ async function fetchVolunteerNotificationRecipients(connection = mysqlConnection
 
 function normalizeVolunteerNotificationLocationIds(locationIds) {
   if (!Array.isArray(locationIds)) {
-    return [];
+    return null;
   }
 
   const normalizedLocationIds = [];
   const seenLocationIds = new Set();
 
-  locationIds.forEach((locationId) => {
+  for (const locationId of locationIds) {
+    const validType = typeof locationId === 'number' ||
+      (typeof locationId === 'string' && /^\d+$/.test(locationId.trim()));
     const parsedLocationId = Number(locationId);
 
-    if (Number.isInteger(parsedLocationId) && parsedLocationId > 0 && !seenLocationIds.has(parsedLocationId)) {
+    if (!validType || !Number.isSafeInteger(parsedLocationId) || parsedLocationId <= 0) {
+      return null;
+    }
+    if (!seenLocationIds.has(parsedLocationId)) {
       seenLocationIds.add(parsedLocationId);
       normalizedLocationIds.push(parsedLocationId);
     }
-  });
+  }
 
   return normalizedLocationIds;
 }
@@ -2543,22 +2554,48 @@ router.put('/volunteer/notification-recipients', verifyToken, async (req, res) =
       return res.status(400).json({ code: 'INVALID_EMAIL', email: email });
     }
     const key = email.toLowerCase();
+    const hasAutoIncludeNewLocations = Object.prototype.hasOwnProperty.call(item, 'auto_include_new_locations');
+    if (hasAutoIncludeNewLocations && typeof item.auto_include_new_locations !== 'boolean') {
+      return res.status(400).json({ code: 'INVALID_AUTO_INCLUDE_NEW_LOCATIONS', email });
+    }
     if (seen.has(key)) {
       continue;
     }
     seen.add(key);
     const language = item.language === 'es' ? 'es' : 'en';
-    const locationIds = normalizeVolunteerNotificationLocationIds(item.location_ids || item.locations);
-    if (locationIds.length === 0) {
+    const locationIds = normalizeVolunteerNotificationLocationIds(
+      Object.prototype.hasOwnProperty.call(item, 'location_ids') ? item.location_ids : item.locations
+    );
+    if (locationIds === null) {
       return res.status(400).json({ code: 'INVALID_LOCATIONS', email: email });
     }
-    recipients.push({ email, language, location_ids: locationIds });
+    recipients.push({
+      email, language, location_ids: locationIds,
+      // Missing values from an older web/Capacitor client preserve the saved
+      // preference. New addresses default to false.
+      auto_include_new_locations: hasAutoIncludeNewLocations ? item.auto_include_new_locations : undefined
+    });
   }
 
   let connection;
   try {
     connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
+
+    // Location creators take the same lock, so a new location cannot see an
+    // intermediate recipient replacement.
+    await lockVolunteerNotificationRecipientSettings(connection);
+    const [storedRecipients] = await connection.query(
+      'SELECT email, auto_include_new_locations FROM volunteer_notification_recipient'
+    );
+    const storedPreferences = new Map(storedRecipients.map((recipient) => [
+      recipient.email.toLowerCase(), recipient.auto_include_new_locations === 1 || recipient.auto_include_new_locations === true
+    ]));
+    for (const recipient of recipients) {
+      if (recipient.auto_include_new_locations === undefined) {
+        recipient.auto_include_new_locations = storedPreferences.get(recipient.email.toLowerCase()) || false;
+      }
+    }
 
     const [locationRows] = await connection.query('SELECT id FROM location');
     const validLocationIds = new Set(locationRows.map((location) => Number(location.id)));
@@ -2586,15 +2623,17 @@ router.put('/volunteer/notification-recipients', verifyToken, async (req, res) =
     if (recipients.length > 0) {
       for (const recipient of recipients) {
         const [insertResult] = await connection.query(
-          'INSERT INTO volunteer_notification_recipient(email, language, enabled) VALUES (?,?,?)',
-          [recipient.email, recipient.language, 'Y']
+          'INSERT INTO volunteer_notification_recipient(email, language, enabled, auto_include_new_locations) VALUES (?,?,?,?)',
+          [recipient.email, recipient.language, 'Y', recipient.auto_include_new_locations ? 1 : 0]
         );
 
         const locationValues = recipient.location_ids.map((locationId) => [insertResult.insertId, locationId]);
-        await connection.query(
-          'INSERT INTO volunteer_notification_recipient_location(recipient_id, location_id) VALUES ?',
-          [locationValues]
-        );
+        if (locationValues.length > 0) {
+          await connection.query(
+            'INSERT INTO volunteer_notification_recipient_location(recipient_id, location_id) VALUES ?',
+            [locationValues]
+          );
+        }
       }
     }
 
@@ -2765,8 +2804,9 @@ router.get('/new/location/:id', verifyToken, async (req, res) => {
 router.post('/new/location', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
+    let connection;
     try {
-      formulario = req.body;
+      const formulario = req.body;
       const organization = formulario.organization || null;
       const community_city = formulario.community_city || null;
       const address = formulario.address || null;
@@ -2780,7 +2820,12 @@ router.post('/new/location', verifyToken, async (req, res) => {
       const latitude = coordinatesArray[1];
       const point = `POINT(${latitude} ${longitude})`;
 
-      const [rows] = await mysqlConnection.promise().query(
+      connection = await mysqlConnection.promise().getConnection();
+      await connection.beginTransaction();
+      // Acquire this before inserting the location so both admin operations
+      // take their locks in the same order.
+      await lockVolunteerNotificationRecipientSettings(connection);
+      const [rows] = await connection.query(
         `INSERT INTO location (organization, community_city, address, description_en, description_es, coordinates)
         VALUES (?, ?, ?, ?, ?, ST_GeomFromText(?))`,
         [organization, community_city, address, description_en, description_es, point]
@@ -2788,23 +2833,33 @@ router.post('/new/location', verifyToken, async (req, res) => {
 
       if (rows.affectedRows > 0) {
         const location_id = rows.insertId;
+        await addVolunteerNotificationRecipientsForLocation(connection, location_id);
         if (client_ids.length > 0) {
           for (let i = 0; i < client_ids.length; i++) {
-            await mysqlConnection.promise().query(
+            await connection.query(
               'insert into client_location(client_id, location_id) values(?,?)',
               [client_ids[i], location_id]
             );
           }
         }
 
+        await connection.commit();
         res.json('Location created successfully');
       } else {
+        await connection.rollback();
         res.status(500).json('Could not create location');
       }
     } catch (error) {
+      if (connection) {
+        await connection.rollback();
+      }
       console.log(error);
       logger.error(error);
       res.status(500).json('Internal server error');
+    } finally {
+      if (connection) {
+        connection.release();
+      }
     }
   } else {
     res.status(401).json('Unauthorized');

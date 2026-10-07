@@ -8,6 +8,10 @@ const { once } = require('node:events');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { createObjectCsvStringifier } = require('csv-writer');
+const {
+  lockVolunteerNotificationRecipientSettings,
+  addVolunteerNotificationRecipientsForLocation,
+} = require('../services/volunteerNotificationRecipients');
 
 // Execute the real handlers and JWT middleware without opening the production
 // database or importing the monolithic router's S3/email/background services.
@@ -37,11 +41,11 @@ function routeSource(method, route) {
   return source.slice(start, end);
 }
 
-async function fixture(t) {
+async function fixture(t, { initialAutoInclude = 0, failClientWrite = false } = {}) {
   const statements = [];
   const signedImages = [];
   const transactions = [];
-  let recipients = [{ id: 1, email: 'operations@example.test', language: 'en', location_ids: '2,3' }];
+  let recipients = [{ id: 1, email: 'operations@example.test', language: 'en', location_ids: '2,3', auto_include_new_locations: initialAutoInclude }];
   const volunteer = {
     id: 42, firstname: 'Ana', lastname: 'Rivera', email: 'ana@example.test',
     date_of_birth: '01/01/1990', phone: '5551234567', zipcode: '90210',
@@ -56,12 +60,19 @@ async function fixture(t) {
     getConnection: async () => connection,
     query: async (sql, params = []) => {
       statements.push({ sql, params: Array.from(params) });
+      if (/^UPDATE volunteer_notification_recipient_settings/.test(sql)) return [{ affectedRows: 1 }];
+      if (/^SELECT email, auto_include_new_locations FROM volunteer_notification_recipient/.test(sql)) return [recipients.map(row => ({ ...row }))];
+      if (/^INSERT INTO volunteer_notification_recipient_location \(/.test(sql)) {
+        const optedIn = recipients.filter(row => row.auto_include_new_locations === 1);
+        optedIn.forEach(row => { row.location_ids = row.location_ids ? `${row.location_ids},${params[0]}` : String(params[0]); });
+        return [{ affectedRows: optedIn.length }];
+      }
       if (/FROM volunteer_notification_recipient AS recipient/i.test(sql)) return [recipients.map(row => ({ ...row }))];
       if (/^DELETE FROM volunteer_notification_recipient$/.test(sql)) recipients = [];
       if (/^DELETE FROM volunteer_notification_recipient/.test(sql)) return [{ affectedRows: 1 }];
       if (/INSERT INTO volunteer_notification_recipient\(/.test(sql)) {
         const id = recipients.length + 1;
-        recipients.push({ id, email: params[0], language: params[1], location_ids: '' });
+        recipients.push({ id, email: params[0], language: params[1], location_ids: '', auto_include_new_locations: params[3] });
         return [{ insertId: id }];
       }
       if (/INSERT INTO volunteer_notification_recipient_location/.test(sql)) {
@@ -73,6 +84,11 @@ async function fixture(t) {
       if (/COUNT\(\*\) as count/i.test(sql)) return [[{ count: 1 }]];
       if (/FROM volunteer as v/i.test(sql)) return [[{ ...volunteer }]];
       if (/FROM client c/.test(sql)) return [[{ client_id: 1, client_name: 'Community', location_id: 2, community_city: 'Central' }]];
+      if (/INSERT INTO location/i.test(sql)) return [{ insertId: 4, affectedRows: 1 }];
+      if (/insert into client_location/i.test(sql)) {
+        if (failClientWrite) throw new Error('Simulated client link failure');
+        return [{ affectedRows: 1 }];
+      }
       if (/FROM location/i.test(sql)) return [[{ id: 2, community_city: 'Central' }, { id: 3, community_city: 'North' }]];
       if (/FROM gender/i.test(sql)) return [[{ id: 4, name: 'Woman' }]];
       if (/FROM ethnicity/i.test(sql)) return [[{ id: 5, name: 'Latina' }]];
@@ -86,6 +102,7 @@ async function fixture(t) {
   const context = vm.createContext({
     router, jwt, process: { env: { JWT_SECRET: secret } },
     mysqlConnection: { promise: () => connection },
+    lockVolunteerNotificationRecipientSettings, addVolunteerNotificationRecipientsForLocation,
     createCsvStringifier: createObjectCsvStringifier,
     console, logger: { error: () => {} },
     bucketName: 'test-signature-bucket', s3: {},
@@ -100,6 +117,7 @@ async function fixture(t) {
   const routes = [...protectedRoutes,
     ['get', '/locations'], ['get', '/client/locations'], ['get', '/gender'], ['get', '/ethnicity'],
     ['post', '/metrics/volunteer/gender'], ['put', '/enable-disable/:id'],
+    ['post', '/new/location'],
   ].map(([method, route]) => routeSource(method, route));
   vm.runInContext([...helpers, ...routes].join('\n'), context);
   const server = app.listen(0, '127.0.0.1');
@@ -220,17 +238,22 @@ test('opsmanager can save notification recipients with language and location sco
     recipients: [{ email: ' team@example.test ', language: 'es', location_ids: [2, '3', 2] }],
   } });
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), [{ id: 1, email: 'team@example.test', language: 'es', location_ids: [2, 3] }]);
+  assert.deepEqual(await response.json(), [{ id: 1, email: 'team@example.test', language: 'es', location_ids: [2, 3], auto_include_new_locations: false }]);
   assert.deepEqual(f.transactions, ['begin', 'commit', 'release']);
   const saved = await f.request('get', '/volunteer/notification-recipients');
-  assert.deepEqual(await saved.json(), [{ id: 1, email: 'team@example.test', language: 'es', location_ids: [2, 3] }]);
+  assert.deepEqual(await saved.json(), [{ id: 1, email: 'team@example.test', language: 'es', location_ids: [2, 3], auto_include_new_locations: false }]);
 });
 
 test('opsmanager recipient edits still validate emails and location membership before replacement', async t => {
   const f = await fixture(t);
   for (const recipient of [
     { email: 'invalid', location_ids: [2] },
-    { email: 'team@example.test', location_ids: [] },
+    { email: 'team@example.test', location_ids: '2' },
+    { email: 'team@example.test', location_ids: [2, 0] },
+    { email: 'team@example.test', location_ids: [2, null] },
+    { email: 'team@example.test', location_ids: [true] },
+    { email: 'team@example.test', location_ids: [2, 'invalid'] },
+    { email: 'team@example.test' },
     { email: 'team@example.test', location_ids: [999] },
   ]) {
     const response = await f.request('put', '/volunteer/notification-recipients', { body: { recipients: [recipient] } });
@@ -238,6 +261,84 @@ test('opsmanager recipient edits still validate emails and location membership b
     await response.text();
   }
   assert.equal(f.statements.some(({ sql }) => /DELETE|INSERT/.test(sql)), false);
+  assert.deepEqual(f.transactions, ['begin', 'rollback', 'release']);
+});
+
+test('clear all can save an empty location scope, including future-only recipients', async t => {
+  const f = await fixture(t);
+  const response = await f.request('put', '/volunteer/notification-recipients', { body: { recipients: [
+    { email: 'none@example.test', location_ids: [], auto_include_new_locations: false },
+    { email: 'future@example.test', location_ids: [], auto_include_new_locations: true },
+    { email: 'legacy@example.test', locations: ['2', 3] },
+  ] } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), [
+    { id: 1, email: 'none@example.test', language: 'en', location_ids: [], auto_include_new_locations: false },
+    { id: 2, email: 'future@example.test', language: 'en', location_ids: [], auto_include_new_locations: true },
+    { id: 3, email: 'legacy@example.test', language: 'en', location_ids: [2, 3], auto_include_new_locations: false },
+  ]);
+  const linkInserts = f.statements.filter(({ sql }) => /^INSERT INTO volunteer_notification_recipient_location/.test(sql));
+  assert.equal(linkInserts.length, 1);
+  assert.deepEqual(Array.from(linkInserts[0].params[0], row => Array.from(row)), [[3, 2], [3, 3]]);
+  assert.deepEqual(f.transactions, ['begin', 'commit', 'release']);
+});
+
+test('recipient auto-location preferences round trip, legacy clients preserve them, and new addresses default off', async t => {
+  const f = await fixture(t, { initialAutoInclude: 1 });
+  const existing = await f.request('get', '/volunteer/notification-recipients');
+  assert.equal((await existing.json())[0].auto_include_new_locations, true);
+  const legacy = await f.request('put', '/volunteer/notification-recipients', { body: { recipients: [
+    { email: 'OPERATIONS@example.test', location_ids: [2] },
+    { email: 'new@example.test', location_ids: [3] },
+  ] } });
+  assert.equal(legacy.status, 200);
+  const rows = await legacy.json();
+  assert.deepEqual(rows.map(row => row.auto_include_new_locations), [true, false]);
+  const explicit = await f.request('put', '/volunteer/notification-recipients', { body: { recipients: [
+    { email: 'operations@example.test', location_ids: [2], auto_include_new_locations: false },
+    { email: 'new@example.test', location_ids: [3], auto_include_new_locations: true },
+  ] } });
+  assert.equal(explicit.status, 200);
+  assert.deepEqual((await explicit.json()).map(row => row.auto_include_new_locations), [false, true]);
+  const replacement = f.statements.findIndex(({ sql }) => /^DELETE FROM volunteer_notification_recipient_location/.test(sql));
+  const lock = f.statements.findIndex(({ sql }) => /^UPDATE volunteer_notification_recipient_settings/.test(sql));
+  assert.ok(lock >= 0 && lock < replacement, 'settings lock is held before the full replacement');
+});
+
+test('recipient auto-location preference accepts only JSON booleans before any database access', async t => {
+  const f = await fixture(t);
+  for (const invalid of [null, 0, 1, 'false', 'true', [], {}]) {
+    const response = await f.request('put', '/volunteer/notification-recipients', { body: { recipients: [
+      { email: 'new@example.test', location_ids: [2], auto_include_new_locations: invalid },
+    ] } });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'INVALID_AUTO_INCLUDE_NEW_LOCATIONS');
+  }
+  assert.equal(f.statements.length, 0);
+});
+
+test('location creation acquires the recipient settings lock before insert and commits client links atomically', async t => {
+  const f = await fixture(t);
+  const response = await f.request('post', '/new/location', { body: {
+    organization: 'Community', community_city: 'New location', coordinates: '33.1, -117.2', client_ids: [8, 9],
+  } });
+  assert.equal(response.status, 200);
+  await response.text();
+  assert.deepEqual(f.transactions, ['begin', 'commit', 'release']);
+  assert.match(f.statements[0].sql, /^UPDATE volunteer_notification_recipient_settings/);
+  assert.match(f.statements[1].sql, /INSERT INTO location/);
+  assert.match(f.statements[2].sql, /INSERT INTO volunteer_notification_recipient_location/);
+  assert.deepEqual(f.statements[2].params, [4, 4]);
+  assert.deepEqual(f.statements.slice(3).map(statement => statement.params), [[8, 4], [9, 4]]);
+});
+
+test('a client link failure rolls back the new location and its automatic recipient links', async t => {
+  const f = await fixture(t, { failClientWrite: true });
+  const response = await f.request('post', '/new/location', { body: {
+    organization: 'Community', community_city: 'New location', coordinates: '33.1, -117.2', client_ids: [8],
+  } });
+  assert.equal(response.status, 500);
+  await response.text();
   assert.deepEqual(f.transactions, ['begin', 'rollback', 'release']);
 });
 
