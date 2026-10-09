@@ -47,4 +47,10 @@ app.use('/api', pushNotificationsRoute);
 const healthEventsRoute = require('./api/routes/healthEvents');
 app.use('/api', healthEventsRoute);
 
+const { createChatbotRouter } = require('./api/routes/chatbot');
+app.use('/api/chatbot', createChatbotRouter({
+  pool: require('./api/connection/connection').promise(),
+  logger: require('./api/utils/logger'),
+}));
+
 module.exports = app;
