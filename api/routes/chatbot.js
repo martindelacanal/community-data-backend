@@ -169,8 +169,10 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
   }));
 
   router.post('/conversations/:id/messages',requireAccess,wrap(async(req,res)=>{
-    const question=validateMessage(req.body?.message),locale=chooseLocale(question,req.body?.locale),actor=req.chatbotActor;
+    const question=validateMessage(req.body?.message),actor=req.chatbotActor;
     const conversation=await readConversation(req.params.id,actor.ownerKey),configuration=req.chatbotSettings;
+    const previousLocale=Number(conversation.message_count)>0?conversation.locale:undefined;
+    const locale=chooseLocale(question,req.body?.locale,previousLocale);
     if(req.body?.clientRequestId!==undefined&&(typeof req.body.clientRequestId!=='string'||!UUID.test(req.body.clientRequestId)))fail('chatbot_invalid_request',400);
     const requestId=req.body?.clientRequestId||crypto.randomUUID(),processingToken=crypto.randomUUID(),assistantMessageId=crypto.randomUUID();
     let userMessageId=crypto.randomUUID();
@@ -207,7 +209,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
       const [history]=await db.query('SELECT role,content FROM chatbot_message WHERE conversation_id=? AND id<>? AND status NOT IN (\'error\',\'processing\') ORDER BY sequence DESC LIMIT 6',[conversation.id,userMessageId]);
       let reply,errorCode=null;
       try {
-        reply=await ai.answer({question,locale,systemPrompt:configuration.system_prompt,history:history.reverse(),
+        reply=await ai.answer({question,locale,previousLocale,systemPrompt:configuration.system_prompt,history:history.reverse(),
           retrieve:args=>getKnowledge().retrieveContext({...args,db,env})});
       } catch(error) {
         errorCode=error instanceof ChatbotError?error.code:'chatbot_unavailable';
@@ -216,17 +218,18 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
       }
       // Re-check permissions after a slow provider call so a concurrent revocation cannot release a reply.
       const currentSettings=await settings();
+      const replyLocale=['es','en'].includes(reply.locale)?reply.locale:locale;
       let stillAllowed=allowed(actor,currentSettings);
       if(actor.id){const [[currentUser]]=await db.query("SELECT r.name AS role FROM user u JOIN role r ON r.id=u.role_id WHERE u.id=? AND u.enabled='Y' AND u.deleted='N'",[actor.id]);stillAllowed=Boolean(currentUser)&&allowed({...actor,role:currentUser.role},currentSettings);}
-      if(!stillAllowed)reply={content:localText('refusal',locale),sources:[],status:'refused',model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens};
-      if(reply.sources?.length&&!await citationsCurrent(reply.sources))reply={content:localText('noContext',locale),sources:[],status:'no_context',model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens};
+      if(!stillAllowed)reply={content:localText('refusal',replyLocale),sources:[],status:'refused',model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens};
+      if(reply.sources?.length&&!await citationsCurrent(reply.sources))reply={content:localText('noContext',replyLocale),sources:[],status:'no_context',model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens};
       await transaction(async connection=>{
         const [[current]]=await connection.query('SELECT processing_token FROM chatbot_conversation WHERE id=? FOR UPDATE',[conversation.id]);
         if(current?.processing_token!==processingToken)fail('chatbot_busy',429);
         await connection.query(`INSERT INTO chatbot_message(id,conversation_id,role,content,sources,status,model,input_tokens,output_tokens,latency_ms,error_code,request_id,settings_revision)
           VALUES(?,?,'assistant',?,?,?,?,?,?,?,?,?,?)`,[assistantMessageId,conversation.id,reply.content,JSON.stringify(reply.sources),reply.status,reply.model,reply.inputTokens||0,reply.outputTokens||0,Date.now()-started,errorCode,requestId,configuration.revision]);
-        await connection.query('UPDATE chatbot_conversation SET message_count=message_count+1,preview=?,processing_token=NULL,processing_until=NULL WHERE id=? AND processing_token=?',[reply.content.slice(0,300),conversation.id,processingToken]);
-        await audit(actor,'message_answered',conversation.id,{status:reply.status,model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens,citationIds:reply.citationIds||[],errorCode},connection,requestId);
+        await connection.query('UPDATE chatbot_conversation SET message_count=message_count+1,preview=?,locale=?,processing_token=NULL,processing_until=NULL WHERE id=? AND processing_token=?',[reply.content.slice(0,300),replyLocale,conversation.id,processingToken]);
+        await audit(actor,'message_answered',conversation.id,{status:reply.status,locale:replyLocale,model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens,citationIds:reply.citationIds||[],errorCode},connection,requestId);
       });
       completed=true;
       const [messages]=await db.query('SELECT * FROM chatbot_message WHERE id IN (?,?)',[userMessageId,assistantMessageId]);
