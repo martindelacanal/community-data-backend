@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:ticket-ai": "node --test api/services/ticketAnalysis.test.js api/routes/ticketAnalysis.test.js",
+    "test:role-access": "node --test api/routes/user.role-access.test.js",
     "test:chatbot": "node --test api/services/chatbot.test.js api/services/chatbotKnowledge.test.js api/routes/chatbot.test.js",
     "test:health-wristbands": "node --test api/utils/healthWristband.test.js api/services/healthEventWristbands.test.js api/routes/healthEvents.wristbands.integration.test.js",
     "serve": "nodemon server.js",

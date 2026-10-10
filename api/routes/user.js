@@ -1,5 +1,8 @@
 const express = require('express');
 const router = express.Router();
+const { positiveIdentifier, ticketAccessCondition, findAccessibleTicket, ticketAuditStatus } = require('../services/ticketAccess');
+const { normalizeUserTableFilters, validateClientUserTable } = require('../services/userTableAccess');
+const { escape: escapeSqlValue } = require('mysql2');
 const { assignBeneficiaryUsername } = require('../utils/beneficiaryUsername');
 const { selectPendingSurveyQuestions } = require('../utils/pendingSurveyQuestions');
 const mysqlConnection = require('../connection/connection');
@@ -1239,6 +1242,34 @@ function createTicketRequestError(status, message) {
   return error;
 }
 
+async function requireTicketReadAccess(req, res, next) {
+  try {
+    const user = JSON.parse(req.data.data);
+    await findAccessibleTicket(mysqlConnection.promise(), user, req.params.id || req.params.idTicket);
+    return next();
+  } catch (error) {
+    const status = error.httpStatus || 500;
+    if (status >= 500) logger.error('Could not check ticket access', error);
+    return res.status(status).json(status >= 500 ? 'Internal server error' : error.message);
+  }
+}
+
+function validateUserTableInput(req, res, next) {
+  try {
+    const user = JSON.parse(req.data.data);
+    const tableRole = req.route.path === '/table/user' ? req.query.tableRole
+      : req.route.path.includes('/beneficiary/') ? 'beneficiary' : 'client';
+    validateClientUserTable(user, tableRole);
+    req.body = normalizeUserTableFilters(req.body || {});
+    if (req.query.search !== undefined && typeof req.query.search !== 'string') {
+      return res.status(400).json('Invalid search');
+    }
+    return next();
+  } catch (error) {
+    return res.status(error.httpStatus || 400).json(error.message);
+  }
+}
+
 function assertSingleAffectedRow(result, message) {
   if (!result || result.affectedRows !== 1) {
     throw new Error(message);
@@ -1516,7 +1547,7 @@ router.post('/upload/ticket', verifyToken, handleTicketImageUpload, async (req, 
         var transported_by = formulario.transported_by || null;
         const ticketDestinations = normalizeTicketDestinations(formulario);
         const destination = ticketDestinations[0].location_id;
-        const audit_status = formulario.audit_status || null;
+        const audit_status = ticketAuditStatus(formulario, cabecera);
         const notes = formulario.notes || null;
         var delivered_by = formulario.delivered_by || null;
         var products = formulario.products || [];
@@ -1835,7 +1866,7 @@ router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (re
     let transported_by = formulario.transported_by || null;
     const ticketDestinations = normalizeTicketDestinations(formulario);
     const destination = ticketDestinations[0].location_id;
-    const audit_status = formulario.audit_status || null;
+    const audit_status = ticketAuditStatus(formulario, cabecera);
     const notes = formulario.notes || null;
     let delivered_by = formulario.delivered_by || null;
     const products = formulario.products || [];
@@ -1857,16 +1888,7 @@ router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (re
     await connection.beginTransaction();
     transactionStarted = true;
 
-    const [ticketRows] = await connection.query(
-      `SELECT id
-       FROM donation_ticket
-       WHERE id = ? AND enabled = 'Y'
-       FOR UPDATE`,
-      [id]
-    );
-    if (ticketRows.length === 0) {
-      throw createTicketRequestError(404, 'Ticket not found');
-    }
+    await findAccessibleTicket(connection, cabecera, id, { lock: true });
     await assertTicketDestinationLocationsExist(connection, ticketDestinations);
 
     const [existingImages] = await connection.query(
@@ -2107,7 +2129,7 @@ router.put('/upload/ticket/:id', verifyToken, handleTicketImageUpload, async (re
   return res.status(200).json('Data edited successfully');
 });
 
-router.get('/upload/ticket/:id', verifyToken, async (req, res) => {
+router.get('/upload/ticket/:id', verifyToken, requireTicketReadAccess, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
     try {
@@ -4586,13 +4608,17 @@ router.get('/delivered-by', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
+      const access = cabecera.role === 'client' ? ticketAccessCondition(cabecera) : null;
       const [rows] = await mysqlConnection.promise().query(
-        'select id, name from delivered_by where enabled = "Y" order by name'
+        `SELECT catalog.id, catalog.name FROM delivered_by AS catalog WHERE catalog.enabled = 'Y'
+         ${access ? `AND EXISTS (SELECT 1 FROM donation_ticket AS dt
+           WHERE dt.delivered_by = catalog.id AND dt.enabled = 'Y' ${access.sql})` : ''}
+         ORDER BY catalog.name`, access ? access.params : []
       );
       res.json(rows);
     } catch (err) {
       console.log(err);
-      res.status(500).json('Internal server error');
+      res.status(err.httpStatus || 500).json(err.httpStatus ? err.message : 'Internal server error');
     }
   } else {
     res.status(401).json('Unauthorized');
@@ -4603,13 +4629,17 @@ router.get('/transported-by', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'stocker' || cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
+      const access = cabecera.role === 'client' ? ticketAccessCondition(cabecera) : null;
       const [rows] = await mysqlConnection.promise().query(
-        'select id, name from transported_by where enabled = "Y" order by name'
+        `SELECT catalog.id, catalog.name FROM transported_by AS catalog WHERE catalog.enabled = 'Y'
+         ${access ? `AND EXISTS (SELECT 1 FROM donation_ticket AS dt
+           WHERE dt.transported_by_id = catalog.id AND dt.enabled = 'Y' ${access.sql})` : ''}
+         ORDER BY catalog.name`, access ? access.params : []
       );
       res.json(rows);
     } catch (err) {
       console.log(err);
-      res.status(500).json('Internal server error');
+      res.status(err.httpStatus || 500).json(err.httpStatus ? err.message : 'Internal server error');
     }
   } else {
     res.status(401).json('Unauthorized');
@@ -4634,13 +4664,17 @@ router.get('/providers', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
+      const access = cabecera.role === 'client' ? ticketAccessCondition(cabecera) : null;
       const [rows] = await mysqlConnection.promise().query(
-        'select id,name from provider order by name',
+        `SELECT catalog.id, catalog.name FROM provider AS catalog
+         ${access ? `WHERE EXISTS (SELECT 1 FROM donation_ticket AS dt
+           WHERE dt.provider_id = catalog.id AND dt.enabled = 'Y' ${access.sql})` : ''}
+         ORDER BY catalog.name`, access ? access.params : []
       );
       res.json(rows);
     } catch (err) {
       console.log(err);
-      res.status(500).json('Internal server error');
+      res.status(err.httpStatus || 500).json(err.httpStatus ? err.message : 'Internal server error');
     }
   } else {
     res.status(401).json('Unauthorized');
@@ -4651,13 +4685,19 @@ router.get('/stocker-upload', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'opsmanager' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager') {
     try {
+      const access = cabecera.role === 'client' ? ticketAccessCondition(cabecera) : null;
       const [rows] = await mysqlConnection.promise().query(
-        'select DISTINCT u.id, u.username as name from user as u inner join stocker_log as sl on u.id = sl.user_id where sl.operation_id = 5 and u.enabled = "Y" order by u.username',
+        `SELECT DISTINCT u.id, u.username AS name FROM user AS u
+         INNER JOIN stocker_log AS sl ON u.id = sl.user_id
+         WHERE sl.operation_id = 5 AND u.enabled = 'Y'
+         ${access ? `AND EXISTS (SELECT 1 FROM donation_ticket AS dt
+           WHERE dt.id = sl.donation_ticket_id AND dt.enabled = 'Y' ${access.sql})` : ''}
+         ORDER BY u.username`, access ? access.params : []
       );
       res.json(rows);
     } catch (err) {
       console.log(err);
-      res.status(500).json('Internal server error');
+      res.status(err.httpStatus || 500).json(err.httpStatus ? err.message : 'Internal server error');
     }
   } else {
     res.status(401).json('Unauthorized');
@@ -12519,7 +12559,7 @@ router.post('/table/user/system-user/download-csv', verifyToken, async (req, res
 }
 );
 
-router.post('/table/user/client/download-csv', verifyToken, async (req, res) => {
+router.post('/table/user/client/download-csv', verifyToken, validateUserTableInput, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
@@ -12571,7 +12611,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
       }
       var query_zipcode = '';
       if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + zipcode;
+        query_zipcode = 'AND u.zipcode = ' + escapeSqlValue(zipcode);
       }
 
       const [rows] = await mysqlConnection.promise().query(
@@ -12651,7 +12691,7 @@ router.post('/table/user/client/download-csv', verifyToken, async (req, res) => 
 }
 );
 
-router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res) => {
+router.post('/table/user/beneficiary/download-csv', verifyToken, validateUserTableInput, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
     try {
@@ -12709,7 +12749,7 @@ router.post('/table/user/beneficiary/download-csv', verifyToken, async (req, res
       }
       var query_zipcode = '';
       if (filters.zipcode) {
-        query_zipcode = 'AND u.zipcode = ' + zipcode;
+        query_zipcode = 'AND u.zipcode = ' + escapeSqlValue(zipcode);
       }
       var query_second_ethnicities = '';
       if (Array.isArray(filters.second_ethnicities) && filters.second_ethnicities.length > 0) {
@@ -13901,7 +13941,7 @@ router.post('/table/provider/download-csv', verifyToken, async (req, res) => {
         ${query_from_date}
         ${query_to_date}
         ${query_locations}
-        ${cabecera.role === 'client' ? ' AND cl.client_id = ?' : ''}
+        ${cabecera.role === 'client' ? " AND cl.client_id = ? AND dt.enabled = 'Y'" : ''}
         GROUP BY p.id
         ORDER BY p.id
         `,
@@ -20034,7 +20074,7 @@ router.get('/table/notification', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/table/user', verifyToken, async (req, res) => {
+router.post('/table/user', verifyToken, validateUserTableInput, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
 
   if (cabecera.role === 'admin' || cabecera.role === 'client') {
@@ -20116,12 +20156,14 @@ router.post('/table/user', verifyToken, async (req, res) => {
     }
     var query_zipcode = '';
     if (filters.zipcode) {
-      query_zipcode = 'AND u.zipcode = ' + zipcode;
+      query_zipcode = 'AND u.zipcode = ' + escapeSqlValue(zipcode);
     }
     var query_register_form = '';
 
     let buscar = req.query.search;
     let queryBuscar = '';
+    const searchParams = [];
+    const userScopeParams = [];
     var queryTableRole = '';
 
     var page = req.query.page ? Number(req.query.page) : 1;
@@ -20155,7 +20197,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
 
     if (buscar) {
       buscar = '%' + buscar + '%';
-      queryBuscar = `AND (u.id like '${buscar}' or u.username like '${buscar}' or u.email like '${buscar}' or u.firstname like '${buscar}' or u.lastname like '${buscar}' or role.name like '${buscar}' or u.enabled like '${buscar}' or DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') like '${buscar}')`;
+      queryBuscar = `AND (u.id LIKE ? OR u.username LIKE ? OR u.email LIKE ? OR u.firstname LIKE ? OR u.lastname LIKE ? OR role.name LIKE ? OR u.enabled LIKE ? OR DATE_FORMAT(CONVERT_TZ(u.creation_date, '+00:00', 'America/Los_Angeles'), '%m/%d/%Y %T') LIKE ?)`;
+      searchParams.push(...Array(8).fill(buscar));
     }
 
     var tableRole = req.query.tableRole;
@@ -20177,7 +20220,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
           query_register_form = buildRegisterFormCondition(filters.register_form);
 
           if (cabecera.role === 'client') {
-            queryTableRole += ' AND client_user.client_id = ' + cabecera.client_id;
+            queryTableRole += ' AND client_user.client_id = ?';
+            userScopeParams.push(positiveIdentifier(cabecera.client_id));
           }
           break;
         case 'client':
@@ -20186,7 +20230,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
             query_locations = 'AND cl.location_id IN (' + locations.join() + ')';
           }
           if (cabecera.role === 'client') {
-            queryTableRole += ' AND u.client_id = ' + cabecera.client_id;
+            queryTableRole += ' AND u.client_id = ?';
+            userScopeParams.push(positiveIdentifier(cabecera.client_id));
           }
           break;
         default:
@@ -20230,13 +20275,13 @@ router.post('/table/user', verifyToken, async (req, res) => {
 
       const [rows] = await mysqlConnection.promise().query(
         query
-        , [...engagementSql.joinParams, ...engagementSql.conditionParams, start, resultsPerPage]);
+        , [...engagementSql.joinParams, ...searchParams, ...userScopeParams, ...engagementSql.conditionParams, start, resultsPerPage]);
       if (isParticipantTable) {
         await hydrateParticipantEngagement(mysqlConnection, rows, engagement);
       }
       if (rows.length > 0) {
         const [countRows] = await mysqlConnection.promise().query(`
-          SELECT COUNT(*) as count
+          SELECT COUNT(DISTINCT u.id) as count
           FROM user as u
           INNER JOIN role ON u.role_id = role.id
           ${cabecera.role === 'client' && tableRole === 'beneficiary' ? 'INNER JOIN client_user ON u.id = client_user.user_id' : ''}
@@ -20257,8 +20302,8 @@ router.post('/table/user', verifyToken, async (req, res) => {
           ${query_zipcode}
           ${query_register_form}
           ${engagementCountSql.conditions}
-          ${tableRole === 'client' ? 'GROUP BY u.id' : ''}
-        `, [...engagementCountSql.joinParams, ...engagementCountSql.conditionParams]);
+
+        `, [...engagementCountSql.joinParams, ...searchParams, ...userScopeParams, ...engagementCountSql.conditionParams]);
 
         const numOfResults = countRows[0].count;
         const numOfPages = Math.ceil(numOfResults / resultsPerPage);
@@ -21011,10 +21056,13 @@ router.put('/notes/:id', verifyToken, async (req, res) => {
       return res.status(400).json({ error: 'Note cannot be empty' });
     }
 
-    // Verificar que la nota existe
+    // Authorize the parent ticket even when this user originally wrote the note.
+    const ticketAccess = ticketAccessCondition(cabecera);
     const [noteData] = await mysqlConnection.promise().execute(
-      'SELECT user_id FROM donation_ticket_note WHERE id = ?',
-      [noteId]
+      `SELECT n.user_id FROM donation_ticket_note AS n
+       INNER JOIN donation_ticket AS dt ON dt.id = n.donation_ticket_id
+       WHERE n.id = ? AND dt.enabled = 'Y' ${ticketAccess.sql}`,
+      [noteId, ...ticketAccess.params]
     );
 
     if (!noteData.length) {
@@ -21022,7 +21070,7 @@ router.put('/notes/:id', verifyToken, async (req, res) => {
     }
 
     // Validar ownership
-    const isOwner = noteData[0].user_id === cabecera.id;
+    const isOwner = Number(noteData[0].user_id) === Number(cabecera.id);
     const isAdminOrOps = ['admin', 'opsmanager'].includes(cabecera.role);
 
     if (!isOwner && !isAdminOrOps) {
@@ -21061,10 +21109,13 @@ router.delete('/notes/:id', verifyToken, async (req, res) => {
   try {
     const noteId = req.params.id;
 
-    // Verificar que la nota existe
+    // Note authorship alone never grants access to another Stocker's ticket.
+    const ticketAccess = ticketAccessCondition(cabecera);
     const [noteData] = await mysqlConnection.promise().execute(
-      'SELECT user_id FROM donation_ticket_note WHERE id = ?',
-      [noteId]
+      `SELECT n.user_id FROM donation_ticket_note AS n
+       INNER JOIN donation_ticket AS dt ON dt.id = n.donation_ticket_id
+       WHERE n.id = ? AND dt.enabled = 'Y' ${ticketAccess.sql}`,
+      [noteId, ...ticketAccess.params]
     );
 
     if (!noteData.length) {
@@ -21072,7 +21123,7 @@ router.delete('/notes/:id', verifyToken, async (req, res) => {
     }
 
     // Validar ownership
-    const isOwner = noteData[0].user_id === cabecera.id;
+    const isOwner = Number(noteData[0].user_id) === Number(cabecera.id);
     const isAdminOrOps = ['admin', 'opsmanager'].includes(cabecera.role);
 
     if (!isOwner && !isAdminOrOps) {
@@ -22726,8 +22777,8 @@ router.get('/view/user/:idUser', verifyToken, async (req, res) => {
           LEFT JOIN language as lang ON u.language_id = lang.id
           LEFT JOIN gender as g ON u.gender_id = g.id
           WHERE u.id = ?
-          ${cabecera.role === 'client' ? ' AND (cu.client_id = ? or u.client_id = ?)' : ''}`,
-        [idUser, cabecera.client_id, cabecera.client_id]
+          ${cabecera.role === 'client' ? " AND ((r.name = 'beneficiary' AND cu.client_id = ?) OR (r.name = 'client' AND u.client_id = ?))" : ''}`,
+        cabecera.role === 'client' ? [idUser, cabecera.client_id, cabecera.client_id] : [idUser]
       );
       const [rows_emails] = await mysqlConnection.promise().query(
         `select email
@@ -23653,7 +23704,7 @@ router.get('/view/ethnicity/:idEthnicity', verifyToken, async (req, res) => {
 }
 );
 
-router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
+router.get('/view/ticket/:idTicket', verifyToken, requireTicketReadAccess, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'stocker' || cabecera.role === 'auditor') {
     try {
@@ -23788,7 +23839,7 @@ router.get('/view/ticket/:idTicket', verifyToken, async (req, res) => {
 }
 );
 
-router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
+router.get('/view/ticket/images/:idTicket', verifyToken, requireTicketReadAccess, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   const { idTicket } = req.params;
 
@@ -23802,12 +23853,12 @@ router.get('/view/ticket/images/:idTicket', verifyToken, async (req, res) => {
 
     if (rows.length > 0) {
       for (let i = 0; i < rows.length; i++) {
-        getObjectParams = {
+        const getObjectParams = {
           Bucket: bucketName,
           Key: rows[i].file
         };
-        command = new GetObjectCommand(getObjectParams);
-        url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+        const command = new GetObjectCommand(getObjectParams);
+        const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
         rows[i].file = url;
       }
     }
