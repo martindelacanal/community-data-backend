@@ -3,7 +3,8 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const crypto = require('crypto');
 const path = require('path');
-const admin = require('firebase-admin');
+const { getApps, getApp, initializeApp, cert } = require('firebase-admin/app');
+const { getMessaging } = require('firebase-admin/messaging');
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
@@ -444,8 +445,8 @@ function dedupeDeviceRows(rows) {
 }
 
 async function getFirebaseApp() {
-  if (admin.apps.length > 0) {
-    return admin.app();
+  if (getApps().length > 0) {
+    return getApp();
   }
 
   const projectId = process.env.FIREBASE_PROJECT_ID;
@@ -456,8 +457,8 @@ async function getFirebaseApp() {
     throw new Error('Firebase environment variables are not configured');
   }
 
-  return admin.initializeApp({
-    credential: admin.credential.cert({
+  return initializeApp({
+    credential: cert({
       projectId,
       clientEmail,
       privateKey: privateKey.replace(/\\n/g, '\n')
@@ -810,7 +811,7 @@ async function executeNotification(connection, notification, executedByUserId) {
           chunkRows.map((row) => row.push_token)
         );
 
-        const response = await firebaseApp.messaging().sendEachForMulticast(message);
+        const response = await getMessaging(firebaseApp).sendEachForMulticast(message);
 
         response.responses.forEach((result, index) => {
           const deviceRow = chunkRows[index];

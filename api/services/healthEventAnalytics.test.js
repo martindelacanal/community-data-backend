@@ -14,6 +14,12 @@ const assert = require('node:assert/strict');
 
 const analytics = require('./healthEventAnalytics');
 
+// Importing the service creates an idle pool even though these tests use only
+// its pure functions. Release its housekeeping timer when the suite finishes.
+test.after(async () => {
+  await require('../connection/connection').promise().end();
+});
+
 const TZ = 'America/Los_Angeles';
 
 // The scan query joins the stand and the service, so every scan row carries both
