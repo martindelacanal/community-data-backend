@@ -49,7 +49,7 @@ test('open date filters remain optional and preserve anonymous/page/platform sco
   }
 });
 
-test('acquisition shares first-touch ranking, preserves cohort scope and output', async () => {
+test('acquisition uses indexed first touch, preserves cohort scope and output', async () => {
   const db = databaseWithResults([
     [
       { breakdown: 'timeline', metric_date: '2026-09-02', metric_key: 'web_desktop', total_new: 3 },
@@ -64,13 +64,15 @@ test('acquisition shares first-touch ranking, preserves cohort scope and output'
   });
   assert.equal(db.statements.length, 2);
   const { sql, params } = db.statements[0];
-  assert.equal((sql.match(/ROW_NUMBER\(\)/g) || []).length, 1);
+  assert.doesNotMatch(sql, /ROW_NUMBER\(\)/);
+  assert.match(sql, /SELECT visitor_id, MIN\(started_at\) AS first_seen_at/);
+  assert.match(sql, /SELECT MIN\(s.id\) AS id/);
+  assert.match(sql, /s.visitor_id = v.visitor_id AND s.started_at = v.first_seen_at/);
   // Both references must request the same materialized cohort; otherwise MySQL
   // may inline them separately and repeat the full-history window calculation.
   assert.match(sql, /SELECT \/\*\+ NO_MERGE\(fs\) \*\/\s*'timeline' AS breakdown/);
   assert.match(sql, /SELECT \/\*\+ NO_MERGE\(fs\) \*\/ fs\.first_source AS metric_key/);
-  assert.ok(sql.indexOf('WHERE rn = 1') < sql.indexOf('fs.first_seen_at >= ?'), 'first touch is ranked across history before date filtering');
-  assert.match(sql, /ORDER BY s.started_at ASC, s.id ASC/);
+  assert.ok(sql.indexOf('INNER JOIN interaction_sessions s ON s.id = first_id.id') < sql.indexOf('fs.first_seen_at >= ?'), 'first touch is resolved across history before date filtering');
   assert.match(sql, /fs.first_authenticated = 1/);
   assert.deepEqual(params, ['2026-09-01', '2026-09-30', 'capacitor_android', 'capacitor_ios']);
   assert.equal(result.totalNewVisitors, 5);

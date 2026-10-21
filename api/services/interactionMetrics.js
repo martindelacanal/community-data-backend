@@ -981,27 +981,25 @@ async function fetchInteractionAudience(connection, language = 'en', rawFilters 
 // our best in-app proxy for "new installs / first opens": for a Capacitor channel the
 // first session ~ the first time the freshly installed app was opened on that device.
 const FIRST_SESSIONS_CTE = `
-  WITH first_sessions AS (
+  WITH visitor_first_seen AS (
+    SELECT visitor_id, MIN(started_at) AS first_seen_at
+    FROM interaction_sessions
+    GROUP BY visitor_id
+  ), first_session_ids AS (
+    SELECT MIN(s.id) AS id
+    FROM visitor_first_seen v
+    INNER JOIN interaction_sessions s
+      ON s.visitor_id = v.visitor_id AND s.started_at = v.first_seen_at
+    GROUP BY s.visitor_id
+  ), first_sessions AS (
     SELECT
-      visitor_id,
-      access_channel AS first_channel,
-      COALESCE(NULLIF(utm_source, ''), 'direct') AS first_source,
-      is_authenticated AS first_authenticated,
-      first_seen_at
-    FROM (
-      SELECT
-        s.visitor_id,
-        s.access_channel,
-        s.utm_source,
-        s.is_authenticated,
-        s.started_at AS first_seen_at,
-        ROW_NUMBER() OVER (
-          PARTITION BY s.visitor_id
-          ORDER BY s.started_at ASC, s.id ASC
-        ) AS rn
-      FROM interaction_sessions s
-    ) ranked
-    WHERE rn = 1
+      s.visitor_id,
+      s.access_channel AS first_channel,
+      COALESCE(NULLIF(s.utm_source, ''), 'direct') AS first_source,
+      s.is_authenticated AS first_authenticated,
+      s.started_at AS first_seen_at
+    FROM first_session_ids first_id
+    INNER JOIN interaction_sessions s ON s.id = first_id.id
   )
 `;
 
@@ -1084,8 +1082,11 @@ async function fetchInteractionAcquisition(connection, language = 'en', rawFilte
   const cohort = buildAcquisitionCohortFilter(filters);
   const active = buildAcquisitionActiveFilter(filters);
 
-  // Materialize first touch once for both breakdowns. Keep the date/platform
-  // filter AFTER ranking the entire history: an old visitor must stay returning.
+  // The existing (visitor_id, started_at) index finds each visitor's earliest
+  // timestamp without sorting every full session row. MIN(id) resolves equal
+  // timestamps exactly as the former ROW_NUMBER ORDER BY started_at,id did.
+  // Apply cohort filters only AFTER finding first touch across the entire
+  // history: a returning visitor must never become a new visitor in this range.
   const [acquisitionRows] = await connection.query(
     `
       ${FIRST_SESSIONS_CTE}, acquisition_cohort AS (
