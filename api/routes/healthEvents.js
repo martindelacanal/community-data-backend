@@ -892,16 +892,40 @@ router.get('/health-events/public-home', async (req, res) => {
 });
 
 router.get('/health-events/landing/:slug', async (req, res) => {
+  // This URL also serves authenticated previews. Never let a browser or shared
+  // cache reuse a private draft after the viewer signs out or changes account.
+  res.set('Cache-Control', 'private, no-store');
+  res.vary('Authorization');
   try {
     const event = await getEventBySlug(String(req.params.slug).toLowerCase());
-    if (!event || event.enabled !== 'Y' || event.landing_enabled !== 'Y') {
+    const published = event && event.enabled === 'Y' && event.landing_enabled === 'Y';
+    let canPreview = false;
+    if (event && !published) {
+      const user = getOptionalAuthUser(req);
+      if (user && ADMIN_ROLES.includes(user.role)) {
+        // A still-valid JWT must not expose a draft after account access has
+        // been revoked or the user's administrative role has changed.
+        const [users] = await mysqlConnection.promise().query(
+          `SELECT u.id FROM user u INNER JOIN role r ON r.id = u.role_id
+           WHERE u.id = ? AND u.enabled = 'Y' AND u.deleted = 'N'
+             AND r.name IN (?, ?) LIMIT 1`, [user.id, ...ADMIN_ROLES]);
+        canPreview = users.length > 0;
+      }
+    }
+    if (!event || (!published && !canPreview)) {
       return res.status(404).json({ error: 'NOT_FOUND' });
     }
     const [images] = await mysqlConnection.promise().query(
       'SELECT * FROM health_event_image WHERE health_event_id = ? AND enabled = "Y" \
        ORDER BY section_key ASC, display_order ASC, id ASC', [event.id]);
     res.status(200).json({
-      event: { ...publicEventShape(event), landing_json: safeParseJson(event.landing_json, null) },
+      event: {
+        ...publicEventShape(event),
+        enabled: event.enabled,
+        landing_enabled: event.landing_enabled,
+        is_preview: !published,
+        landing_json: safeParseJson(event.landing_json, null)
+      },
       images: await attachImageUrls(images)
     });
   } catch (error) {
