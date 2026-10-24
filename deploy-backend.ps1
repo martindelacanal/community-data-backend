@@ -317,7 +317,8 @@ assert_pm2_configuration() {
 
       if (env.status !== "online") fail("El proceso PM2 server no esta online.");
       if (env.exec_mode !== "fork_mode") fail("El proceso server no usa fork_mode.");
-      if (Number(env.instances) !== 1) fail("El proceso server no tiene una sola instancia.");
+      // PM2 resurrect omits instances for a single fork; the process count above remains authoritative.
+      if (env.instances != null && Number(env.instances) !== 1) fail("El proceso server no tiene una sola instancia.");
       if (env.watch === true) fail("El proceso server tiene watch habilitado.");
       if (env.pm_cwd !== "/home/ubuntu/community-data-backend") {
         fail("El cwd de PM2 no coincide con el repositorio.");
