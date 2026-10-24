@@ -5,6 +5,7 @@ const express=require('express');
 const jwt=require('jsonwebtoken');
 const crypto=require('node:crypto');
 const {createChatbotRouter}=require('./chatbot');
+const {MAX_SOURCES,MAX_TOTAL_CHUNKS}=require('../services/chatbotLimits');
 
 const env={JWT_SECRET:'test-key-chatbot-not-real',GEMINI_API_KEY:'test-key'};
 const token=(role='admin',id=1)=>jwt.sign({data:JSON.stringify({id,role})},env.JWT_SECRET,{algorithm:'HS256',expiresIn:'1h'});
@@ -89,4 +90,124 @@ test('stable client request UUID replays saved pair without another provider or 
     const conflict=await f.request(`/conversations/${privateId}/messages`,{...request,body:JSON.stringify({...JSON.parse(request.body),message:'Different text'})});
     assert.equal(conflict.status,409);
   }finally{await f.close();}
+});
+
+async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concurrentSourceCount}={}){
+  const calls=[],sources=new Map();let ingestions=0,commits=0,rollbacks=0;
+  const initialSourceCount=sourceCount,initialChunkCount=chunkCount;
+  const query=async(sql,params=[])=>{
+    calls.push({sql,params});
+    if(sql.includes('FROM user u JOIN role'))return[[{id:1,role:'admin',enabled:'Y',deleted:'N'}]];
+    if(sql.includes('FROM chatbot_settings'))return[[{id:1}]];
+    if(sql.includes('COUNT(*) AS total FROM chatbot_source')){
+      assert.match(sql,/status<>'deleted'/);
+      return[[{total:sourceCount}]];
+    }
+    if(sql.includes('COUNT(*) AS total FROM chatbot_chunk'))return[[{total:chunkCount}]];
+    if(sql.startsWith('INSERT INTO chatbot_source')){
+      const [id,title,kind,url,filename,sha256,chunk_count,metadata]=params;
+      sources.set(id,{id,title,kind,url,filename,sha256,chunk_count,metadata,enabled:1,status:'ready'});
+      sourceCount++;return[{affectedRows:1}];
+    }
+    if(sql.startsWith('INSERT INTO chatbot_chunk')){chunkCount+=params[0].length;return[{affectedRows:params[0].length}];}
+    if(sql.startsWith('INSERT INTO chatbot_audit'))return[{affectedRows:1}];
+    if(sql.includes('SELECT * FROM chatbot_source WHERE id=?'))return[[sources.get(params[0])]];
+    if(sql.includes("SELECT * FROM chatbot_source WHERE status<>'deleted'")){
+      return[[...Array.from({length:initialSourceCount},(_,i)=>({id:`existing-${i}`,title:`Reference ${i}`,enabled:1,status:'ready',chunk_count:1})),...sources.values()]];
+    }
+    throw new Error(`Unexpected SQL: ${sql}`);
+  };
+  const db={query,getConnection:async()=>({query,
+    beginTransaction:async()=>{if(concurrentSourceCount!==undefined)sourceCount=concurrentSourceCount;},
+    commit:async()=>{commits++;},
+    rollback:async()=>{rollbacks++;sourceCount=concurrentSourceCount??initialSourceCount;chunkCount=initialChunkCount;sources.clear();},
+    release:()=>{}
+  })};
+  const knowledge={ingestSource:async input=>{
+    ingestions++;
+    return{title:'Nutrition reference',kind:input.file?'pdf':'url',url:input.url,filename:input.file?.originalname,
+      chunks:Array.from({length:chunksPerSource},(_,i)=>({text:`Nutrition passage ${i}`,embedding:[.1,.2]}))};
+  }};
+  const app=express();app.use(express.json());app.use('/api/chatbot',createChatbotRouter({pool:db,env,knowledge}));
+  const server=await new Promise(resolve=>{const listening=app.listen(0,'127.0.0.1',()=>resolve(listening));});
+  const base=`http://127.0.0.1:${server.address().port}/api/chatbot`;
+  const headers={Authorization:`Bearer ${token()}`};
+  return{calls,sources,stats:()=>({sourceCount,chunkCount,ingestions,commits,rollbacks}),
+    list:()=>fetch(`${base}/admin/sources`,{headers}),
+    create:(body={url:'https://www.cdc.gov/nutrition/'})=>fetch(`${base}/admin/sources`,{
+      method:'POST',headers:body instanceof FormData?headers:{...headers,'Content-Type':'application/json'},
+      body:body instanceof FormData?body:JSON.stringify(body)
+    }),
+    close:async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+  };
+}
+
+test('source uploads pass the former 100 cap, 43 topics with 10 references, and 500 references',async()=>{
+  for(const sourceCount of [100,429,500,MAX_SOURCES-1]){
+    const f=await sourceFixture({sourceCount,chunkCount:25000,chunksPerSource:150});try{
+      const response=await f.create(),data=await response.json();
+      assert.equal(response.status,201,JSON.stringify(data));
+      assert.equal(data.source.chunkCount,150);
+      assert.equal(f.stats().sourceCount,sourceCount+1);
+      assert.equal(f.stats().chunkCount,25150);
+      assert.equal(f.stats().commits,1);
+      assert.equal(f.calls.filter(call=>call.sql.startsWith('INSERT INTO chatbot_chunk')).length,2);
+      assert.ok(f.calls.find(call=>call.sql.startsWith('INSERT INTO chatbot_audit')&&call.params[2]==='source_created'));
+    }finally{await f.close();}
+  }
+});
+
+test('PDF uploads use the same expanded capacity as URLs',async()=>{
+  const f=await sourceFixture({sourceCount:500});try{
+    const form=new FormData();form.append('file',new Blob(['%PDF-1.4 mocked extraction'],{type:'application/pdf'}),'reference.pdf');
+    const response=await f.create(form),data=await response.json();
+    assert.equal(response.status,201);assert.equal(data.source.kind,'pdf');
+    assert.equal(data.source.filename,'reference.pdf');assert.equal(f.stats().sourceCount,501);
+  }finally{await f.close();}
+});
+
+test('source list exposes server capacity and all references beyond 500',async()=>{
+  const f=await sourceFixture({sourceCount:550});try{
+    const response=await f.list(),data=await response.json();
+    assert.equal(response.status,200);assert.equal(data.items.length,550);
+    assert.equal(data.maxSources,1000);assert.equal(data.maxChunks,200000);
+    assert.ok(data.items.some(source=>source.id==='existing-549'));
+  }finally{await f.close();}
+});
+
+test('full source capacity rejects before indexing and releases the upload reservation',async()=>{
+  const f=await sourceFixture({sourceCount:MAX_SOURCES});try{
+    for(let i=0;i<2;i++){
+      const response=await f.create();assert.equal(response.status,400);
+      assert.equal((await response.json()).error,'chatbot_source_limit');
+    }
+    assert.equal(f.stats().ingestions,0);assert.equal(f.stats().commits,0);
+    assert.equal(f.calls.some(call=>call.sql.startsWith('INSERT')),false);
+  }finally{await f.close();}
+});
+
+test('transaction rechecks capacity after a concurrent import fills the final slot',async()=>{
+  const f=await sourceFixture({sourceCount:MAX_SOURCES-1,concurrentSourceCount:MAX_SOURCES});try{
+    const response=await f.create();assert.equal(response.status,400);
+    assert.equal((await response.json()).error,'chatbot_source_limit');
+    assert.equal(f.stats().ingestions,1);assert.equal(f.stats().rollbacks,1);
+    const lockIndex=f.calls.findIndex(call=>call.sql.includes('FOR UPDATE'));
+    const countIndex=f.calls.findLastIndex(call=>call.sql.includes('COUNT(*) AS total FROM chatbot_source'));
+    assert.ok(lockIndex>=0&&countIndex>lockIndex);
+    assert.equal(f.calls.some(call=>call.sql.startsWith('INSERT')),false);
+  }finally{await f.close();}
+});
+
+test('expanded chunk capacity accepts its boundary and rolls back overflow with a distinct error',async()=>{
+  const allowed=await sourceFixture({sourceCount:550,chunkCount:MAX_TOTAL_CHUNKS-2});try{
+    assert.equal((await allowed.create()).status,201);
+    assert.equal(allowed.stats().chunkCount,MAX_TOTAL_CHUNKS);
+  }finally{await allowed.close();}
+  const full=await sourceFixture({sourceCount:550,chunkCount:MAX_TOTAL_CHUNKS-1});try{
+    const response=await full.create();assert.equal(response.status,400);
+    assert.equal((await response.json()).error,'chatbot_chunk_limit');
+    assert.equal(full.stats().commits,0);assert.equal(full.stats().rollbacks,1);
+    assert.equal(full.stats().sourceCount,550);assert.equal(full.stats().chunkCount,MAX_TOTAL_CHUNKS-1);
+    assert.equal(full.sources.size,0);
+  }finally{await full.close();}
 });

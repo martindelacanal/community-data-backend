@@ -8,6 +8,7 @@ const { fork } = require('node:child_process');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const ipaddr = require('ipaddr.js');
+const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT = 1000000;
@@ -220,7 +221,7 @@ async function retrieveContext({ db, question, history = [], locale = 'en', env 
   let vector;
   if (stored.length) { try { [vector] = await embedder([search], 'RETRIEVAL_QUERY', env); } catch { /* Lexical retrieval remains available on a temporary embedding outage. */ } }
   let external = [], scanned = 0;
-  while (stored.length && scanned < 20000) {
+  while (stored.length && scanned < MAX_TOTAL_CHUNKS) {
   const ranked = stored.map(c => {
     let embedding = c.embedding;
     if (typeof embedding === 'string') { try { embedding = JSON.parse(embedding); } catch { embedding = null; } }
@@ -236,7 +237,7 @@ async function retrieveContext({ db, question, history = [], locale = 'en', env 
     perSource.set(c.sourceId,count+1); return count<3;
   }).slice(0,64);
   scanned += stored.length;
-  if (stored.length < 500) break;
+  if (stored.length < 500 || scanned >= MAX_TOTAL_CHUNKS) break;
   [stored] = await readBatch(stored[stored.length-1].id);
   }
   const selected = [], counts = new Map();

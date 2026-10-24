@@ -3,6 +3,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('node:crypto');
 const multer = require('multer');
+const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS } = require('../services/chatbotLimits');
 const { buildRestoreAuthBinding } = require('../utils/restoreAuthBinding');
 const { ChatbotError,fail,MAX_MESSAGE_CHARS,MAX_OUTPUT_TOKENS,DAILY_MESSAGE_LIMIT,DISCLAIMERS,
   validateMessage,chooseLocale,createChatbotService,createChatbotLimiter,localText } = require('../services/chatbot');
@@ -280,31 +281,32 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     try{return await getKnowledge().ingestSource(input,{env});}finally{ingestionCount--;}
   }
   async function saveChunks(connection,id,chunks) {
-    if(!Array.isArray(chunks)||!chunks.length||chunks.length>1000)fail('chatbot_invalid_source',400);
+    if(!Array.isArray(chunks)||!chunks.length||chunks.length>MAX_SOURCE_CHUNKS)fail('chatbot_invalid_source',400);
     // Serialize corpus growth with settings changes/other imports across Node processes.
     await connection.query('SELECT id FROM chatbot_settings WHERE id=1 FOR UPDATE');
     const [[total]]=await connection.query('SELECT COUNT(*) AS total FROM chatbot_chunk');
-    if(Number(total.total)+chunks.length>20000)fail('chatbot_source_limit',400);
+    if(Number(total.total)+chunks.length>MAX_TOTAL_CHUNKS)fail('chatbot_chunk_limit',400);
     for(let offset=0;offset<chunks.length;offset+=100){
       const rows=chunks.slice(offset,offset+100).map((chunk,index)=>[id,offset+index,String(chunk.text),chunk.embedding?JSON.stringify(chunk.embedding):null]);
       await connection.query('INSERT INTO chatbot_chunk(source_id,ordinal,content,embedding) VALUES ?',[rows]);
     }
   }
   router.get('/admin/sources',wrap(async(req,res)=>{
-    const [rows]=await db.query("SELECT * FROM chatbot_source WHERE status<>'deleted' ORDER BY created_at DESC");res.json({items:rows.map(sourceDTO)});
+    const [rows]=await db.query("SELECT * FROM chatbot_source WHERE status<>'deleted' ORDER BY created_at DESC");
+    res.json({items:rows.map(sourceDTO),maxSources:MAX_SOURCES,maxChunks:MAX_TOTAL_CHUNKS});
   }));
   router.post('/admin/sources',readUpload,wrapUpload(async(req,res)=>{
     if(!req.file&&!req.body?.url)fail('chatbot_invalid_source',400);
     if(req.file&&req.body?.url)fail('chatbot_invalid_source',400);
     if(req.body?.url!==undefined&&(typeof req.body.url!=='string'||req.body.url.length>2048))fail('chatbot_invalid_url',400);
     if(req.body?.title!==undefined&&(typeof req.body.title!=='string'||req.body.title.length>200))fail('chatbot_invalid_request',400);
-    const [[count]]=await db.query("SELECT COUNT(*) AS total FROM chatbot_source WHERE status<>'deleted'");if(Number(count.total)>=100)fail('chatbot_source_limit',400);
+    const [[count]]=await db.query("SELECT COUNT(*) AS total FROM chatbot_source WHERE status<>'deleted'");if(Number(count.total)>=MAX_SOURCES)fail('chatbot_source_limit',400);
     const data=await ingest({file:req.file,url:req.body?.url,title:req.body?.title});
     const id=crypto.randomUUID();
     await transaction(async connection=>{
       await connection.query('SELECT id FROM chatbot_settings WHERE id=1 FOR UPDATE');
       const [[currentCount]]=await connection.query("SELECT COUNT(*) AS total FROM chatbot_source WHERE status<>'deleted'");
-      if(Number(currentCount.total)>=100)fail('chatbot_source_limit',400);
+      if(Number(currentCount.total)>=MAX_SOURCES)fail('chatbot_source_limit',400);
       await connection.query('INSERT INTO chatbot_source(id,title,kind,url,filename,sha256,chunk_count,metadata,created_by) VALUES(?,?,?,?,?,?,?,?,?)',
         [id,data.title,data.kind,data.url||null,data.filename||null,data.sha256||null,data.chunks.length,JSON.stringify(data.metadata||{}),req.chatbotActor.id]);
       await saveChunks(connection,id,data.chunks);

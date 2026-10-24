@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { publicAddress, validateUrl, fetchPage, ingestSource, splitText, plain, retrieveContext, extractPdf } = require('./chatbotKnowledge');
+const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
 
 test('source URL policy excludes internal addresses, alternate IP formats, ports and credentials', () => {
   for (const url of ['http://www.cdc.gov', 'https://localhost/a', 'https://127.0.0.1/', 'https://2130706433/',
@@ -56,6 +57,51 @@ test('retrieval uses only ready enabled sources, excludes nonpublic internal con
   assert.ok(queries.some(q => q.includes('is_active=1')));
   assert.ok(queries.every(q => !q.includes('FROM user') && !q.includes('health_event_answer')));
 });
+function pagedKnowledgeFixture(total, relevantOrdinal, fragmentsPerSource = 40) {
+  const reads = [];
+  const db = { query: async (sql, params = []) => {
+    if (!sql.includes('chatbot_chunk')) return [[]];
+    assert.match(sql, /s.enabled=1 AND s.status='ready'/);
+    assert.match(sql, /c.id>\? ORDER BY c.id LIMIT 500/);
+    const after = params[0];
+    reads.push(after);
+    // Leave gaps in IDs, as deletion/reindexing does, to exercise keyset paging.
+    const start = after / 2;
+    return [Array.from({ length: Math.min(500, total - start) }, (_, index) => {
+      const ordinal = start + index + 1;
+      return { id: ordinal * 2, source_id: `reference-${Math.ceil(ordinal / fragmentsPerSource)}`,
+        title: 'Reference', content: ordinal === relevantOrdinal ? 'Targettopic evidence' : 'Unrelated passage',
+        embedding: null, url: 'https://www.cdc.gov/' };
+    })];
+  } };
+  return { db, reads };
+}
+
+test('retrieval finds evidence after 500 sources and the former 20,000-fragment cutoff', async () => {
+  const f = pagedKnowledgeFixture(24001, 24001);
+  let embeddingCalls = 0;
+  const result = await retrieveContext({ db: f.db, question: 'Targettopic', embedder: async () => {
+    embeddingCalls++;
+    throw new Error('Temporary embedding outage');
+  } });
+  assert.deepEqual(result.map(source => source.id), ['source:reference-601:48002']);
+  assert.equal(result[0].text, 'Targettopic evidence');
+  assert.equal(embeddingCalls, 1);
+  assert.equal(f.reads.length, 49);
+  assert.equal(f.reads.at(-1), 48000);
+  assert.ok(f.reads.every((after, index) => after === index * 1000));
+});
+
+test('retrieval covers the expanded corpus limit without fetching an unused extra batch', async () => {
+  const f = pagedKnowledgeFixture(MAX_TOTAL_CHUNKS + 1, MAX_TOTAL_CHUNKS, 200);
+  const result = await retrieveContext({ db: f.db, question: 'Targettopic', embedder: async () => [[1, 0]] });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, `source:reference-${Math.ceil(MAX_TOTAL_CHUNKS / 200)}:${MAX_TOTAL_CHUNKS * 2}`);
+  assert.equal(f.reads.length, MAX_TOTAL_CHUNKS / 500);
+  assert.equal(f.reads.at(-1), (MAX_TOTAL_CHUNKS - 500) * 2);
+  assert.ok(result.every(source => source.text.length <= 1400 && !('embedding' in source)));
+});
+
 function fixturePdf() {
   const text = 'Healthy meals include vegetables, whole grains and a variety of foods. Ask your healthcare professional for individual guidance.';
   const stream = `BT /F1 12 Tf 40 700 Td (${text}) Tj ET`;
