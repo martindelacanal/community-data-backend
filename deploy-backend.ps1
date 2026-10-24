@@ -261,6 +261,15 @@ for command_name in node npm pm2; do
     fail "No se encontro $command_name despues de cargar NVM."
 done
 
+node -e '
+  const [major, minor, patch] = process.versions.node.split(".").map(Number);
+  const minimum = { 22: [23, 4], 24: [22, 1] }[major];
+  if (!minimum || minor < minimum[0] || (minor === minimum[0] && patch < minimum[1])) {
+    console.error("[REMOTE ERROR] Actualiza Node a 22.23.4+ o 24.22.1+ antes del deploy; actual: " + process.version);
+    process.exit(1);
+  }
+'
+
 exec 9>"/tmp/community-data-backend-deploy.lock"
 flock -n 9 || fail "Ya hay otro deploy del backend en ejecucion."
 
@@ -316,13 +325,16 @@ assert_pm2_configuration() {
       if (env.pm_exec_path !== "/home/ubuntu/community-data-backend/server.js") {
         fail("El script de PM2 no es server.js.");
       }
+      if (process.argv[1] === "--check-runtime" && env.node_version !== process.versions.node) {
+        fail("PM2 server no usa el Node verificado: " + (env.node_version || "desconocido"));
+      }
 
       console.log(
         "[REMOTE] PM2 verificado: server online, pid " +
         processInfo.pid + ", Node " + (env.node_version || "desconocido")
       );
     });
-  '
+  ' -- "${1:-}"
 }
 
 assert_pm2_configuration
@@ -374,7 +386,7 @@ done < <(find api scripts -type f -name '*.js' -print0)
 
 log "Sintaxis JavaScript valida con $(node --version)."
 
-pm2 restart "$app_name" --update-env
+pm2 restart "$app_name" --update-env --interpreter "$(command -v node)"
 
 ping_ready=0
 for attempt in $(seq 1 30); do
@@ -405,7 +417,8 @@ node -e '
   JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
 ' "$readiness_file"
 
-assert_pm2_configuration
+assert_pm2_configuration --check-runtime
+pm2 save
 
 if test -n "$(git status --porcelain=v1 --untracked-files=normal)"; then
   fail "El deploy dejo cambios inesperados en el repositorio remoto."

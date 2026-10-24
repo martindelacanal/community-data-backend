@@ -7,6 +7,65 @@ const { v5: uuid } = require('uuid');
 const XLSX = require('xlsx');
 const nodemailer = require('nodemailer');
 const sharp = require('sharp');
+const http = require('node:http');
+const zlib = require('node:zlib');
+const { once } = require('node:events');
+const bodyParser = require('body-parser');
+
+test('Nodemailer preserves recipients across nested comments, address groups and quoted local parts', async () => {
+  // These headers must never turn display/comment text into an envelope recipient.
+  const cases = [
+    ['Synthetic (x(y) <attacker@example.invalid>) <approved@example.invalid>', 'approved@example.invalid'],
+    ['Group: (a; <attacker@example.invalid>) <approved@example.invalid>;', 'approved@example.invalid'],
+    ['<"a@attacker.invalid>"@approved.invalid>', '"a@attacker.invalid>"@approved.invalid'],
+    ['Synthetic User <approved@example.invalid>', 'approved@example.invalid'],
+  ];
+  const transport = nodemailer.createTransport({ streamTransport: true, buffer: true });
+  try {
+    for (const [to, expected] of cases) {
+      const parsed = require('nodemailer/lib/addressparser')(to, { flatten: true });
+      assert.deepEqual(parsed.map(mailbox => mailbox.address), [expected]);
+      const result = await transport.sendMail({ from: 'sender@example.invalid', to, subject: 'Synthetic', text: 'Offline only' });
+      // MIME construction sanitizes '>' inside a quoted local part, while its domain must remain intact.
+      assert.deepEqual(result.envelope.to, [expected.replace('>', ' ')]);
+    }
+  } finally { transport.close(); }
+});
+
+for (const encoding of ['gzip', 'deflate']) {
+  test(`body-parser survives trailing bytes after ${encoding} and still parses legitimate requests`, async t => {
+    const parser = bodyParser.json();
+    const value = { synthetic: true };
+    const compress = encoding === 'gzip' ? zlib.gzipSync : zlib.deflateSync;
+    const valid = compress(JSON.stringify(value));
+    const server = http.createServer((req, res) => parser(req, res, error => {
+      res.statusCode = error ? error.status || 500 : 200;
+      res.end(JSON.stringify(error ? { error: error.type } : req.body));
+    }));
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+    const send = bytes => new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: server.address().port, method: 'POST', agent: false,
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': encoding, 'Content-Length': bytes.length } }, response => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', chunk => { body += chunk; });
+        response.on('error', reject);
+        response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(body) }));
+      });
+      request.on('error', reject);
+      request.setTimeout(3000, () => request.destroy(new Error('Synthetic body-parser request timed out')));
+      request.end(bytes);
+    });
+    // More than one socket read: the parser can finish before the trailing bytes arrive.
+    const trailing = Buffer.concat([valid, Buffer.from([0]), Buffer.alloc(100 * 1024, 0x58)]);
+    assert.deepEqual(await send(trailing), { status: 200, body: value });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.deepEqual(await send(valid), { status: 200, body: value });
+    assert.equal((await send(Buffer.from('invalid compressed bytes'))).status, 400);
+  });
+}
 
 test('CSV duplicate prototype-named headers remain own data properties without replacing record prototypes', () => {
   // Regression for GHSA-8cw4-87c7-c6xx, including the duplicate-column path.
