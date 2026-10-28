@@ -17,6 +17,7 @@ const eventPath = '/health-events/:id(\\\\d+)';
 const adminRoutes = [
   ['get', '/health-events'], ['post', '/health-events'],
   ['put', eventPath], ['get', `${eventPath}/full`], ['put', `${eventPath}/landing`],
+  ['post', `${eventPath}/duplicate`],
 ];
 
 function functionSource(name) {
@@ -46,6 +47,7 @@ function eventBody(extra = {}) {
 
 async function fixture(t) {
   const statements = [];
+  const duplicates = [];
   const events = new Map();
   const users = new Map([
     [7, { id: 7, role: 'admin', enabled: 'Y', deleted: 'N' }],
@@ -112,6 +114,9 @@ async function fixture(t) {
     router, jwt, process: { env: { JWT_SECRET: secret } }, logger: { error(message) { throw new Error(message); } },
     mysqlConnection: { promise: () => db }, publicHomeCache: { at: 0 },
     attachImageUrls: async images => images, fetchForms: async () => [], fetchSlotsWithBooked: async () => [],
+    duplicateHealthEvent: async options => { duplicates.push(options); return { id: 123 }; },
+    HealthEventDuplicateError: require('../services/healthEventDuplicate').HealthEventDuplicateError,
+    deleteS3Objects: async () => {}, s3: { send: async () => {} }, bucketName: 'synthetic', CopyObjectCommand: class {},
   }));
   const app = express();
   app.use(express.json());
@@ -127,7 +132,7 @@ async function fixture(t) {
     });
     return { status: response.status, data: await response.json(), headers: response.headers };
   }
-  return { request, addEvent, events, users, statements };
+  return { request, addEvent, events, users, statements, duplicates };
 }
 
 test('Admin and Ops Manager can create, list, inspect, edit and save a health-event landing', async t => {
@@ -162,7 +167,7 @@ test('Admin and Ops Manager can create, list, inspect, edit and save a health-ev
 test('Non-managers and unauthenticated users cannot read or mutate health-event management routes', async t => {
   const f = await fixture(t);
   const paths = [['get', '/health-events'], ['post', '/health-events'], ['put', '/health-events/1'],
-    ['get', '/health-events/1/full'], ['put', '/health-events/1/landing']];
+    ['get', '/health-events/1/full'], ['put', '/health-events/1/landing'], ['post', '/health-events/1/duplicate']];
   for (const role of [undefined, 'beneficiary', 'eventvolunteer', 'delivery', 'stocker', 'client', 'contentmanager', 'auditor', 'director']) {
     for (const [method, route] of paths) {
       const response = await f.request(method, route, { role, body: method === 'get' ? undefined : eventBody() });
@@ -173,6 +178,24 @@ test('Non-managers and unauthenticated users cannot read or mutate health-event 
     assert.equal((await f.request(method, route, { token: signedToken('admin', {}, 'wrong-secret') })).status, 403);
   }
   assert.equal(f.statements.length, 0, 'Denied requests never reach the database');
+});
+
+test('Only Admin and Ops Manager can duplicate an event with the new validated identity', async t => {
+  const f = await fixture(t);
+  for (const role of ['admin', 'opsmanager']) {
+    const response = await f.request('post', '/health-events/7/duplicate', { role, body: eventBody({ slug: 'SAN-JACINTO' }) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.data, { id: 123 });
+    const call = f.duplicates.at(-1);
+    assert.equal(call.sourceId, 7);
+    assert.equal(call.userId, role === 'admin' ? 7 : 8);
+    assert.equal(call.details.slug, 'san-jacinto');
+  }
+  for (const body of [eventBody({ slug: 'home' }), eventBody({ name_en: '' }), eventBody({ location_id: null })]) {
+    const response = await f.request('post', '/health-events/7/duplicate', { role: 'admin', body });
+    assert.equal(response.status, 400);
+  }
+  assert.equal(f.duplicates.length, 2);
 });
 
 test('Only authenticated Admin and Ops Manager can preview an unpublished or disabled landing', async t => {

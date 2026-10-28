@@ -19,13 +19,14 @@ const jwt = require('jsonwebtoken');
 const bcryptjs = require('bcryptjs');
 const crypto = require('crypto');
 const multer = require('multer');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, CopyObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const mysqlConnection = require('../connection/connection');
 const logger = require('../utils/logger.js');
 const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 const { uploadImageWithVariants, deleteS3Objects } = require('../services/imageVariants');
+const { duplicateHealthEvent, HealthEventDuplicateError } = require('../services/healthEventDuplicate');
 const { createBeneficiaryPin, resolveBeneficiaryPin } = require('../utils/beneficiaryPin');
 const { LEGAL_CONSENT_VERSION, isLegalConsentAccepted } = require('../utils/legalConsent');
 const {
@@ -2559,6 +2560,27 @@ router.post('/health-events', verifyToken, requireAdmin, async (req, res) => {
     res.status(200).json({ id: inserted.insertId });
   } catch (error) {
     logger.error('POST /health-events error: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  }
+});
+
+router.post('/health-events/:id(\\d+)/duplicate', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const { errors, slug } = validateEventBody(req.body);
+    if (errors.length) return res.status(400).json({ error: 'VALIDATION', details: errors });
+    const result = await duplicateHealthEvent({
+      pool: mysqlConnection.promise(), sourceId: Number(req.params.id), userId: req.currentUser.id,
+      details: { ...req.body, slug, registration_closes_at: toSqlDateTimeString(req.body.registration_closes_at) },
+      copyObject: (sourceKey, destinationKey) => s3.send(new CopyObjectCommand({
+        Bucket: bucketName, Key: destinationKey,
+        CopySource: `${bucketName}/${sourceKey.split('/').map(encodeURIComponent).join('/')}`
+      })),
+      deleteObjects: deleteS3Objects, logger
+    });
+    res.status(200).json(result);
+  } catch (error) {
+    if (error instanceof HealthEventDuplicateError) return res.status(error.status).json({ error: error.code });
+    logger.error('POST /health-events/:id/duplicate error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
   }
 });

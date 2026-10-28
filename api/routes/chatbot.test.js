@@ -143,7 +143,7 @@ async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concu
 }
 
 test('source uploads pass the former 100 cap, 43 topics with 10 references, and 500 references',async()=>{
-  for(const sourceCount of [100,429,500,MAX_SOURCES-1]){
+  for(const sourceCount of [100,429,500,1000,MAX_SOURCES-1]){
     const f=await sourceFixture({sourceCount,chunkCount:25000,chunksPerSource:150});try{
       const response=await f.create(),data=await response.json();
       assert.equal(response.status,201,JSON.stringify(data));
@@ -167,11 +167,11 @@ test('PDF uploads use the same expanded capacity as URLs',async()=>{
 });
 
 test('source list exposes server capacity and all references beyond 500',async()=>{
-  const f=await sourceFixture({sourceCount:550});try{
+  const f=await sourceFixture({sourceCount:2000});try{
     const response=await f.list(),data=await response.json();
-    assert.equal(response.status,200);assert.equal(data.items.length,550);
-    assert.equal(data.maxSources,1000);assert.equal(data.maxChunks,200000);
-    assert.ok(data.items.some(source=>source.id==='existing-549'));
+    assert.equal(response.status,200);assert.equal(data.items.length,2000);
+    assert.equal(data.maxSources,2000);assert.equal(data.maxChunks,200000);
+    assert.ok(data.items.some(source=>source.id==='existing-1999'));
   }finally{await f.close();}
 });
 

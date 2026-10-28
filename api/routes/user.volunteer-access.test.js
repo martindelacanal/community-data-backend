@@ -8,6 +8,7 @@ const { once } = require('node:events');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { createObjectCsvStringifier } = require('csv-writer');
+const { parseLocationQuestionIds, replaceLocationSurveyQuestions } = require('../services/locationSurveyQuestions');
 const {
   lockVolunteerNotificationRecipientSettings,
   addVolunteerNotificationRecipientsForLocation,
@@ -103,6 +104,7 @@ async function fixture(t, { initialAutoInclude = 0, failClientWrite = false } = 
     router, jwt, process: { env: { JWT_SECRET: secret } },
     mysqlConnection: { promise: () => connection },
     lockVolunteerNotificationRecipientSettings, addVolunteerNotificationRecipientsForLocation,
+    parseLocationQuestionIds, replaceLocationSurveyQuestions,
     createCsvStringifier: createObjectCsvStringifier,
     console, logger: { error: () => {} },
     bucketName: 'test-signature-bucket', s3: {},

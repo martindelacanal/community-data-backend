@@ -6,6 +6,7 @@ const { escape: escapeSqlValue } = require('mysql2');
 const { assignBeneficiaryUsername } = require('../utils/beneficiaryUsername');
 const { selectPendingSurveyQuestions } = require('../utils/pendingSurveyQuestions');
 const mysqlConnection = require('../connection/connection');
+const { parseLocationQuestionIds, replaceLocationSurveyQuestions } = require('../services/locationSurveyQuestions');
 const { setUserEnabledWithRestoreRevocation } = require('../services/restoreCredentialsRepository');
 const {
   lockVolunteerNotificationRecipientSettings,
@@ -2829,6 +2830,7 @@ router.post('/new/location', verifyToken, async (req, res) => {
     let connection;
     try {
       const formulario = req.body;
+      const questionIds = parseLocationQuestionIds(formulario, cabecera.role);
       const organization = formulario.organization || null;
       const community_city = formulario.community_city || null;
       const address = formulario.address || null;
@@ -2865,8 +2867,9 @@ router.post('/new/location', verifyToken, async (req, res) => {
           }
         }
 
+        const selectedQuestionIds = await replaceLocationSurveyQuestions(connection, location_id, questionIds);
         await connection.commit();
-        res.json('Location created successfully');
+        res.json({ id: location_id, question_ids: selectedQuestionIds });
       } else {
         await connection.rollback();
         res.status(500).json('Could not create location');
@@ -2877,7 +2880,7 @@ router.post('/new/location', verifyToken, async (req, res) => {
       }
       console.log(error);
       logger.error(error);
-      res.status(500).json('Internal server error');
+      res.status(error.status || 500).json(error.status ? error.message : 'Internal server error');
     } finally {
       if (connection) {
         connection.release();
@@ -2891,9 +2894,11 @@ router.post('/new/location', verifyToken, async (req, res) => {
 router.put('/new/location/:id', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'opsmanager') {
+    let connection;
     try {
       const id = req.params.id || null;
-      formulario = req.body;
+      const formulario = req.body;
+      const questionIds = parseLocationQuestionIds(formulario, cabecera.role);
       const organization = formulario.organization || null;
       const community_city = formulario.community_city || null;
       const address = formulario.address || null;
@@ -2907,38 +2912,93 @@ router.put('/new/location/:id', verifyToken, async (req, res) => {
       const latitude = coordinatesArray[1];
       const point = `POINT(${latitude} ${longitude})`;
 
-      const [rows] = await mysqlConnection.promise().query(
+      connection = await mysqlConnection.promise().getConnection();
+      await connection.beginTransaction();
+      const [locations] = await connection.query('SELECT id FROM location WHERE id = ? FOR UPDATE', [id]);
+      if (!locations.length) {
+        await connection.rollback();
+        return res.status(404).json('Location not found');
+      }
+      await connection.query(
         `UPDATE location SET organization = ?, community_city = ?, address = ?, description_en = ?, description_es = ?, coordinates = ST_GeomFromText(?) WHERE id = ?`,
         [organization, community_city, address, description_en, description_es, point, id]
       );
 
-      if (rows.affectedRows > 0) {
         // delete all client_location records for the location
-        await mysqlConnection.promise().query(
+        await connection.query(
           'delete from client_location where location_id = ?',
           [id]
         );
         // insert new client_location records
         if (client_ids.length > 0) {
           for (let i = 0; i < client_ids.length; i++) {
-            await mysqlConnection.promise().query(
+            await connection.query(
               'insert into client_location(client_id, location_id) values(?,?)',
               [client_ids[i], id]
             );
           }
         }
 
-        res.json('Location updated successfully');
-      }
-      else {
-        res.status(500).json('Could not update location');
-      }
+        const selectedQuestionIds = await replaceLocationSurveyQuestions(connection, id, questionIds);
+        await connection.commit();
+        res.json({ id: Number(id), question_ids: selectedQuestionIds });
     } catch (err) {
+      if (connection) await connection.rollback();
       console.log(err);
-      res.status(500).json('Internal server error');
+      res.status(err.status || 500).json(err.status ? err.message : 'Internal server error');
+    } finally {
+      if (connection) connection.release();
     }
   } else {
     res.status(401).json('Unauthorized');
+  }
+});
+
+router.get('/survey/location-questions', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin') return res.status(403).json('Unauthorized');
+  const locationId = req.query.location_id ? Number(req.query.location_id) : null;
+  if (locationId !== null && (!Number.isSafeInteger(locationId) || locationId <= 0)) {
+    return res.status(400).json('Invalid location identifier');
+  }
+  try {
+    const [questions] = await mysqlConnection.promise().query(
+      `SELECT q.id, q.name, q.name_es, q.depends_on_question_id,
+       EXISTS (SELECT 1 FROM question_location ql WHERE ql.question_id = q.id AND ql.location_id = ? AND ql.enabled = 'Y') AS selected
+       FROM question q WHERE q.enabled = 'Y' ORDER BY q.\`order\`, q.id`, [locationId]
+    );
+    res.json(questions);
+  } catch (err) {
+    logger.error(err);
+    res.status(500).json('Internal server error');
+  }
+});
+
+router.put('/survey/location/:id/questions', verifyToken, async (req, res) => {
+  const cabecera = JSON.parse(req.data.data);
+  if (cabecera.role !== 'admin') return res.status(403).json('Unauthorized');
+  let connection;
+  try {
+    const locationId = Number(req.params.id);
+    if (!Number.isSafeInteger(locationId) || locationId <= 0) return res.status(400).json('Invalid location identifier');
+    const questionIds = parseLocationQuestionIds(req.body, cabecera.role);
+    if (questionIds === undefined) return res.status(400).json('question_ids is required');
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+    const [locations] = await connection.query('SELECT id FROM location WHERE id = ? FOR UPDATE', [locationId]);
+    if (!locations.length) {
+      await connection.rollback();
+      return res.status(404).json('Location not found');
+    }
+    const selectedQuestionIds = await replaceLocationSurveyQuestions(connection, locationId, questionIds);
+    await connection.commit();
+    res.json({ id: locationId, question_ids: selectedQuestionIds });
+  } catch (err) {
+    if (connection) await connection.rollback();
+    logger.error(err);
+    res.status(err.status || 500).json(err.status ? err.message : 'Internal server error');
+  } finally {
+    if (connection) connection.release();
   }
 });
 
