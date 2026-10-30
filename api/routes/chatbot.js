@@ -3,7 +3,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('node:crypto');
 const multer = require('multer');
-const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS } = require('../services/chatbotLimits');
+const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS, MAX_CONCURRENT_IMPORTS } = require('../services/chatbotLimits');
 const { buildRestoreAuthBinding } = require('../utils/restoreAuthBinding');
 const { ChatbotError,fail,MAX_MESSAGE_CHARS,MAX_OUTPUT_TOKENS,DAILY_MESSAGE_LIMIT,DISCLAIMERS,
   validateMessage,chooseLocale,createChatbotService,createChatbotLimiter,localText } = require('../services/chatbot');
@@ -43,7 +43,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
   let knowledgeService=knowledge;
   const getKnowledge=()=>knowledgeService ||= require('../services/chatbotKnowledge');
   const limiter=createChatbotLimiter(limiterOptions);
-  const requestWindows=new Map();let ingestionCount=0,uploadReservations=0;
+  const requestWindows=new Map();let uploadReservations=0;
   const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
   const secret=()=>env.CHATBOT_SESSION_SECRET || env.JWT_SECRET;
   async function transaction(fn) {
@@ -265,21 +265,21 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
 
   const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:10*1024*1024,files:1,fields:3,fieldSize:4096,parts:4},
     fileFilter:(req,file,callback)=>callback(file.mimetype==='application/pdf'?null:new ChatbotError('chatbot_invalid_pdf',400),true)}).single('file');
-  const readUpload=(req,res,next)=>{
-    // Reserve before multer allocates a PDF buffer, and keep it reserved through indexing/persistence.
-    if(uploadReservations>=1||ingestionCount>=1)return next(new ChatbotError('chatbot_ingestion_busy',429));
+  const reserveImport=(req,res,next)=>{
+    // Share capacity across uploads/reindexing and retain it until persistence finishes.
+    if(uploadReservations>=MAX_CONCURRENT_IMPORTS)return next(new ChatbotError('chatbot_ingestion_busy',429));
     uploadReservations++;let released=false;
     req.releaseChatbotUpload=()=>{if(!released){released=true;uploadReservations--;}};
+    next();
+  };
+  const readUpload=(req,res,next)=>{
     upload(req,res,error=>{
       if(error){req.releaseChatbotUpload();return next(error instanceof ChatbotError?error:new ChatbotError(error.code==='LIMIT_FILE_SIZE'?'chatbot_file_too_large':'chatbot_invalid_request',error.code==='LIMIT_FILE_SIZE'?413:400));}
       next();
     });
   };
   const wrapUpload=fn=>wrap(async(req,res)=>{try{return await fn(req,res);}finally{req.releaseChatbotUpload?.();}});
-  async function ingest(input) {
-    if(ingestionCount>=1)fail('chatbot_ingestion_busy',429);ingestionCount++;
-    try{return await getKnowledge().ingestSource(input,{env});}finally{ingestionCount--;}
-  }
+  const ingest=input=>getKnowledge().ingestSource(input,{env});
   async function saveChunks(connection,id,chunks) {
     if(!Array.isArray(chunks)||!chunks.length||chunks.length>MAX_SOURCE_CHUNKS)fail('chatbot_invalid_source',400);
     // Serialize corpus growth with settings changes/other imports across Node processes.
@@ -289,13 +289,16 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     for(let offset=0;offset<chunks.length;offset+=100){
       const rows=chunks.slice(offset,offset+100).map((chunk,index)=>[id,offset+index,String(chunk.text),chunk.embedding?JSON.stringify(chunk.embedding):null]);
       await connection.query('INSERT INTO chatbot_chunk(source_id,ordinal,content,embedding) VALUES ?',[rows]);
+      await connection.query(`INSERT INTO chatbot_search(chunk_id,document)
+        SELECT c.id,CONCAT_WS('\n',s.title,c.content) FROM chatbot_chunk c JOIN chatbot_source s ON s.id=c.source_id
+        WHERE c.source_id=? AND c.ordinal>=? AND c.ordinal<?`,[id,offset,offset+rows.length]);
     }
   }
   router.get('/admin/sources',wrap(async(req,res)=>{
     const [rows]=await db.query("SELECT * FROM chatbot_source WHERE status<>'deleted' ORDER BY created_at DESC");
-    res.json({items:rows.map(sourceDTO),maxSources:MAX_SOURCES,maxChunks:MAX_TOTAL_CHUNKS});
+    res.json({items:rows.map(sourceDTO),maxSources:MAX_SOURCES,maxChunks:MAX_TOTAL_CHUNKS,maxConcurrentImports:MAX_CONCURRENT_IMPORTS});
   }));
-  router.post('/admin/sources',readUpload,wrapUpload(async(req,res)=>{
+  router.post('/admin/sources',reserveImport,readUpload,wrapUpload(async(req,res)=>{
     if(!req.file&&!req.body?.url)fail('chatbot_invalid_source',400);
     if(req.file&&req.body?.url)fail('chatbot_invalid_source',400);
     if(req.body?.url!==undefined&&(typeof req.body.url!=='string'||req.body.url.length>2048))fail('chatbot_invalid_url',400);
@@ -331,7 +334,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     });
     res.json({deleted:true});
   }));
-  router.post('/admin/sources/:id/reindex',wrap(async(req,res)=>{
+  router.post('/admin/sources/:id/reindex',reserveImport,wrapUpload(async(req,res)=>{
     const id=identifier(req.params.id);const [[old]]=await db.query("SELECT * FROM chatbot_source WHERE id=? AND status<>'deleted'",[id]);
     if(!old)fail('chatbot_not_found',404);if(old.kind!=='url')fail('chatbot_pdf_reupload_required',400);
     const data=await ingest({url:old.url,title:old.title});

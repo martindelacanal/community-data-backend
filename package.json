@@ -7,7 +7,7 @@
     "test": "node --test api/**/*.test.js scripts/*.test.js",
     "test:ticket-ai": "node --test api/services/ticketAnalysis.test.js api/routes/ticketAnalysis.test.js",
     "test:role-access": "node --test api/routes/user.role-access.test.js",
-    "test:chatbot": "node --test api/services/chatbot.test.js api/services/chatbotKnowledge.test.js api/routes/chatbot.test.js",
+    "test:chatbot": "node --test api/services/chatbot.test.js api/services/chatbotKnowledge.test.js api/services/chatbotSearch.test.js api/routes/chatbot.test.js scripts/migrateChatbotSearch.test.js",
     "test:health-wristbands": "node --test api/utils/healthWristband.test.js api/services/healthEventWristbands.test.js api/routes/healthEvents.wristbands.integration.test.js",
     "serve": "node --watch server.js",
     "start": "node server.js",

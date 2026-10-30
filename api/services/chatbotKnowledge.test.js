@@ -46,6 +46,7 @@ test('retrieval uses only ready enabled sources, excludes nonpublic internal con
   const queries = [];
   const db = { query: async sql => {
     queries.push(sql);
+    if (sql.includes('chatbot_search')) throw Object.assign(new Error('legacy schema'), { code: 'ER_NO_SUCH_TABLE' });
     if (sql.includes('chatbot_chunk')) return [Array.from({ length: 15 }, (_, i) => ({ id: i, source_id: 'trusted', title: 'Health', content: 'Nutrition facts '.repeat(200), embedding: Array(768).fill(.1), url: 'https://www.cdc.gov/nutrition/' }))];
     return [[]];
   } };
@@ -60,6 +61,7 @@ test('retrieval uses only ready enabled sources, excludes nonpublic internal con
 function pagedKnowledgeFixture(total, relevantOrdinal, fragmentsPerSource = 40) {
   const reads = [];
   const db = { query: async (sql, params = []) => {
+    if (sql.includes('chatbot_search')) throw Object.assign(new Error('legacy schema'), { code: 'ER_NO_SUCH_TABLE' });
     if (!sql.includes('chatbot_chunk')) return [[]];
     assert.match(sql, /s.enabled=1 AND s.status='ready'/);
     assert.match(sql, /c.id>\? ORDER BY c.id LIMIT 500/);
@@ -126,6 +128,7 @@ function internalFixture({ articles = [], resources = [], calendar = [], externa
   const calls = [];
   return { calls, query: async (sql, params = []) => {
     calls.push({ sql, params });
+    if (sql.includes('chatbot_search')) throw Object.assign(new Error('legacy schema'), { code: 'ER_NO_SUCH_TABLE' });
     if (sql.includes('chatbot_chunk')) return [external];
     const rows = sql.includes('FROM article a') ? articles : sql.includes('FROM trusted_resources r') ? resources : calendar;
     return [rows.filter(row => row.id > params.at(-1)).slice(0, 200)];
@@ -287,4 +290,30 @@ test('food storage follow-ups preserve the ingredient while a new recipe ingredi
   assert.match(searchQuestion('¿Cómo guardarlas?', history), /fresas/);
   assert.match(searchQuestion('Más recetas', history), /fresas/);
   assert.equal(searchQuestion('Y recetas con ananá', history), 'Y recetas con ananá');
+});
+
+
+test('indexed retrieval uses translated search terms, reranks candidates and never scans the corpus', async () => {
+  const calls=[];
+  const db={query:async(sql,params)=>{
+    calls.push({sql,params});
+    if(sql.includes('MATCH('))return[[{chunk_id:300001,source_id:'pdf-late'}]];
+    if(sql.includes('c.embedding')){
+      assert.match(sql,/c.id IN/);
+      return[[{id:300001,source_id:'pdf-late',title:'Guide',content:'Dietary fiber supports nutrition.',embedding:[1,0],url:null}]];
+    }
+    return[[]];
+  }};
+  const result=await retrieveContext({db,question:'Información sobre fibra',searchTerms:'fiber fibra dietary',embedder:async()=>[[1,0]]});
+  assert.equal(result[0].id,'source:pdf-late:300001');
+  assert.match(calls.find(call=>call.sql.includes('MATCH(')).params[0],/fiber/);
+  assert.equal(calls.filter(call=>call.sql.includes('c.embedding')).length,1);
+});
+
+
+test('an indexed query without matches avoids a corpus scan and embedding request', async () => {
+  let queries=0;
+  const db={query:async sql=>{queries++;assert.ok(!sql.includes('c.embedding'));return[[]];}};
+  const result=await retrieveContext({db,question:'Unmatchedtopic',embedder:()=>assert.fail('no candidates need embeddings')});
+  assert.deepEqual(result,[]);assert.ok(queries>0);
 });

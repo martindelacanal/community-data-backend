@@ -167,3 +167,14 @@ test('a broad calendar question is not interrupted with a location request',asyn
   const reply=await createChatbotService({env,http}).answer({question:'What are the upcoming distributions?',retrieve:async()=>({directAnswer:{content:'Published dates',status:'complete',sources:[]}})});
   assert.equal(reply.content,'Published dates');
 });
+
+
+test('default limiter admits eight concurrent chats and releases capacity idempotently',()=>{
+  const limiter=createChatbotLimiter();
+  const releases=Array.from({length:8},(_,i)=>limiter.acquire(`capacity-${i}`));
+  assert.throws(()=>limiter.acquire('ninth'),{code:'chatbot_busy'});
+  releases[0]();releases[0]();
+  const replacement=limiter.acquire('ninth');
+  assert.throws(()=>limiter.acquire('tenth'),{code:'chatbot_busy'});
+  replacement();releases.forEach(release=>release());
+});

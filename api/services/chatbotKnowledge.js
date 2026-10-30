@@ -9,6 +9,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const ipaddr = require('ipaddr.js');
 const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
+const { indexedCandidates, serializedScan } = require('./chatbotSearch');
 const { normalize, calendarIntent, resourceIntent, articleIntent, foodPreparationIntent, calendarOverview, searchQuestion, calendarReply } = require('./chatbotNavigation');
 
 const MAX_BYTES = 10 * 1024 * 1024;
@@ -66,9 +67,11 @@ async function fetchPage(raw, { lookup = dns.lookup, request = axios.get } = {},
   if (!['text/html', 'application/xhtml+xml', 'application/pdf', 'text/plain'].includes(type)) throw fail('chatbot_source_type');
   return { buffer, type, url: url.href };
 }
+let pdfTail = Promise.resolve();
 function extractPdf(buffer) {
   if (buffer.subarray(0, 5).toString() !== '%PDF-') throw fail('chatbot_invalid_pdf');
-  return new Promise((resolve, reject) => {
+  // Imports may overlap network/indexing work; only one memory-heavy PDF worker runs.
+  const extraction = pdfTail.then(() => new Promise((resolve, reject) => {
     const worker = fork(path.join(__dirname, 'chatbotPdfWorker.js'), [], {
       execArgv: ['--max-old-space-size=192'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], serialization: 'advanced',
       windowsHide: true
@@ -83,7 +86,9 @@ function extractPdf(buffer) {
     worker.once('error', () => finish(fail('chatbot_invalid_pdf')));
     worker.once('exit', () => { if (!settled) finish(fail('chatbot_invalid_pdf')); });
     worker.send({ buffer, maxText: MAX_TEXT });
-  });
+  }));
+  pdfTail = extraction.catch(() => {});
+  return extraction;
 }
 function splitText(text, size = 1400, overlap = 180) {
   const chunks = [];
@@ -249,7 +254,7 @@ async function internalContext(db, locale, terms, { includeCalendar = true, incl
     url: '/calendar', text: location ? `No published upcoming calendar entries match the user-supplied location: ${location}. This is an exact city/address match, not a distance search. Do not offer another city as nearby.` : 'The current published calendar has no enabled upcoming entries. Do not infer dates. Invite the user to check the calendar again.', score: 2 });
   return result;
 }
-async function retrieveContext({ db, question, history = [], locale = 'en', location = '', env = process.env, embedder = embed }) {
+async function retrieveContext({ db, question, history = [], locale = 'en', location = '', searchTerms = '', env = process.env, embedder = embed }) {
   if (calendarOverview(question) && !location) return { directAnswer: calendarReply(await calendarRows(db), locale) };
   const search = searchQuestion(question, history, location);
   const foodIntent = foodPreparationIntent(search);
@@ -287,29 +292,49 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
   }
   const readBatch = after => db.query(`SELECT c.id,c.source_id,c.content,c.embedding,s.title,s.url FROM chatbot_chunk c
     JOIN chatbot_source s ON s.id=c.source_id WHERE s.enabled=1 AND s.status='ready' AND c.id>? ORDER BY c.id LIMIT 500`, [after]);
-  let [stored] = await readBatch(0);
+  let candidates = [], legacyIndex = false;
+  try { candidates = await indexedCandidates(db, [...terms, ...termsFor(String(searchTerms).slice(0, 400))].join(' ')); }
+  catch (error) { if (error.code !== 'ER_NO_SUCH_TABLE') throw error; legacyIndex = true; }
   let vector;
-  if (stored.length) { try { [vector] = await embedder([search], 'RETRIEVAL_QUERY', env); } catch { /* Lexical retrieval remains available on a temporary embedding outage. */ } }
-  let external = [], scanned = 0;
-  while (stored.length && scanned < MAX_TOTAL_CHUNKS) {
-  const ranked = stored.map(c => {
-    let embedding = c.embedding;
-    if (typeof embedding === 'string') { try { embedding = JSON.parse(embedding); } catch { embedding = null; } }
-    const semantic = vector ? cosine(vector, embedding) : 0;
-    return { id: `source:${c.source_id}:${c.id}`, sourceId: c.source_id, title: c.title,
-      url: c.url, text: c.content.slice(0, 1400),
-      score: lexical(`${c.title} ${c.content}`, terms) + (semantic >= .45 ? semantic * .8 : 0)
-        + (ingredients.length ? lexical(`${c.title} ${c.content}`, ingredients) * 2 : 0) };
-  });
-  // Never load the full vector corpus into RAM: bounded pages plus the best diverse passages.
-  const perSource = new Map();
-  external = [...external, ...ranked].sort((a,b) => b.score-a.score).filter(c => {
-    const count = perSource.get(c.sourceId) || 0;
-    perSource.set(c.sourceId,count+1); return count<3;
-  }).slice(0,64);
-  scanned += stored.length;
-  if (stored.length < 500 || scanned >= MAX_TOTAL_CHUNKS) break;
-  [stored] = await readBatch(stored[stored.length-1].id);
+  if (candidates.length || legacyIndex) {
+    try { [vector] = await embedder([search], 'RETRIEVAL_QUERY', env); } catch { /* Lexical retrieval remains available on a temporary embedding outage. */ }
+  }
+  let external = [];
+  const rank = stored => {
+    const ranked = stored.map(c => {
+      let embedding = c.embedding;
+      if (typeof embedding === 'string') { try { embedding = JSON.parse(embedding); } catch { embedding = null; } }
+      const semantic = vector ? cosine(vector, embedding) : 0;
+      return { id: `source:${c.source_id}:${c.id}`, sourceId: c.source_id, title: c.title,
+        url: c.url, text: c.content.slice(0, 1400),
+        score: lexical(`${c.title} ${c.content}`, terms) + (semantic >= .45 ? semantic * .8 : 0)
+          + (ingredients.length ? lexical(`${c.title} ${c.content}`, ingredients) * 2 : 0) };
+    });
+    const perSource = new Map();
+    external = [...external, ...ranked].sort((a,b) => b.score-a.score).filter(c => {
+      const count = perSource.get(c.sourceId) || 0;
+      perSource.set(c.sourceId,count+1); return count<3;
+    }).slice(0,64);
+  };
+  if (candidates.length) rank(candidates);
+  // A healthy index with no matches must not read every embedding. Bilingual
+  // classifier keywords provide recall; unsupported queries can return no context.
+  // Only the pre-migration compatibility path scans, with a shared time budget
+  // including queueing so concurrent misses cannot accumulate minutes of work.
+  else if (legacyIndex) {
+    const deadline = Date.now() + 10000;
+    await serializedScan(async () => {
+      let scanned = 0, after = 0;
+      while (scanned < MAX_TOTAL_CHUNKS && Date.now() < deadline) {
+        const [stored] = await readBatch(after);
+        if (!stored.length) break;
+        rank(stored); scanned += stored.length;
+        if (stored.length < 500) break;
+        after = stored.at(-1).id;
+        // Let HTTP requests and import callbacks run between fallback batches.
+        await new Promise(resolve => setImmediate(resolve));
+      }
+    });
   }
   // Reserve room for relevant Community content before supplementing with external evidence.
   const firstParty = select(preferred).slice(0, 4);

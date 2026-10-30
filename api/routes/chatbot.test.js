@@ -92,7 +92,7 @@ test('stable client request UUID replays saved pair without another provider or 
   }finally{await f.close();}
 });
 
-async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concurrentSourceCount}={}){
+async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concurrentSourceCount,ingestWait}={}){
   const calls=[],sources=new Map();let ingestions=0,commits=0,rollbacks=0;
   const initialSourceCount=sourceCount,initialChunkCount=chunkCount;
   const query=async(sql,params=[])=>{
@@ -110,6 +110,7 @@ async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concu
       sourceCount++;return[{affectedRows:1}];
     }
     if(sql.startsWith('INSERT INTO chatbot_chunk')){chunkCount+=params[0].length;return[{affectedRows:params[0].length}];}
+    if(sql.startsWith('INSERT INTO chatbot_search'))return[{affectedRows:params[2]-params[1]}];
     if(sql.startsWith('INSERT INTO chatbot_audit'))return[{affectedRows:1}];
     if(sql.includes('SELECT * FROM chatbot_source WHERE id=?'))return[[sources.get(params[0])]];
     if(sql.includes("SELECT * FROM chatbot_source WHERE status<>'deleted'")){
@@ -125,6 +126,7 @@ async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concu
   })};
   const knowledge={ingestSource:async input=>{
     ingestions++;
+    if(ingestWait)await ingestWait();
     return{title:'Nutrition reference',kind:input.file?'pdf':'url',url:input.url,filename:input.file?.originalname,
       chunks:Array.from({length:chunksPerSource},(_,i)=>({text:`Nutrition passage ${i}`,embedding:[.1,.2]}))};
   }};
@@ -143,7 +145,7 @@ async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concu
 }
 
 test('source uploads pass the former 100 cap, 43 topics with 10 references, and 500 references',async()=>{
-  for(const sourceCount of [100,429,500,1000,MAX_SOURCES-1]){
+  for(const sourceCount of [100,429,500,1000,2000,MAX_SOURCES-1]){
     const f=await sourceFixture({sourceCount,chunkCount:25000,chunksPerSource:150});try{
       const response=await f.create(),data=await response.json();
       assert.equal(response.status,201,JSON.stringify(data));
@@ -170,7 +172,7 @@ test('source list exposes server capacity and all references beyond 500',async()
   const f=await sourceFixture({sourceCount:2000});try{
     const response=await f.list(),data=await response.json();
     assert.equal(response.status,200);assert.equal(data.items.length,2000);
-    assert.equal(data.maxSources,2000);assert.equal(data.maxChunks,200000);
+    assert.equal(data.maxSources,10000);assert.equal(data.maxConcurrentImports,2);assert.equal(data.maxChunks,200000);
     assert.ok(data.items.some(source=>source.id==='existing-1999'));
   }finally{await f.close();}
 });
@@ -246,4 +248,24 @@ test('new internal citations pass route validation and every calendar overview r
       assert.equal(data.assistantMessage.validationSources,undefined);
     } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
   }
+});
+
+
+test('two imports run together, a third is rejected, and slots are reusable after errors',async()=>{
+  const waiting=[];
+  const f=await sourceFixture({ingestWait:()=>new Promise((resolve,reject)=>waiting.push({resolve,reject}))});
+  const waitFor=async count=>{for(let i=0;i<100&&waiting.length<count;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(waiting.length,count);};
+  try {
+    const first=f.create();await waitFor(1);
+    const second=f.create();await waitFor(2);
+    const third=await f.create();assert.equal(third.status,429);
+    assert.equal((await third.json()).error,'chatbot_ingestion_busy');
+    waiting[0].reject(Object.assign(new Error('invalid'),{code:'chatbot_invalid_source',status:400}));
+    assert.equal((await first).status,400);
+    const replacement=f.create();await waitFor(3);
+    waiting[1].resolve();waiting[2].resolve();
+    assert.equal((await second).status,201);assert.equal((await replacement).status,201);
+    assert.equal(f.stats().commits,2);
+    assert.equal(f.calls.filter(call=>call.sql.startsWith('INSERT INTO chatbot_search')).length,2);
+  }finally{waiting.forEach(item=>item.resolve());await f.close();}
 });
