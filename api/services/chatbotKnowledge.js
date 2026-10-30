@@ -9,7 +9,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const ipaddr = require('ipaddr.js');
 const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
-const { normalize, calendarIntent, resourceIntent, articleIntent, calendarOverview, searchQuestion, calendarReply } = require('./chatbotNavigation');
+const { normalize, calendarIntent, resourceIntent, articleIntent, foodPreparationIntent, calendarOverview, searchQuestion, calendarReply } = require('./chatbotNavigation');
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT = 1000000;
@@ -144,7 +144,13 @@ async function ingestSource({ file, url, title }, { env = process.env, fetcher =
     metadata: { pages: pages || null, characters: text.length, bytes: buffer.length,
       embeddingModel: EMBEDDING_MODEL, embeddingDimensions: 768, fetchedAt: new Date().toISOString() } };
 }
-const STOP = new Set('what when where how which with from this that have does about there their please can could would should que como donde cuando cual para del los las una unos unas por con mis sus hay quiero saber sobre puedes puedo necesito me the and for are is to en de el la un a y mi do i find encontrar available disponibles algun alguna algunos algunas'.split(' '));
+const STOP = new Set('what when where how which with from this that have does about there their please can could would should que como donde cuando cual para del los las una unos unas por con mis sus hay quiero saber sobre puedes puedo necesito me the and for are is to en de el la un a y mi do i find encontrar available disponibles algun alguna algunos algunas gracias muchas muchos dieron ultimo ultima recibimos recomendacion recomendaciones listado lista opciones lugares'.split(' '));
+const INGREDIENT_GROUPS = ['fresa fresas frutilla frutillas strawberry strawberries', 'anana ananas pina pinas pineapple pineapples',
+  'berenjena berenjenas eggplant eggplants', 'legumbre legumbres lentils lentejas beans frijoles garbanzos chickpeas'];
+function ingredientTerms(question) {
+  const words = new Set(normalize(question).split(' '));
+  return INGREDIENT_GROUPS.flatMap(group => group.split(' ').some(word => words.has(word)) ? group.split(' ') : []);
+}
 function termsFor(question) {
   const terms = String(question).normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().match(/[a-z0-9]{3,}/g) || [];
   const groups = ['food comida alimentos alimentacion nutrition nutricion', 'health salud medical medico',
@@ -152,7 +158,11 @@ function termsFor(question) {
     'resource recursos resources ayuda help', 'diabetes diabetic diabetico', 'children ninos infancia',
     'blood pressure presion hipertension hypertension', 'exercise ejercicio actividad',
     'mental emotional emocional psicologia psicologico psychology counseling terapia therapy',
-    'housing vivienda alojamiento shelter refugio', 'clinic clinics clinica clinicas healthcare salud'];
+    'housing vivienda alojamiento shelter refugio', 'clinic clinics clinica clinicas healthcare salud',
+    'receta recetas recipe recipes cocinar cooking', 'guardar conservar almacenar storage storing refrigeration refrigerar',
+    'fruta frutas fruit fruits', 'verdura verduras vegetable vegetables',
+    'parque parques park parks recreation recreacion', 'escuela escuelas school schools educativos educational',
+    'guarderia guarderias childcare daycare', 'mayores senior seniors elderly envejecimiento aging', ...INGREDIENT_GROUPS];
   const found = new Set(terms.filter(t => !STOP.has(t)));
   for (const group of groups) { const values = group.split(' '); if (values.some(v => found.has(v))) values.forEach(v => found.add(v)); }
   return [...found].slice(0, 40);
@@ -189,7 +199,7 @@ async function calendarRows(db, now = new Date()) {
   return rows.sort((a, b) => a.date.localeCompare(b.date) || String(a.time).localeCompare(String(b.time)) || a.id - b.id);
 }
 
-async function internalContext(db, locale, terms, { includeCalendar = true, location = '' } = {}) {
+async function internalContext(db, locale, terms, { includeCalendar = true, includeResources = true, location = '' } = {}) {
   const es = locale === 'es';
   const [articles, resources, calendar] = await Promise.all([
     readInternalPages(db, `SELECT a.id,title_en,title_es,subtitle_en,subtitle_es,content_en,content_es,slug_en,slug_es,
@@ -197,12 +207,12 @@ async function internalContext(db, locale, terms, { includeCalendar = true, loca
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',f.name_en,f.name_es) SEPARATOR ', ') FROM article_filter af JOIN filter f ON f.id=af.filter_id WHERE af.article_id=a.id) filters,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',t.name_en,t.name_es) SEPARATOR ', ') FROM article_tags atg JOIN tags t ON t.id=atg.tag_id WHERE atg.article_id=a.id) tags
       FROM article a WHERE article_status_id=2 AND (publication_date IS NULL OR publication_date<=NOW()) AND a.id>? ORDER BY a.id LIMIT 200`),
-    readInternalPages(db, `SELECT r.id,title_english,title_spanish,description_english,description_spanish,
+    includeResources ? readInternalPages(db, `SELECT r.id,title_english,title_spanish,description_english,description_spanish,
       information_english,information_spanish,address,phone_number,website,rc.name city,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',f.name_english,f.name_spanish) SEPARATOR ', ') FROM resource_filter_relations rf JOIN resource_filters f ON f.id=rf.filter_id WHERE rf.resource_id=r.id) categories,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',s.name_english,s.name_spanish) SEPARATOR ', ') FROM resource_service_relations rs JOIN resource_services s ON s.id=rs.service_id WHERE rs.resource_id=r.id) services,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',p.name_english,p.name_spanish) SEPARATOR ', ') FROM resource_price_relations rp JOIN resource_prices p ON p.id=rp.price_id WHERE rp.resource_id=r.id) prices
-      FROM trusted_resources r LEFT JOIN resource_cities rc ON rc.id=r.city_id WHERE is_active=1 AND r.id>? ORDER BY r.id LIMIT 200`),
+      FROM trusted_resources r LEFT JOIN resource_cities rc ON rc.id=r.city_id WHERE is_active=1 AND r.id>? ORDER BY r.id LIMIT 200`) : [],
     includeCalendar ? calendarRows(db) : []
   ]);
   const result = [];
@@ -241,11 +251,14 @@ async function internalContext(db, locale, terms, { includeCalendar = true, loca
 }
 async function retrieveContext({ db, question, history = [], locale = 'en', location = '', env = process.env, embedder = embed }) {
   if (calendarOverview(question) && !location) return { directAnswer: calendarReply(await calendarRows(db), locale) };
-  const search = searchQuestion(question, history);
+  const search = searchQuestion(question, history, location);
+  const foodIntent = foodPreparationIntent(search);
+  const ingredients = foodIntent ? ingredientTerms(search) : [];
   const locationTerms = new Set(normalize(location).split(' '));
-  const terms = termsFor(search).filter(term => !locationTerms.has(term));
+  const terms = termsFor(search).filter(term => !locationTerms.has(term) && (!foodIntent || !calendarIntent(term)));
   const wantsCalendar = calendarIntent(search), wantsResources = resourceIntent(search);
-  const internal = await internalContext(db, locale, terms, { includeCalendar: wantsCalendar, location });
+  // Spanish "recetas" also means prescriptions: pharmacy listings are not cooking evidence.
+  const internal = await internalContext(db, locale, terms, { includeCalendar: wantsCalendar, includeResources: !foodIntent, location });
   // Navigation uses the live Community catalog. Uploaded external references cannot
   // displace resources, articles or current dates when users ask where to find them.
   const genericResources = wantsResources && terms.every(term => ['resource','resources','recurso','recursos','services','service','servicio','servicios','ayuda','help'].includes(term));
@@ -285,7 +298,8 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
     const semantic = vector ? cosine(vector, embedding) : 0;
     return { id: `source:${c.source_id}:${c.id}`, sourceId: c.source_id, title: c.title,
       url: c.url, text: c.content.slice(0, 1400),
-      score: lexical(`${c.title} ${c.content}`, terms) + (semantic >= .45 ? semantic * .8 : 0) };
+      score: lexical(`${c.title} ${c.content}`, terms) + (semantic >= .45 ? semantic * .8 : 0)
+        + (ingredients.length ? lexical(`${c.title} ${c.content}`, ingredients) * 2 : 0) };
   });
   // Never load the full vector corpus into RAM: bounded pages plus the best diverse passages.
   const perSource = new Map();

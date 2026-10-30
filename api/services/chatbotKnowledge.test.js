@@ -216,3 +216,75 @@ test('explicit article discovery cites internal articles without consulting exte
   assert.match(result[0].id, /^article:/);
   assert.ok(db.calls.every(c => !c.sql.includes('chatbot_chunk')));
 });
+
+test('food received at a distribution retrieves cooking evidence instead of calendar dates or pharmacies', async () => {
+  const db = internalFixture({ calendar: [{ id: 1, date: '2026-11-03', no_distribution: 0 }],
+    resources: [{ id: 1, title_spanish: 'Farmacia', information_spanish: 'Recetas médicas.' }],
+    external: [{ id: 1, source_id: 'fruit', title: 'Fruit recipes', content: 'Strawberries in a fruit salad.', embedding: null }] });
+  const result = await retrieveContext({ db, question: 'Me dieron muchas fresas en el último reparto. ¿Qué puedo hacer con ellas?', embedder: async () => { throw Error('offline'); } });
+  assert.ok(result.some(source => source.id === 'source:fruit:1'));
+  assert.ok(result.every(source => !/^(calendar|resource):/.test(source.id)));
+  assert.ok(db.calls.every(call => !call.sql.includes('calendar_event')));
+  assert.ok(db.calls.every(call => !call.sql.includes('FROM trusted_resources')));
+});
+
+test('regional ingredient aliases retrieve exact ingredient evidence without an embedding provider', async () => {
+  const db = internalFixture({ external: [
+    { id: 1, source_id: 'pineapple', title: 'Pineapple recipes', content: 'Pineapple fruit salad.', embedding: null },
+    { id: 2, source_id: 'banana', title: 'Banana recipes', content: 'Banana bread recipe.', embedding: null }
+  ] });
+  for (const question of ['recetas con ananá', 'recetas con piña']) {
+    const result = await retrieveContext({ db, question, embedder: async () => { throw Error('offline'); } });
+    assert.equal(result[0].id, 'source:pineapple:1');
+  }
+});
+
+test('a new food question does not inherit a previous calendar location prompt', async () => {
+  const db = internalFixture({ external: [{ id: 1, source_id: 'eggplant', title: 'Eggplant dip', content: 'Eggplant recipe preparation.', embedding: null }] });
+  const result = await retrieveContext({ db, question: 'Gracias, recibimos muchas berenjenas. ¿Cómo podemos prepararlas o conservarlas?', history: [
+    { role: 'user', text: '¿Cuáles son las próximas distribuciones?' },
+    { role: 'assistant', text: 'Consulta el calendario. ¿En qué ciudad o código postal buscas?' }
+  ], embedder: async () => { throw Error('offline'); } });
+  assert.equal(result[0].id, 'source:eggplant:1');
+  assert.ok(db.calls.every(call => !call.sql.includes('calendar_event')));
+});
+
+test('parks, senior centers and educational centers use the internal directory', async () => {
+  for (const [question, title, services] of [
+    ['Qué parques gratuitos hay en San Bernardino?', 'Central Park', 'Recreation park'],
+    ['recomendación de centros para adultos mayores', 'Senior Center', 'Senior activities'],
+    ['un listado de centros educativos', 'Community School', 'Educational programs']
+  ]) {
+    const db = internalFixture({ resources: [{ id: 1, title_english: title, services, city: 'San Bernardino' }] });
+    const result = await retrieveContext({ db, question });
+    assert.match(result[0].id, /^resource:/);
+    assert.ok(db.calls.every(call => !call.sql.includes('chatbot_chunk')));
+  }
+});
+
+test('a request for actual senior-center locations keeps the previous directory topic', async () => {
+  const db = internalFixture({ resources: [{ id: 1, title_english: 'Senior Center', services: 'Senior activities' }] });
+  const result = await retrieveContext({ db, question: 'pero donde me recomendaste ir? dame opciones de lugares', history: [
+    { role: 'user', text: 'recomendación de centros para adultos mayores' },
+    { role: 'assistant', text: '¿En qué ciudad o código postal buscas?' }
+  ] });
+  assert.match(result[0].id, /^resource:/);
+});
+
+test('a new health topic after a location question does not inherit resource discovery', async () => {
+  const db = internalFixture({ external: [{ id: 1, source_id: 'influenza', title: 'Influenza', content: 'Influenza general education.', embedding: null }] });
+  const result = await retrieveContext({ db, question: 'Información general sobre influenza', history: [
+    { role: 'user', text: '¿Dónde puedo encontrar recursos de salud?' },
+    { role: 'assistant', text: '¿En qué ciudad o código postal buscas?' }
+  ], embedder: async () => { throw Error('offline'); } });
+  assert.equal(result[0].id, 'source:influenza:1');
+});
+
+test('food storage follow-ups preserve the ingredient while a new recipe ingredient replaces it', () => {
+  const { searchQuestion } = require('./chatbotNavigation');
+  const history = [{ role: 'user', text: 'recetas con fresas' }, { role: 'assistant', text: '¿Quieres saber cómo guardarlas?' }];
+  assert.match(searchQuestion('¿Y cómo conservarlas?', history), /fresas/);
+  assert.match(searchQuestion('¿Cómo guardarlas?', history), /fresas/);
+  assert.match(searchQuestion('Más recetas', history), /fresas/);
+  assert.equal(searchQuestion('Y recetas con ananá', history), 'Y recetas con ananá');
+});

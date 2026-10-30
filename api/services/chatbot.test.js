@@ -48,6 +48,7 @@ test('grounded responses use only registry citations, bounded history, fixed pol
   const payload=JSON.parse(http.calls[1].body.contents[0].parts[0].text);
   assert.equal(payload.HISTORY_DATA.length,6);assert.equal(payload.HISTORY_DATA[0].text.length,1200);
   assert.equal(payload.calendarTimeZone,'America/Los_Angeles');assert.match(payload.currentDate,/^\d{4}-\d{2}-\d{2}$/);
+  assert.match(payload.currentLocalTime,/^\d{2}:\d{2}$/);
   assert.equal(http.calls[1].body.generationConfig.maxOutputTokens,800);
   assert.equal(http.calls[1].options.headers['x-goog-api-key'],'unit-test-only');
   assert.equal(http.calls[1].options.maxRedirects,0);

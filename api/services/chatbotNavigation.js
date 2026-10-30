@@ -1,8 +1,15 @@
 'use strict';
 
 const normalize = value => String(value || '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-const calendarIntent = value => /\b(distributions?|distribuciones?|distribucion|repartos?|calendario|calendar|entregan alimentos)\b/.test(normalize(value));
-const resourceIntent = value => /\b(recursos?|resources?|servicios?|services?|clinicas?|clinics?)\b/.test(normalize(value));
+function foodPreparationIntent(value) {
+  const text = normalize(value);
+  if (/\b(prescriptions?|medicamentos|receta medica|recetas medicas)\b/.test(text)) return false;
+  return /\b(recetas?|recipes?|cocinar|cocinarlas|cocinarlos|cooking|cook|conservar(?:la|lo|las|los)?|guardar|almacenar|storage|storing)\b/.test(text)
+    || (/\b(frutas?|verduras?|fresas?|frutillas?|anan[aá]s?|pina|pineapple|berenjenas?|eggplants?|alimentos?|comida|food|strawberries|vegetables?)\b/.test(text)
+      && /\b(preparar(?:la|lo|las|los)?|prepare|hacer|do with|aprovechar|duren|last longer)\b/.test(text));
+}
+const calendarIntent = value => !foodPreparationIntent(value) && /\b(distributions?|distribuciones?|distribucion|repartos?|calendario|calendar|entregan alimentos|proxima entrega|next delivery)\b/.test(normalize(value));
+const resourceIntent = value => !foodPreparationIntent(value) && /\b(recursos?|resources?|servicios?|services?|clinicas?|clinics?|parques?|parks?|guarderias?|childcare|daycare|senior centers?|centros (?:educativos|para adultos mayores)|escuelas?|schools?|bibliotecas?|libraries|transporte publico|public transportation)\b/.test(normalize(value));
 const articleIntent = value => /\b(articles?|articulos?|publicaciones)\b/.test(normalize(value));
 const nearbyIntent = value => /\b(near me|nearby|closest|nearest|around here|my area|my location|my neighborhood|local resources|local services|cerca de mi|cercanos?|cercanas?|mas cerca|por aqui|por aca|mi zona|mi barrio|mi ubicacion|recursos locales|servicios locales)\b/.test(normalize(value));
 
@@ -10,13 +17,22 @@ function calendarOverview(question) {
   return /^(?:(?:cuales son|muestra(?:me)?|dime|ver|quiero ver|todas|todas las|las|proximas|el|what are|show(?: me)?|list|all|the|upcoming|next|available|todas las fechas|fechas disponibles|de|del|of|dates|please|por favor)\s+)*(?:distribuciones|distribuciones disponibles|distributions|distribution dates|calendario(?: de distribuciones)?|distribution calendar)(?:\s+(?:proximas|disponibles|upcoming|available|please|por favor))*$/.test(normalize(question));
 }
 
-function searchQuestion(question, history = []) {
+function searchQuestion(question, history = [], location = '') {
   const previous = [...history].reverse().find(m => m.role === 'user');
   const last = history.at(-1);
-  const continuing = /^(?:and\b|y\b|what about\b|que hay\b|where is (?:it|that)\b|donde (?:queda|esta)\b|more\b|mas\b)/.test(normalize(question));
-  const answeringLocation = last?.role === 'assistant' && /city or zip|ciudad o codigo postal/i.test(normalize(last.text || last.content));
-  return previous && (continuing || answeringLocation)
-    ? `${String(previous.text || previous.content || '').slice(0, 1200)}\n${question}` : question;
+  const current = normalize(question);
+  const previousText = String(previous?.text || previous?.content || '');
+  const foodFollowup = foodPreparationIntent(previousText) &&
+    (/\b(conservarlas|conservarlos|guardarlas|guardarlos|prepararlas|prepararlos|cocinarlas|cocinarlos|them|it)\b/.test(current)
+      || /^(?:(?:y|and) )?(?:mas recetas|more recipes)$/.test(current));
+  if (/\b(otra consulta|otra pregunta|cambiando de tema|another question|different topic)\b/.test(current)
+    || (foodPreparationIntent(question) && !foodFollowup)) return question;
+  const continuing = /^(?:and\b|y\b|what about\b|que hay\b|where is (?:it|that)\b|donde (?:queda|esta)\b|pero donde\b|but where\b|no hay en otras\b|hay en otras\b|more\b|mas\b)/.test(current);
+  // A previous city prompt must not pull an unrelated new question back to its topic.
+  const locationOnly = location && [normalize(location), `en ${normalize(location)}`, `in ${normalize(location)}`, `vivo en ${normalize(location)}`, `i live in ${normalize(location)}`].includes(current);
+  const answeringLocation = locationOnly && last?.role === 'assistant' && /city or zip|ciudad o codigo postal/i.test(normalize(last.text || last.content));
+  return previous && (continuing || answeringLocation || foodFollowup)
+    ? `${previousText.slice(0, 1200)}\n${question}` : question;
 }
 
 // Only use a location actually supplied by the user. Never trust IP, VPN, UI locale,
@@ -56,4 +72,4 @@ function calendarReply(rows, locale) {
     validationSources: cited.map(row => ({ id: `calendar:${row.id}` })) };
 }
 
-module.exports = { normalize, calendarIntent, resourceIntent, articleIntent, nearbyIntent, calendarOverview, searchQuestion, explicitLocation, calendarReply };
+module.exports = { normalize, calendarIntent, resourceIntent, articleIntent, nearbyIntent, foodPreparationIntent, calendarOverview, searchQuestion, explicitLocation, calendarReply };
