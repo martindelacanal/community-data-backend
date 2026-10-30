@@ -181,7 +181,7 @@ test('public registration copies mapped answers into the new account profile wit
     const username = `__profile_sync_${crypto.randomUUID().slice(0, 8)}`;
     usernames.push(username);
     const registered = await postJson(baseUrl, `/api/health-events/${fixture.slug}/register`, {
-      account: { username, firstName: 'Profile', lastName: 'Sync Test', phone: await uniquePhone(pool) },
+      account: { username, firstName: 'Profile', lastName: 'Sync Test', dateOfBirth: '1980-01-01', phone: await uniquePhone(pool) },
       answers: [
         { question_id: fixture.genderQuestionId, answer: fixture.femaleOptionId },
         { question_id: fixture.zipQuestionId, answer: ' 92220 ' }
@@ -200,7 +200,7 @@ test('public registration copies mapped answers into the new account profile wit
     const username2 = `__profile_sync_${crypto.randomUUID().slice(0, 8)}`;
     usernames.push(username2);
     const registered2 = await postJson(baseUrl, `/api/health-events/${fixture.slug}/register`, {
-      account: { username: username2, firstName: 'Profile', lastName: 'Sync Test', phone: await uniquePhone(pool), zipcode: '90001' },
+      account: { username: username2, firstName: 'Profile', lastName: 'Sync Test', dateOfBirth: '1981-01-01', phone: await uniquePhone(pool), zipcode: '90001' },
       answers: [
         { question_id: fixture.genderQuestionId, answer: fixture.unmappedOptionId },
         { question_id: fixture.zipQuestionId, answer: '92223' }
@@ -217,7 +217,7 @@ test('public registration copies mapped answers into the new account profile wit
     // the answers so opening the QR never immediately repeats registration.
     const phone3 = await uniquePhone(pool);
     const registered3 = await postJson(baseUrl, `/api/health-events/${fixture.slug}/register`, {
-      account: { firstName: 'María', lastName: 'Automatic Test', phone: phone3, uiLanguage: 'es' },
+      account: { firstName: 'María', lastName: 'Automatic Test', dateOfBirth: '1982-01-01', phone: phone3, uiLanguage: 'es' },
       answers: [
         { question_id: fixture.genderQuestionId, answer: fixture.femaleOptionId },
         { question_id: fixture.zipQuestionId, answer: '92220' }

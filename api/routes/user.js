@@ -1,3 +1,5 @@
+const { validPersonName, validBirthDate, lockParticipantIdentity, findDuplicateParticipant } = require('../utils/participantIdentity');
+const { validPrivacyConsent, savePrivacyConsent } = require('../services/volunteerPrivacyConsent');
 const express = require('express');
 const router = express.Router();
 const { positiveIdentifier, ticketAccessCondition, findAccessibleTicket, ticketAuditStatus } = require('../services/ticketAccess');
@@ -587,6 +589,9 @@ function isMailchimpMemberExistsError(err) {
 
 router.post('/signup', async (req, res) => {
   const firstForm = req.body.firstForm || {};
+  if (!validPersonName(firstForm.firstName) || !validPersonName(firstForm.lastName)) {
+    return res.status(400).json({ code: 'INVALID_NAME_CHARACTERS' });
+  }
   const secondForm = Array.isArray(req.body.secondForm) ? [...new Map(req.body.secondForm.map(item => [Number(item.question_id), item])).values()] : [];
 
   // Validate legal consent - must be strictly true
@@ -660,11 +665,17 @@ router.post('/signup', async (req, res) => {
   const legalConsentVersion = '2026-03-02';
 
   let connection;
+  let identityLock;
 
   try {
     // Obtener conexión y iniciar transacción
     connection = await mysqlConnection.promise().getConnection();
+    if (validBirthDate(firstForm.dateOfBirth)) identityLock = await lockParticipantIdentity(connection, firstForm);
     await connection.beginTransaction();
+    if (identityLock && await findDuplicateParticipant(connection, firstForm)) {
+      await connection.rollback();
+      return res.status(409).json({ code: 'PARTICIPANT_EXISTS' });
+    }
 
     // Buscar client_id asociado a la location
     const [rows_client_id] = await connection.query('SELECT client_id FROM client_location WHERE location_id = ?', [location_id]);
@@ -794,6 +805,7 @@ router.post('/signup', async (req, res) => {
     }
 
     await connection.commit();
+    if (identityLock) { await connection.query('SELECT RELEASE_LOCK(?)', [identityLock]); identityLock = null; }
 
     // Responder éxito antes de procesar Mailchimp (para no afectar la transacción)
     res.status(200).json({ message: 'Data inserted successfully', username });
@@ -889,6 +901,7 @@ router.post('/signup', async (req, res) => {
   } finally {
     // Liberar conexión
     if (connection) {
+      if (identityLock) await connection.query('SELECT RELEASE_LOCK(?)', [identityLock]);
       connection.release();
     }
   }
@@ -2354,10 +2367,19 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
     await connection.beginTransaction();
 
     if (req.files && req.files.length > 0) {
-      formulario = JSON.parse(req.body.form);
+      const formulario = JSON.parse(req.body.form);
+      if (!validPersonName(formulario.firstName) || !validPersonName(formulario.lastName)) {
+        await connection.rollback();
+        return res.status(400).json({ code: 'INVALID_NAME_CHARACTERS' });
+      }
+      if (!validPrivacyConsent(formulario.privacyConsent)) {
+        await connection.rollback();
+        return res.status(400).json({ code: 'PRIVACY_CONSENT_REQUIRED' });
+      }
 
       // Validate legal consent - must be strictly true
       if (formulario.legalConsentAccepted !== true) {
+        await connection.rollback();
         return res.status(400).json({
           code: 'LEGAL_CONSENT_REQUIRED',
           message: 'Legal consent must be accepted to register as a volunteer'
@@ -2399,6 +2421,7 @@ router.post('/signup/volunteer', upload_signature, async (req, res) => {
 
       if (rows.affectedRows > 0) {
         const volunteer_id = rows.insertId;
+        await savePrivacyConsent(connection, formulario.privacyConsent, { volunteerId: volunteer_id, email });
 
         for (let i = 0; i < req.files.length; i++) {
           req.files[i].filename = randomImageName();
@@ -11850,7 +11873,7 @@ router.put('/settings/personal-info', verifyToken, async (req, res) => {
   if (!sanitizedLast) {
     return res.status(400).json({ code: 'INVALID_LASTNAME', message: 'Last name is required' });
   }
-  if (/\d/.test(sanitizedFirst) || /\d/.test(sanitizedLast)) {
+  if (!validPersonName(sanitizedFirst) || !validPersonName(sanitizedLast)) {
     return res.status(400).json({ code: 'INVALID_NAME_CHARACTERS', message: 'First/last name cannot contain numbers' });
   }
 

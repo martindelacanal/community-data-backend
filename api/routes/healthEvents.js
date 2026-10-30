@@ -59,6 +59,9 @@ const {
 // Values accepted in health_event_question.maps_to: event logistics + participant profile fields.
 const MAPS_TO_VALUES = new Set(['attend_date', 'priority_service', ...PROFILE_MAPS_TO]);
 
+const { validPersonName, validBirthDate, lockParticipantIdentity, findDuplicateParticipant } = require('../utils/participantIdentity');
+const { validPrivacyConsent, savePrivacyConsent } = require('../services/volunteerPrivacyConsent');
+const { checkoutValidation, readRegistrationAnswers, findEventEntry } = require('../utils/eventCheckout');
 const router = express.Router();
 
 const bucketName = process.env.BUCKET_NAME;
@@ -528,7 +531,7 @@ async function upsertAnswers(connection, registrationId, items, questionsById, s
     const otherText = item.other_text != null ? String(item.other_text).trim().slice(0, 500) : null;
 
     const [existing] = await connection.query(
-      'SELECT id FROM health_event_answer WHERE registration_id = ? AND question_id = ? LIMIT 1',
+      'SELECT id FROM health_event_answer WHERE registration_id = ? AND question_id = ? LIMIT 1 FOR UPDATE',
       [registrationId, item.question_id]);
 
     let answerId;
@@ -954,6 +957,7 @@ router.get('/health-events/:slug/forms', async (req, res) => {
 
 router.post('/health-events/:slug/register', async (req, res) => {
   let connection;
+  let identityLock;
   try {
     const event = await getEventBySlug(String(req.params.slug).toLowerCase());
     if (!event || event.enabled !== 'Y') {
@@ -974,12 +978,20 @@ router.post('/health-events/:slug/register', async (req, res) => {
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
     const appointments = Array.isArray(req.body.appointments) ? req.body.appointments : [];
 
+    const useOwnAccount = authUser && authUser.role === 'beneficiary' && req.body.registering_for !== 'other';
+    if (!useOwnAccount && (!validPersonName(account.firstName) || !validPersonName(account.lastName))) {
+      return res.status(400).json({ error: 'INVALID_NAME_CHARACTERS' });
+    }
+    if (!useOwnAccount && !validBirthDate(account.dateOfBirth)) {
+      return res.status(400).json({ error: 'INVALID_DATE_OF_BIRTH' });
+    }
+
     // Beneficiario logueado que YA está registrado (p. ej. importado de Jotform
     // que vuelve a llenar el formulario para completar la encuesta): en vez de
     // rechazar con 409 y descartar todo lo que respondió (incidente Banning
     // 08-ago-2026), sus respuestas se absorben en la registración existente.
     let existingRegistrationId = null;
-    if (authUser && authUser.role === 'beneficiary') {
+    if (authUser && authUser.role === 'beneficiary' && req.body.registering_for !== 'other') {
       const [alreadyRegistered] = await mysqlConnection.promise().query(
         'SELECT id FROM health_event_registration WHERE health_event_id = ? AND user_id = ? AND registration_role = "beneficiary" LIMIT 1',
         [event.id, authUser.id]);
@@ -1027,13 +1039,18 @@ router.post('/health-events/:slug/register', async (req, res) => {
     }
 
     connection = await mysqlConnection.promise().getConnection();
+    if (!useOwnAccount) identityLock = await lockParticipantIdentity(connection, account);
     await connection.beginTransaction();
+    if (!useOwnAccount && await findDuplicateParticipant(connection, account)) {
+      await connection.rollback();
+      return res.status(409).json({ error: 'PARTICIPANT_EXISTS' });
+    }
 
     let userId;
     let createdAccount = false;
     let createdWithDefaultPassword = false;
     let createdUsername = null;
-    if (authUser && authUser.role === 'beneficiary') {
+    if (authUser && authUser.role === 'beneficiary' && req.body.registering_for !== 'other') {
       userId = authUser.id;
     } else {
       let username = String(account.username || '').trim() || null;
@@ -1047,24 +1064,16 @@ router.post('/health-events/:slug/register', async (req, res) => {
         logger.error('POST /health-events/:slug/register 400 INVALID_ACCOUNT_DATA (missing name/phone or short password)');
         return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
       }
-      const email = account.email ? String(account.email).trim() : null;
+      let email = account.email ? String(account.email).trim() : null;
       const phone = String(account.phone).trim();
 
-      // Same phone rules as the general signup form: exactly 10 digits and not
-      // already in use by a visible beneficiary (mirrors /phone/exists/search,
-      // which is what the frontend checks against while typing).
+      // A contact phone has exactly ten digits; family members may share it.
       if (!/^[0-9]{10}$/.test(phone)) {
         await connection.rollback();
         logger.error('POST /health-events/:slug/register 400 INVALID_ACCOUNT_DATA (phone not 10 digits)');
         return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
       }
-      const [phoneTaken] = await connection.query(
-        'SELECT id FROM user WHERE phone = ? AND enabled = "Y" AND role_id = 5 LIMIT 1', [phone]);
-      if (phoneTaken.length) {
-        await connection.rollback();
-        return res.status(409).json({ error: 'PHONE_TAKEN' });
-      }
-
+      // Families may share a contact phone; the person is identified by name and birth date.
       const [userTaken] = await connection.query('SELECT id FROM user WHERE username = ? LIMIT 1', [username]);
       if (userTaken.length) {
         await connection.rollback();
@@ -1073,8 +1082,8 @@ router.post('/health-events/:slug/register', async (req, res) => {
       if (email) {
         const [emailTaken] = await connection.query('SELECT id FROM user WHERE email = ? LIMIT 1', [email]);
         if (emailTaken.length) {
-          await connection.rollback();
-          return res.status(409).json({ error: 'EMAIL_TAKEN' });
+          // Keep the shared contact on the event registration, not as a second login email.
+          email = null;
         }
       }
 
@@ -1084,8 +1093,8 @@ router.post('/health-events/:slug/register', async (req, res) => {
         passwordHash,
         email,
         roleId: 5,
-        firstName: account.firstName,
-        lastName: account.lastName,
+        firstName: account.firstName.trim(),
+        lastName: account.lastName.trim(),
         dateOfBirth: account.dateOfBirth || null,
         phone,
         zipcode: account.zipcode || null,
@@ -1148,7 +1157,7 @@ router.post('/health-events/:slug/register', async (req, res) => {
     }
 
     let token = null;
-    if (createdAccount) {
+    if (createdAccount && !authUser) {
       try {
         token = await buildSigninToken(userId);
       } catch (tokenError) {
@@ -1179,7 +1188,10 @@ router.post('/health-events/:slug/register', async (req, res) => {
     logger.error('POST /health-events/:slug/register error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
   } finally {
-    if (connection) connection.release();
+    if (connection) {
+      if (identityLock) await connection.query('SELECT RELEASE_LOCK(?)', [identityLock]);
+      connection.release();
+    }
   }
 });
 
@@ -1202,6 +1214,12 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
 
     const account = req.body.account || {};
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
+    if (!validPersonName(account.firstName) || !validPersonName(account.lastName)) {
+      return res.status(400).json({ error: 'INVALID_NAME_CHARACTERS' });
+    }
+    if (!validPrivacyConsent(account.privacyConsent)) {
+      return res.status(400).json({ error: 'PRIVACY_CONSENT_REQUIRED' });
+    }
     const email = account.email ? String(account.email).trim() : null;
     if (!account.firstName || !account.phone || !email) {
       logger.error('POST /health-events/:slug/register/volunteer 400 INVALID_ACCOUNT_DATA (missing firstName/phone/email)');
@@ -1259,6 +1277,7 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
        VALUES (?,?,?,?,?,NOW())', [event.id, userId, 'volunteer', email, 'web']);
     const registrationId = regInsert.insertId;
 
+    await savePrivacyConsent(connection, account.privacyConsent, { userId, registrationId, email });
     await upsertAnswers(connection, registrationId, answers, questionsById, 'web-register');
     // Mapped demographic answers also complete the Bienestar profile (empty fields only).
     await applyProfileAnswers(connection, userId, questionsById, answers);
@@ -1641,7 +1660,7 @@ router.get('/health-events/volunteer/context', verifyToken, requireVolunteer, as
     for (const service of services) {
       if (!servicesByStand.has(service.stand_id)) servicesByStand.set(service.stand_id, []);
       servicesByStand.get(service.stand_id).push({
-        id: service.id, name_en: service.name_en, name_es: service.name_es
+        id: service.id, name_en: service.name_en, name_es: service.name_es, service_key: service.service_key
       });
     }
 
@@ -1760,6 +1779,9 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       return res.status(404).json({ error: 'STAND_NOT_FOUND' });
     }
     const stand = standRows[0];
+    if (req.body.event_checkout === true && (stand.is_entry !== 'Y' || !(await canOperateHealthStand(req.currentUser, eventId, standId)))) {
+      return res.status(403).json({ error: 'FORBIDDEN' });
+    }
 
     // Evento terminado (zona horaria del evento): la consola queda de solo
     // lectura — no se registran más check-ins/check-outs.
@@ -1867,7 +1889,7 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
     // entry line must keep moving.
     const preExistingRegistration = !!registration;
     if (!registration) {
-      if (stand.is_entry === 'Y' && !wristbandIdentity) {
+      if (stand.is_entry === 'Y' && !wristbandIdentity && req.body.event_checkout !== true) {
         const [regInsert] = await connection.query(
           'INSERT INTO health_event_registration(health_event_id, user_id, registration_role, source, submitted_at) \
            VALUES (?,?,?,?,NOW())', [eventId, scannedUserId, 'beneficiary', 'walkin']);
@@ -1879,6 +1901,34 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
         // event — prevents user enumeration by scanning arbitrary ids.
         return res.status(404).json({ error: 'NOT_REGISTERED' });
       }
+    }
+
+    if (req.body.event_checkout === true) {
+      if (participantRole !== 'beneficiary') {
+        await connection.rollback();
+        return res.status(400).json({ error: 'BENEFICIARY_ONLY' });
+      }
+      if (wristbandIdentity) await healthEventWristbands.lockActiveWristband(connection, eventId, wristbandIdentity.id, registration.id);
+      const entry = await findEventEntry(connection, eventId, scannedUserId, stand.event_timezone);
+      if (!entry) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'EVENT_ENTRY_REQUIRED' });
+      }
+      const forms = await fetchForms(eventId, 'beneficiary');
+      const questions = forms.flatMap(f => f.questions);
+      const stored = await readRegistrationAnswers(connection, registration.id);
+      for (const item of stored) {
+        const q = questions.find(q => q.id === item.question_id);
+        if (q?.question_type === 'single' && Array.isArray(item.answer)) item.answer = item.answer[0];
+      }
+      await connection.commit();
+      return res.status(200).json({
+        scan_id: entry.checkout_id || entry.id, scan_type: 'checkout', event_checkout: true,
+        pending_event_checkout: !entry.checkout_id, duplicate: !!entry.checkout_id, person,
+        registration: { id: registration.id, status: registration.status, source: registration.source, dates: [], appointments: [] },
+        checkout_form: entry.checkout_id ? null : { id: 0, audience: 'beneficiary', title_en: 'Event checkout & health survey', title_es: 'Salida del evento y encuesta de salud', questions },
+        checkout_answers: entry.checkout_id ? [] : stored
+      });
     }
 
     let activeWristband = null;
@@ -1945,7 +1995,7 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       // puesto con check-out => confirmación explícita); los viejos no mandan
       // el campo y conservan el flujo directo.
       const decision = resolveDailyScanDecision({
-        hasCheckout: stand.has_checkout === 'Y',
+        hasCheckout: stand.is_entry !== 'Y' && stand.has_checkout === 'Y',
         serviceId: Number.isInteger(serviceId) ? serviceId : null,
         todayCheckins,
         allowRepeat: req.body.allow_repeat === false ? false : null
@@ -2072,6 +2122,52 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
   } finally {
     if (connection) connection.release();
   }
+});
+
+router.post('/health-events/event-checkout', verifyToken, requireVolunteer, async (req, res) => {
+  let connection;
+  try {
+    const { event_id: eventId, stand_id: standId, registration_id: registrationId } = req.body;
+    if (![eventId, standId, registrationId].every(id => Number.isSafeInteger(id) && id > 0)) return res.status(400).json({ error: 'INVALID_DATA' });
+    if (!(await canOperateHealthStand(req.currentUser, eventId, standId))) return res.status(403).json({ error: 'FORBIDDEN' });
+    const event = await getEventById(eventId);
+    if (!event || event.enabled !== 'Y') return res.status(404).json({ error: 'NOT_FOUND' });
+    if (hasEventEnded(event)) return res.status(410).json({ error: 'EVENT_ENDED' });
+    const [[stand]] = await mysqlConnection.promise().query('SELECT id FROM health_event_stand WHERE id=? AND health_event_id=? AND is_entry="Y" AND enabled="Y"', [standId, eventId]);
+    if (!stand) return res.status(400).json({ error: 'ENTRY_STAND_REQUIRED' });
+    connection = await mysqlConnection.promise().getConnection();
+    const [[identity]] = await connection.query('SELECT user_id FROM health_event_registration WHERE id=? AND health_event_id=?', [registrationId, eventId]);
+    if (!identity) return res.status(404).json({ error: 'NOT_REGISTERED' });
+    await connection.beginTransaction();
+    await connection.query('SELECT id FROM user WHERE id=? FOR UPDATE', [identity.user_id]);
+    const [[reg]] = await connection.query('SELECT * FROM health_event_registration WHERE id=? AND health_event_id=? AND registration_role="beneficiary" AND status="registered" FOR UPDATE', [registrationId, eventId]);
+    if (!reg) { await connection.rollback(); return res.status(404).json({ error: 'NOT_REGISTERED' }); }
+    const entry = await findEventEntry(connection, eventId, reg.user_id, event.timezone);
+    if (!entry) { await connection.rollback(); return res.status(409).json({ error: 'EVENT_ENTRY_REQUIRED' }); }
+    if (entry.checkout_id) { await connection.commit(); return res.json({ scan_id: entry.checkout_id, duplicate: true }); }
+    const questions = (await fetchForms(eventId, 'beneficiary')).flatMap(f => f.questions);
+    const byId = new Map(questions.map(q => [q.id, q]));
+    const submitted = Array.isArray(req.body.answers) ? req.body.answers : [];
+    if (submitted.some(a => !a || !byId.has(a.question_id))) { await connection.rollback(); return res.status(400).json({ error: 'INVALID_ANSWERS' }); }
+    const stored = await readRegistrationAnswers(connection, reg.id);
+    for (const item of stored) if (byId.get(item.question_id)?.question_type === 'single' && Array.isArray(item.answer)) item.answer = item.answer[0];
+    const merged = new Map(stored.map(a => [a.question_id, a]));
+    submitted.forEach(a => merged.set(a.question_id, a));
+    const validation = checkoutValidation(questions, [...merged.values()]);
+    if (validation.missing.length || validation.invalid.length) {
+      await connection.rollback();
+      return res.status(400).json({ error: 'MISSING_REQUIRED_ANSWERS', question_ids: [...new Set([...validation.missing, ...validation.invalid])] });
+    }
+    await upsertAnswers(connection, reg.id, validation.answers, byId, 'event-checkout');
+    await applyProfileAnswers(connection, reg.user_id, byId, validation.answers);
+    const [scan] = await connection.query(`INSERT INTO health_event_scan(health_event_id, stand_id, registration_id, scanned_user_id, volunteer_user_id, scan_type, paired_scan_id) VALUES (?,?,?,?,?,'checkout',?)`, [eventId, standId, reg.id, reg.user_id, req.currentUser.id, entry.id]);
+    await connection.commit();
+    res.json({ scan_id: scan.insertId, duplicate: false });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    logger.error('Event checkout: ' + error.message);
+    res.status(500).json({ error: 'INTERNAL' });
+  } finally { if (connection) connection.release(); }
 });
 
 router.post('/health-events/scan/:scanId(\\d+)/answers', verifyToken, requireVolunteer, async (req, res) => {
