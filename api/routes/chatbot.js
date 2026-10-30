@@ -62,7 +62,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
       if(match){groups.source.push({id:source.id,chunkId:Number(match[3])});continue;}
       const internal=/^(article|resource|calendar):(\d+)(?::\d+)?$/.exec(source.id);
       if(internal){groups[internal[1]].push(Number(internal[2]));continue;}
-      if(source.id!=='calendar:current')return false;
+      if(!['calendar:current','navigation:resources','navigation:articles'].includes(source.id))return false;
     }
     if(groups.source.length){
       const [rows]=await db.query("SELECT CONCAT('source:',s.id,':',c.id) AS id FROM chatbot_chunk c JOIN chatbot_source s ON s.id=c.source_id WHERE c.id IN (?) AND s.enabled=1 AND s.status='ready'",[groups.source.map(s=>s.chunkId)]);
@@ -223,7 +223,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
       let stillAllowed=allowed(actor,currentSettings);
       if(actor.id){const [[currentUser]]=await db.query("SELECT r.name AS role FROM user u JOIN role r ON r.id=u.role_id WHERE u.id=? AND u.enabled='Y' AND u.deleted='N'",[actor.id]);stillAllowed=Boolean(currentUser)&&allowed({...actor,role:currentUser.role},currentSettings);}
       if(!stillAllowed)reply={content:localText('refusal',replyLocale),sources:[],status:'refused',model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens};
-      if(reply.sources?.length&&!await citationsCurrent(reply.sources))reply={content:localText('noContext',replyLocale),sources:[],status:'no_context',model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens};
+      if(reply.sources?.length&&!await citationsCurrent(reply.validationSources||reply.sources))reply={content:localText('noContext',replyLocale),sources:[],status:'no_context',model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens};
       await transaction(async connection=>{
         const [[current]]=await connection.query('SELECT processing_token FROM chatbot_conversation WHERE id=? FOR UPDATE',[conversation.id]);
         if(current?.processing_token!==processingToken)fail('chatbot_busy',429);

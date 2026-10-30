@@ -211,3 +211,39 @@ test('expanded chunk capacity accepts its boundary and rolls back overflow with 
     assert.equal(full.sources.size,0);
   }finally{await full.close();}
 });
+
+test('new internal citations pass route validation and every calendar overview row is rechecked',async()=>{
+  for(const revoked of [false,true]) {
+    let processingToken;const messages=[];
+    const reply={content:'Calendar overview',status:'complete',model:null,sources:[{id:'calendar:current',url:'/calendar',title:'Calendar'}],
+      validationSources:[{id:'calendar:1'},{id:'calendar:2'}],citationIds:['calendar:1','calendar:2']};
+    let checked=[];
+    const query=async(sql,params=[])=>{
+      if(sql.includes('FROM user u JOIN role'))return[[{id:1,role:'admin'}]];
+      if(sql.includes('FROM chatbot_settings'))return[[{enabled:1,public_mode:'hidden',allowed_roles:'["admin"]',system_prompt:'Style',revision:1}]];
+      if(sql.includes('FROM chatbot_conversation c'))return[[{id:privateId,message_count:messages.length,locale:'en'}]];
+      if(sql.includes('FROM chatbot_message'))return[sql.includes('id IN')?messages:[]];
+      if(sql.startsWith('UPDATE chatbot_conversation SET processing_token=?'))processingToken=params[0];
+      if(sql.includes('SELECT processing_token'))return[[{processing_token:processingToken}]];
+      if(sql.startsWith('SELECT ce.id')){checked=params[0];return[revoked?[{id:1}]:[{id:1},{id:2}]];}
+      if(sql.startsWith('INSERT INTO chatbot_message')) {
+        const assistant=sql.includes("'assistant'");
+        messages.push({id:params[0],role:assistant?'assistant':'user',content:params[2],sources:assistant?params[3]:'[]',status:assistant?params[4]:'complete'});
+      }
+      return[{affectedRows:1}];
+    };
+    const connection={query,beginTransaction:async()=>{},commit:async()=>{},rollback:async()=>{},release:()=>{}};
+    const app=express();app.use(express.json());
+    app.use('/api/chatbot',createChatbotRouter({pool:{query,getConnection:async()=>connection},env,service:{answer:async()=>reply,model:()=>null}}));
+    const server=await new Promise(resolve=>{const listening=app.listen(0,'127.0.0.1',()=>resolve(listening));});
+    try {
+      const response=await fetch(`http://127.0.0.1:${server.address().port}/api/chatbot/conversations/${privateId}/messages`,{
+        method:'POST',headers:{Authorization:`Bearer ${token()}`,'Content-Type':'application/json'},
+        body:JSON.stringify({message:'What are the upcoming distributions?',clientRequestId:crypto.randomUUID()})});
+      const data=await response.json();
+      assert.equal(response.status,200);assert.deepEqual(checked,[1,2]);
+      assert.equal(data.assistantMessage.status,revoked?'no_context':'complete');
+      assert.equal(data.assistantMessage.validationSources,undefined);
+    } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+  }
+});

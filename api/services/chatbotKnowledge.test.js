@@ -52,7 +52,7 @@ test('retrieval uses only ready enabled sources, excludes nonpublic internal con
   const result = await retrieveContext({ db, question: 'Salud y nutrición', locale: 'es', embedder: async () => [Array(768).fill(.1)] });
   assert.equal(result.length, 3); // Diversity cap per uploaded source.
   assert.ok(result.every(c => c.text.length <= 1400 && !('embedding' in c)));
-  assert.ok(queries[0].includes("s.enabled=1 AND s.status='ready'"));
+  assert.ok(queries.some(q => q.includes("s.enabled=1 AND s.status='ready'")));
   assert.ok(queries.some(q => q.includes('article_status_id=2')));
   assert.ok(queries.some(q => q.includes('is_active=1')));
   assert.ok(queries.every(q => !q.includes('FROM user') && !q.includes('health_event_answer')));
@@ -121,3 +121,98 @@ test('PDF extraction handles actual searchable PDF bytes in isolated worker', as
   assert.throws(() => extractPdf(Buffer.from('not a pdf')), { code: 'chatbot_invalid_pdf' });
 });
 module.exports = { fixturePdf };
+
+function internalFixture({ articles = [], resources = [], calendar = [], external = [] } = {}) {
+  const calls = [];
+  return { calls, query: async (sql, params = []) => {
+    calls.push({ sql, params });
+    if (sql.includes('chatbot_chunk')) return [external];
+    const rows = sql.includes('FROM article a') ? articles : sql.includes('FROM trusted_resources r') ? resources : calendar;
+    return [rows.filter(row => row.id > params.at(-1)).slice(0, 200)];
+  } };
+}
+
+test('default distribution questions list every published date beyond eight passages and 120 days, including cancellations', async () => {
+  const calendar = Array.from({ length: 425 }, (_, i) => ({ id: i + 1, date: `2027-01-${String(i % 25 + 1).padStart(2, '0')}`, no_distribution: i % 25 === 24 ? '1' : '0', time: '9:00 AM' }));
+  for (const question of ['¿Cuáles son las próximas distribuciones?', 'What are the upcoming distributions?']) {
+    const db = internalFixture({ calendar });
+    const { directAnswer } = await retrieveContext({ db, question, locale: 'es', embedder: () => assert.fail('calendar must not use external search') });
+    for (let day = 1; day <= 25; day++) assert.ok(directAnswer.content.includes(`2027-01-${String(day).padStart(2, '0')}`));
+    assert.match(directAnswer.content, /2027-01-25: 17 avisos sin distribución/);
+    assert.equal(directAnswer.validationSources.length, 425);
+    assert.equal(directAnswer.sources[0].url, '/calendar');
+    assert.equal(db.calls.length, 3);
+    assert.ok(db.calls.every(({ sql }) => !sql.includes('120 DAY') && !sql.includes('CURDATE()')));
+  }
+});
+
+test('calendar uses California date at the UTC midnight boundary', async () => {
+  const { calendarRows } = require('./chatbotKnowledge');
+  const db = internalFixture();
+  await calendarRows(db, new Date('2026-10-31T01:00:00Z'));
+  assert.equal(db.calls[0].params[0], '2026-10-30');
+});
+
+test('resource search covers more than 600 resources and uses city and service metadata', async () => {
+  const resources = Array.from({ length: 1075 }, (_, i) => ({ id: i + 1, title_english: `Center ${i}`, city: i === 1074 ? 'Los Angeles - Downtown/East Side' : 'Banning',
+    services: i === 1074 ? 'Mental health counseling Salud mental' : 'Housing Vivienda', information_english: 'Public community services.' }));
+  const db = internalFixture({ resources });
+  const result = await retrieveContext({ db, question: 'Mental health resources in Los Angeles', location: 'Los Angeles' });
+  assert.equal(result.length, 1);
+  assert.match(result[0].id, /^resource:1075:/);
+  assert.equal(result[0].url, '/trusted-resource/1075');
+  assert.match(result[0].text, /Mental health counseling/);
+  assert.equal(db.calls.filter(c => c.sql.includes('FROM trusted_resources r')).length, 6);
+  assert.ok(db.calls.every(c => !c.sql.includes('chatbot_chunk')));
+});
+
+test('resource details after the first 1400 characters remain searchable', async () => {
+  const db = internalFixture({ resources: [{ id: 1, title_english: 'Community center', information_english: 'General introduction. '.repeat(150) + 'Specialized audiology services.', city: 'Los Angeles' }] });
+  const result = await retrieveContext({ db, question: 'audiology resources' });
+  assert.equal(result.length, 1);
+  assert.match(result[0].text, /Specialized audiology/);
+  assert.ok(result[0].text.length <= 1400);
+});
+
+test('unknown cities and ZIPs do not silently return options from a different city', async () => {
+  const db = internalFixture({ resources: [{ id: 1, title_english: 'Health clinic', city: 'Banning', address: '123 Main St 92220' }] });
+  for (const location of ['Los Angeles', '99999']) {
+    const result = await retrieveContext({ db, question: `Health resources in ${location}`, location });
+    assert.equal(result[0].id, 'navigation:resources');
+    assert.equal(result[0].url, '/trusted-resources');
+    assert.match(result[0].text, /No matching active Community resources/);
+  }
+});
+
+test('internal articles matched by tags remain available ahead of high-scoring external sources', async () => {
+  const db = internalFixture({ articles: [{ id: 1, title_en: 'Healthy living', slug_en: 'healthy-living', tags: 'diabetes', content_en: 'A balanced diet can support general health.' }],
+    external: Array.from({ length: 10 }, (_, i) => ({ id: i + 1, source_id: `s${i}`, title: 'Diabetes health', content: 'Diabetes health information.', embedding: [1, 0] })) });
+  const result = await retrieveContext({ db, question: 'Tell me about diabetes', embedder: async () => [[1, 0]] });
+  assert.equal(result[0].id, 'article:1:0');
+  assert.equal(result[0].url, '/article/healthy-living');
+  assert.match(result[0].text, /diabetes/);
+  assert.equal(result.length, 8);
+});
+
+test('changing from calendar to default health resources does not inherit calendar intent', async () => {
+  const db = internalFixture({ resources: [{ id: 1, title_english: 'Health services', information_english: 'Community health resources.' }] });
+  const result = await retrieveContext({ db, question: 'Where can I find health resources?', history: [{ role: 'user', text: 'What are the upcoming distributions?' }] });
+  assert.match(result[0].id, /^resource:/);
+  assert.ok(db.calls.every(c => !c.sql.includes('calendar_event')));
+});
+
+test('a city answer continues a resource search after the assistant requests location', async () => {
+  const db = internalFixture({ resources: [{ id: 1, title_english: 'Health services', city: 'Los Angeles' }] });
+  const result = await retrieveContext({ db, question: 'Los Angeles', location: 'Los Angeles', history: [
+    { role: 'user', text: 'Health resources near me' }, { role: 'assistant', text: 'Which city or ZIP code would you like to search?' }
+  ] });
+  assert.match(result[0].id, /^resource:/);
+  assert.ok(db.calls.every(c => !c.sql.includes('chatbot_chunk')));
+});
+
+test('explicit article discovery cites internal articles without consulting external pages', async () => {
+  const db = internalFixture({ articles: [{ id: 1, title_en: 'Healthy living', slug_en: 'healthy-living', tags: 'diabetes', content_en: 'General educational content about diabetes.' }] });
+  const result = await retrieveContext({ db, question: 'What articles do you have about diabetes?' });
+  assert.match(result[0].id, /^article:/);
+  assert.ok(db.calls.every(c => !c.sql.includes('chatbot_chunk')));
+});

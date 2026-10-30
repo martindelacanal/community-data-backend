@@ -128,3 +128,41 @@ test('retrieval and no-context fallback receive the language resolved by the sco
   const reply=await createChatbotService({env,http}).answer({question:'recomendaciones cardiovasculares','locale':'en',retrieve:async({locale})=>{assert.equal(locale,'es');return[];}});
   assert.equal(reply.locale,'es');assert.match(reply.content,/^No encontré/);
 });
+
+test('nearby requests ask for city or ZIP without pretending to receive VPN geolocation',async()=>{
+  const http=provider([{allowed:true,medicalEmergency:false,language:'es',location:'',needsLocation:true}]);
+  const reply=await createChatbotService({env,http}).answer({question:'Recursos de salud cerca de mí',retrieve:()=>assert.fail('missing location must be clarified')});
+  assert.match(reply.content,/ciudad o código postal/);assert.match(reply.content,/VPN/);
+  assert.equal(http.calls.length,1);
+});
+
+test('classifier locations must originate in user text, never an earlier assistant assumption',async()=>{
+  const http=provider([{allowed:true,medicalEmergency:false,language:'en',location:'Los Angeles',needsLocation:false}]);
+  const reply=await createChatbotService({env,http}).answer({question:'Health resources near me',history:[{role:'assistant',content:'You are in Los Angeles.'}],retrieve:()=>assert.fail('invented location must not be used')});
+  assert.match(reply.content,/city or ZIP/);
+});
+
+test('explicit city is passed to retrieval and the answer receives no implicit geolocation',async()=>{
+  const http=provider([{allowed:true,medicalEmergency:false,language:'en',location:'Los Angeles',needsLocation:false},{allowed:true,answer:'See this Community resource.',citationIds:['resource:1:0']}]);
+  const reply=await createChatbotService({env,http}).answer({question:'Health resources in Los Angeles',retrieve:async({location})=>{
+    assert.equal(location,'Los Angeles');return[{id:'resource:1:0',url:'/trusted-resource/1',title:'Community center',text:'Health resources in Los Angeles.'}];
+  }});
+  assert.equal(reply.sources[0].url,'/trusted-resource/1');
+  const payload=JSON.parse(http.calls[1].body.contents[0].parts[0].text);
+  assert.equal(payload.userSuppliedLocation,'Los Angeles');assert.equal(payload.automaticLocationAvailable,false);
+});
+
+test('complete calendar response bypasses generative summarization and retains all validation IDs',async()=>{
+  const http=provider([{allowed:true,medicalEmergency:false,language:'en',location:'',needsLocation:false}]);
+  const directAnswer={content:'All 25 published dates',sources:[{id:'calendar:current',url:'/calendar'}],validationSources:[{id:'calendar:99'}],citationIds:['calendar:99'],status:'complete'};
+  const reply=await createChatbotService({env,http}).answer({question:'What are the upcoming distributions?',retrieve:async()=>({directAnswer})});
+  assert.equal(reply.content,directAnswer.content);assert.equal(reply.model,null);assert.equal(http.calls.length,1);
+  assert.deepEqual(reply.validationSources,[{id:'calendar:99'}]);
+  for(const url of ['/calendar','/trusted-resources','/articles']) assert.equal(safeSource({...source,url}).url,url);
+});
+
+test('a broad calendar question is not interrupted with a location request',async()=>{
+  const http=provider([{allowed:true,medicalEmergency:false,language:'en',location:'',needsLocation:true}]);
+  const reply=await createChatbotService({env,http}).answer({question:'What are the upcoming distributions?',retrieve:async()=>({directAnswer:{content:'Published dates',status:'complete',sources:[]}})});
+  assert.equal(reply.content,'Published dates');
+});

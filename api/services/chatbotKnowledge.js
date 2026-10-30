@@ -9,11 +9,11 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const ipaddr = require('ipaddr.js');
 const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
+const { normalize, calendarIntent, resourceIntent, articleIntent, calendarOverview, searchQuestion, calendarReply } = require('./chatbotNavigation');
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT = 1000000;
 const EMBEDDING_MODEL = 'gemini-embedding-001';
-const SITE = 'https://bienestarcommunity.org';
 function fail(code, status = 400) { return Object.assign(new Error(code), { code, status }); }
 function plain(value) {
   const $ = cheerio.load(String(value || ''));
@@ -144,20 +144,22 @@ async function ingestSource({ file, url, title }, { env = process.env, fetcher =
     metadata: { pages: pages || null, characters: text.length, bytes: buffer.length,
       embeddingModel: EMBEDDING_MODEL, embeddingDimensions: 768, fetchedAt: new Date().toISOString() } };
 }
-const STOP = new Set('what when where how which with from this that have does about there their please can could would should que como donde cuando cual para del los las una unos unas por con mis sus hay quiero saber sobre puedes puedo necesito me the and for are is to en de el la un a y mi do i'.split(' '));
+const STOP = new Set('what when where how which with from this that have does about there their please can could would should que como donde cuando cual para del los las una unos unas por con mis sus hay quiero saber sobre puedes puedo necesito me the and for are is to en de el la un a y mi do i find encontrar available disponibles algun alguna algunos algunas'.split(' '));
 function termsFor(question) {
   const terms = String(question).normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().match(/[a-z0-9]{3,}/g) || [];
   const groups = ['food comida alimentos alimentacion nutrition nutricion', 'health salud medical medico',
-    'distribution distribucion reparto despensa calendar calendario upcoming proximas proxima next',
+    'distribution distributions distribucion distribuciones reparto repartos despensa calendar calendario upcoming proximas proxima next',
     'resource recursos resources ayuda help', 'diabetes diabetic diabetico', 'children ninos infancia',
-    'blood pressure presion hipertension hypertension', 'exercise ejercicio actividad'];
+    'blood pressure presion hipertension hypertension', 'exercise ejercicio actividad',
+    'mental emotional emocional psicologia psicologico psychology counseling terapia therapy',
+    'housing vivienda alojamiento shelter refugio', 'clinic clinics clinica clinicas healthcare salud'];
   const found = new Set(terms.filter(t => !STOP.has(t)));
   for (const group of groups) { const values = group.split(' '); if (values.some(v => found.has(v))) values.forEach(v => found.add(v)); }
   return [...found].slice(0, 40);
 }
 function lexical(text, terms) {
-  const value = String(text).normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
-  return terms.reduce((n, term) => n + (value.includes(term) ? 1 : 0), 0) / Math.max(terms.length, 1);
+  const words = new Set(normalize(text).split(' '));
+  return terms.reduce((n, term) => n + (words.has(term) ? 1 : 0), 0) / Math.max(terms.length, 1);
 }
 function cosine(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
@@ -165,59 +167,114 @@ function cosine(a, b) {
   for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; aa += a[i] ** 2; bb += b[i] ** 2; }
   return dot / (Math.sqrt(aa * bb) || 1);
 }
-async function internalContext(db, locale, terms) {
+async function readInternalPages(db, sql, params = []) {
+  const rows = [];
+  let after = 0;
+  while (true) {
+    const [page] = await db.query(sql, [...params, after]);
+    rows.push(...page);
+    if (page.length < 200) break;
+    const next = Number(page.at(-1).id);
+    if (!Number.isSafeInteger(next) || next <= after) throw fail('chatbot_index_unavailable', 503);
+    after = next;
+  }
+  return rows;
+}
+
+async function calendarRows(db, now = new Date()) {
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  const rows = await readInternalPages(db, `SELECT ce.id,DATE_FORMAT(ce.date,'%Y-%m-%d') date,ce.time,ce.no_distribution,ce.message_en,ce.message_es,
+    l.organization,l.community_city,l.address FROM calendar_event ce JOIN location l ON l.id=ce.location_id
+    WHERE ce.enabled='Y' AND l.enabled='Y' AND ce.date>=? AND ce.id>? ORDER BY ce.id LIMIT 200`, [today]);
+  return rows.sort((a, b) => a.date.localeCompare(b.date) || String(a.time).localeCompare(String(b.time)) || a.id - b.id);
+}
+
+async function internalContext(db, locale, terms, { includeCalendar = true, location = '' } = {}) {
   const es = locale === 'es';
-  const [[articles], [resources], [calendar]] = await Promise.all([
-    db.query(`SELECT id,title_en,title_es,subtitle_en,subtitle_es,LEFT(content_en,60000) content_en,
-      LEFT(content_es,60000) content_es,slug_en,slug_es FROM article WHERE article_status_id=2
-      AND (publication_date IS NULL OR publication_date<=NOW()) ORDER BY publication_date DESC LIMIT 400`),
-    db.query(`SELECT id,title_english,title_spanish,description_english,description_spanish,
-      information_english,information_spanish,address,phone_number,website FROM trusted_resources WHERE is_active=1 ORDER BY id LIMIT 600`),
-    db.query(`SELECT ce.id,DATE_FORMAT(ce.date,'%Y-%m-%d') date,ce.time,ce.no_distribution,ce.message_en,ce.message_es,
-      l.organization,l.community_city,l.address FROM calendar_event ce JOIN location l ON l.id=ce.location_id
-      WHERE ce.enabled='Y' AND l.enabled='Y' AND ce.date>=CURDATE() AND ce.date<=DATE_ADD(CURDATE(),INTERVAL 120 DAY)
-      ORDER BY ce.date,ce.time LIMIT 400`)
+  const [articles, resources, calendar] = await Promise.all([
+    readInternalPages(db, `SELECT a.id,title_en,title_es,subtitle_en,subtitle_es,content_en,content_es,slug_en,slug_es,
+      (SELECT GROUP_CONCAT(CONCAT_WS(' ',c.name_en,c.name_es) SEPARATOR ', ') FROM article_category ac JOIN category c ON c.id=ac.category_id WHERE ac.article_id=a.id) categories,
+      (SELECT GROUP_CONCAT(CONCAT_WS(' ',f.name_en,f.name_es) SEPARATOR ', ') FROM article_filter af JOIN filter f ON f.id=af.filter_id WHERE af.article_id=a.id) filters,
+      (SELECT GROUP_CONCAT(CONCAT_WS(' ',t.name_en,t.name_es) SEPARATOR ', ') FROM article_tags atg JOIN tags t ON t.id=atg.tag_id WHERE atg.article_id=a.id) tags
+      FROM article a WHERE article_status_id=2 AND (publication_date IS NULL OR publication_date<=NOW()) AND a.id>? ORDER BY a.id LIMIT 200`),
+    readInternalPages(db, `SELECT r.id,title_english,title_spanish,description_english,description_spanish,
+      information_english,information_spanish,address,phone_number,website,rc.name city,
+      (SELECT GROUP_CONCAT(CONCAT_WS(' ',f.name_english,f.name_spanish) SEPARATOR ', ') FROM resource_filter_relations rf JOIN resource_filters f ON f.id=rf.filter_id WHERE rf.resource_id=r.id) categories,
+      (SELECT GROUP_CONCAT(CONCAT_WS(' ',s.name_english,s.name_spanish) SEPARATOR ', ') FROM resource_service_relations rs JOIN resource_services s ON s.id=rs.service_id WHERE rs.resource_id=r.id) services,
+      (SELECT GROUP_CONCAT(CONCAT_WS(' ',p.name_english,p.name_spanish) SEPARATOR ', ') FROM resource_price_relations rp JOIN resource_prices p ON p.id=rp.price_id WHERE rp.resource_id=r.id) prices
+      FROM trusted_resources r LEFT JOIN resource_cities rc ON rc.id=r.city_id WHERE is_active=1 AND r.id>? ORDER BY r.id LIMIT 200`),
+    includeCalendar ? calendarRows(db) : []
   ]);
   const result = [];
   for (const a of articles) {
     const title = (es ? a.title_es : a.title_en) || a.title_en || a.title_es;
-    const text = plain([a.title_en, a.title_es, es ? (a.content_es || a.content_en) : (a.content_en || a.content_es)].join('\n'));
-    const chunks = splitText(text).map((text, i) => ({ id: `article:${a.id}:${i}`, title,
-      url: `${SITE}/article/${encodeURIComponent((es ? a.slug_es : a.slug_en) || a.slug_en || a.slug_es)}`, text,
-      score: lexical(text, terms) + lexical(title, terms) * .5 }));
+    const metadata = plain([a.title_en, a.title_es, a.subtitle_en, a.subtitle_es, a.categories, a.filters, a.tags].filter(Boolean).join('\n'));
+    const text = plain([metadata, es ? (a.content_es || a.content_en) : (a.content_en || a.content_es)].join('\n'));
+    const chunks = splitText(text, 1050).map((text, i) => ({ id: `article:${a.id}:${i}`, title,
+      url: `/article/${encodeURIComponent((es ? a.slug_es : a.slug_en) || a.slug_en || a.slug_es)}`, text: `${metadata.slice(0, 350)}\n${text}`.slice(0, 1400),
+      score: lexical(text, terms) + lexical(metadata, terms) * .5 }));
     result.push(...chunks.sort((a, b) => b.score - a.score).slice(0, 2));
   }
   for (const r of resources) {
+    if (location && !normalize(`${r.city || ''} ${r.address || ''}`).includes(normalize(location))) continue;
     const title = (es ? r.title_spanish : r.title_english) || r.title_english || r.title_spanish;
+    const metadata = plain([r.title_english, r.title_spanish, r.city, r.address, r.categories, r.services, r.prices].filter(Boolean).join('\n'));
     const text = plain([r.title_english, r.title_spanish,
+      r.city, r.address, r.phone_number, r.categories, r.services, r.prices,
       es ? (r.description_spanish || r.description_english) : (r.description_english || r.description_spanish),
       es ? (r.information_spanish || r.information_english) : (r.information_english || r.information_spanish),
-      r.address, r.phone_number, r.website].filter(Boolean).join('\n')).slice(0, 1400);
-    result.push({ id: `resource:${r.id}`, title, url: `${SITE}/trusted-resource/${r.id}`, text,
-      score: lexical(text, terms) + lexical(title, terms) * .5 });
+      r.website].filter(Boolean).join('\n'));
+    const chunks = splitText(text, 1050).map((text, i) => ({ id: `resource:${r.id}:${i}`, title,
+      url: `/trusted-resource/${r.id}`, text: `${metadata.slice(0, 349)}\n${text}`, score: lexical(text, terms) + lexical(metadata, terms) * .5 }));
+    result.push(...chunks.sort((a, b) => b.score - a.score).slice(0, 2));
   }
-  const calendarIntent = terms.some(t => ['calendar', 'calendario', 'distribution', 'distribucion', 'reparto', 'proxima', 'upcoming'].includes(t));
   for (const c of calendar) {
+    if (location && !normalize(`${c.community_city} ${c.address}`).includes(normalize(location))) continue;
     const title = `${c.organization} · ${c.date}`;
-    const text = `${c.no_distribution ? 'NO DISTRIBUTION / SIN REPARTO' : 'Food distribution / Distribución de alimentos'}\n${c.date} ${c.time || ''} (America/Los_Angeles)\n${c.organization}\n${c.community_city}\n${c.address}\n${c.message_es || ''}\n${c.message_en || ''}`;
-    result.push({ id: `calendar:${c.id}`, title, url: `${SITE}/calendar`, text: text.slice(0, 1400),
-      score: lexical(text, terms) + (calendarIntent ? 2 : 0) });
+    const text = `${Number(c.no_distribution) === 1 ? 'NO DISTRIBUTION / SIN REPARTO' : 'Food distribution / Distribución de alimentos'}\n${c.date} ${c.time || ''} (America/Los_Angeles)\n${c.organization}\n${c.community_city}\n${c.address}\n${c.message_es || ''}\n${c.message_en || ''}`;
+    result.push({ id: `calendar:${c.id}`, title, url: '/calendar', text: text.slice(0, 1400),
+      score: lexical(text, terms) + 2 });
   }
-  if (calendarIntent && !calendar.length) result.push({ id: 'calendar:current', title: es ? 'Calendario de distribuciones' : 'Distribution calendar',
-    url: `${SITE}/calendar`, text: 'The current published calendar has no enabled distributions from today through the next 120 days. Do not infer dates or claim there will never be distributions. Invite the user to check the calendar again.', score: 2 });
+  if (includeCalendar && !result.some(c => c.id.startsWith('calendar:'))) result.push({ id: 'calendar:current', title: es ? 'Calendario de distribuciones' : 'Distribution calendar',
+    url: '/calendar', text: location ? `No published upcoming calendar entries match the user-supplied location: ${location}. This is an exact city/address match, not a distance search. Do not offer another city as nearby.` : 'The current published calendar has no enabled upcoming entries. Do not infer dates. Invite the user to check the calendar again.', score: 2 });
   return result;
 }
-async function retrieveContext({ db, question, history = [], locale = 'en', env = process.env, embedder = embed }) {
-  // Short follow-ups ("and where is it?") need the preceding user topic to retrieve the same evidence.
-  const previous = [...history].reverse().find(m => m.role === 'user');
-  const search = question.length < 100 && previous ? `${String(previous.text || previous.content || '').slice(0, 1200)}\n${question}` : question;
-  const terms = termsFor(search);
+async function retrieveContext({ db, question, history = [], locale = 'en', location = '', env = process.env, embedder = embed }) {
+  if (calendarOverview(question) && !location) return { directAnswer: calendarReply(await calendarRows(db), locale) };
+  const search = searchQuestion(question, history);
+  const locationTerms = new Set(normalize(location).split(' '));
+  const terms = termsFor(search).filter(term => !locationTerms.has(term));
+  const wantsCalendar = calendarIntent(search), wantsResources = resourceIntent(search);
+  const internal = await internalContext(db, locale, terms, { includeCalendar: wantsCalendar, location });
+  // Navigation uses the live Community catalog. Uploaded external references cannot
+  // displace resources, articles or current dates when users ask where to find them.
+  const genericResources = wantsResources && terms.every(term => ['resource','resources','recurso','recursos','services','service','servicio','servicios','ayuda','help'].includes(term));
+  if (wantsResources) internal.forEach(c => { if (c.id.startsWith('resource:') && (c.score > 0 || genericResources)) c.score += 1; });
+  const preferred = internal.filter(c => c.score > 0).sort((a, b) => b.score - a.score);
+  const select = candidates => {
+    const counts = new Map();
+    return candidates.filter(c => {
+      const key = c.sourceId || c.id.split(':').slice(0, 2).join(':');
+      const count = counts.get(key) || 0; counts.set(key, count + 1);
+      return count < (c.sourceId ? 3 : 1);
+    }).slice(0, 8).map(({ score, ...safe }) => safe);
+  };
+  if (wantsCalendar) return select(preferred);
+  if (articleIntent(search) && !wantsResources) {
+    const articles = preferred.filter(c => c.id.startsWith('article:'));
+    if (articles.length) return select(articles);
+    return [{ id: 'navigation:articles', title: locale === 'es' ? 'Artículos de Community' : 'Community articles', url: '/articles',
+      text: 'No matching published Community articles were found for this request. Invite the user to browse the articles section or clarify the topic. Do not invent an article.' }];
+  }
+  if (wantsResources) {
+    const resources = preferred.filter(c => c.id.startsWith('resource:'));
+    if (resources.length) return select([...resources, ...preferred.filter(c => c.id.startsWith('article:'))]);
+    return [{ id: 'navigation:resources', title: locale === 'es' ? 'Recursos de Community' : 'Community resources', url: '/trusted-resources',
+      text: `No matching active Community resources were found for this request${location ? ` in the user-supplied city/ZIP ${location}` : ''}. Do not invent a local option. Invite the user to browse the directory or specify another city or service. City/ZIP matching does not establish distance or current availability.` }];
+  }
   const readBatch = after => db.query(`SELECT c.id,c.source_id,c.content,c.embedding,s.title,s.url FROM chatbot_chunk c
     JOIN chatbot_source s ON s.id=c.source_id WHERE s.enabled=1 AND s.status='ready' AND c.id>? ORDER BY c.id LIMIT 500`, [after]);
   let [stored] = await readBatch(0);
-  const internal = await internalContext(db, locale, terms);
-  const resourceIntent = /\b(recursos?|resources?|servicios?|services?)\b/i.test(search);
-  if (resourceIntent) internal.forEach(c => { if (c.id.startsWith('resource:')) c.score += 1; });
   let vector;
   if (stored.length) { try { [vector] = await embedder([search], 'RETRIEVAL_QUERY', env); } catch { /* Lexical retrieval remains available on a temporary embedding outage. */ } }
   let external = [], scanned = 0;
@@ -240,15 +297,12 @@ async function retrieveContext({ db, question, history = [], locale = 'en', env 
   if (stored.length < 500 || scanned >= MAX_TOTAL_CHUNKS) break;
   [stored] = await readBatch(stored[stored.length-1].id);
   }
-  const selected = [], counts = new Map();
-  for (const candidate of [...internal, ...external].filter(c => c.score > 0).sort((a, b) => b.score - a.score)) {
-    const key = candidate.sourceId || candidate.id.split(':').slice(0, 2).join(':');
-    if ((counts.get(key) || 0) >= 3) continue;
-    counts.set(key, (counts.get(key) || 0) + 1);
-    const { score, ...safe } = candidate; selected.push(safe); if (selected.length === 8) break;
-  }
-  return selected;
+  // Reserve room for relevant Community content before supplementing with external evidence.
+  const firstParty = select(preferred).slice(0, 4);
+  const ids = new Set(firstParty.map(c => c.id));
+  return select([...firstParty.map(c => ({ ...c, score: 1 })),
+    ...[...internal, ...external].filter(c => c.score > 0 && !ids.has(c.id)).sort((a, b) => b.score - a.score)]);
 }
 
 module.exports = { MAX_BYTES, MAX_TEXT, ingestSource, retrieveContext, publicAddress, validateUrl, fetchPage,
-  splitText, plain, embed, cosine, termsFor, internalContext, extractPdf };
+  splitText, plain, embed, cosine, termsFor, internalContext, extractPdf, calendarRows };
