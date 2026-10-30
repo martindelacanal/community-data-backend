@@ -6,7 +6,7 @@ const { duplicateHealthEvent, HealthEventDuplicateError } = require('./healthEve
 function fixture({ missing = false, taken = false, failure = '', objectJson = false } = {}) {
   const statements = [], writes = [], copies = [], deletions = [], lifecycle = [];
   const landing = { hero: { title_en: 'Banning', title_es: 'Banning' }, gallery: { title_en: 'Photos' } };
-  const source = { id: 7, slug: 'banning', timezone: 'America/Los_Angeles', enabled: 'Y',
+  const source = { id: 7, slug: 'banning', start_date: '2026-08-08', end_date: '2026-08-09', timezone: 'America/Los_Angeles', enabled: 'Y',
     landing_json: objectJson ? landing : JSON.stringify(landing), promo_json: JSON.stringify({ text_en: 'Clinic', link_url: '/banning' }) };
   const images = [{ id: 11, health_event_id: 7, section_key: 'hero', s3_key: 'old/hero photo.jpg',
     s3_key_small: 'old/hero__small', s3_key_medium: 'old/hero__medium', mime_type: 'image/jpeg',
@@ -24,6 +24,10 @@ function fixture({ missing = false, taken = false, failure = '', objectJson = fa
       if (sql.startsWith('SELECT * FROM health_event WHERE')) return [missing ? [] : [source]];
       if (sql.startsWith('SELECT id FROM health_event WHERE slug')) return [taken ? [{ id: 8 }] : []];
       if (sql.startsWith('SELECT * FROM health_event_image')) return [images];
+      if (/^SELECT/.test(sql) && /health_event_(stand|form|question|slot)/.test(sql)) {
+        if (failure === 'configuration') throw new Error('configuration copy failed');
+        return [[]];
+      }
       if (sql.startsWith('INSERT INTO')) {
         if (failure === 'database' && sql.startsWith('INSERT INTO health_event_image')) throw new Error('insert image failed');
         if (failure === 'slug-race') throw Object.assign(new Error('duplicate'), { code: 'ER_DUP_ENTRY' });
@@ -69,7 +73,8 @@ test('copies bilingual landing and all image variants to an independently editab
   for (const copy of f.copies) { assert.match(copy.to, /^health-events\/42\/copy-/); assert.notEqual(copy.to, copy.from); }
   assert.equal(JSON.stringify(f.source), sourceBefore);
   assert.equal(JSON.stringify(f.images), imagesBefore);
-  assert.ok(f.statements.every(sql => !/health_event_(registration|answer|scan|slot|stand|form|notification|wristband)/.test(sql)), 'operational and participant data never read or copied');
+  assert.ok(f.statements.every(sql => !/health_event_(registration|answer|scan|appointment|notification|wristband|volunteer_assignment)/.test(sql)), 'participant data never read or copied');
+  assert.ok(f.statements.some(sql => /FROM health_event_form/.test(sql)), 'registration configuration is copied in the same transaction');
   assert.deepEqual(f.lifecycle, ['acquire', 'begin', 'commit', 'release']);
   assert.deepEqual(f.deletions, []);
 });
@@ -89,7 +94,7 @@ for (const [options, code, status] of [[{ missing: true }, 'NOT_FOUND', 404], [{
   });
 }
 
-for (const failure of ['storage', 'database']) {
+for (const failure of ['storage', 'database', 'configuration']) {
   test(`rolls back and cleans only new image objects after ${failure} failure`, async () => {
     const f = fixture({ failure });
     await assert.rejects(duplicateHealthEvent(f.options), /failed/);

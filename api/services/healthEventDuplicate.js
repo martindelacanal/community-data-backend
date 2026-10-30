@@ -1,6 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
+const { copyHealthEventConfiguration } = require('./healthEventConfigurationCopy');
 
 class HealthEventDuplicateError extends Error {
   constructor(code, status) {
@@ -16,7 +17,7 @@ function validDate(value) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-/** Copy the reusable public presentation, never participant or clinical data. */
+/** Copy presentation and registration setup, never participant or clinical records. */
 async function duplicateHealthEvent({ pool, sourceId, details, userId, copyObject, deleteObjects, logger }) {
   if (!validDate(details.start_date) || !validDate(details.end_date) || details.end_date < details.start_date) {
     throw new HealthEventDuplicateError('INVALID_DATES', 400);
@@ -41,6 +42,7 @@ async function duplicateHealthEvent({ pool, sourceId, details, userId, copyObjec
         source.timezone || 'America/Los_Angeles', null, details.registration_closes_at || null,
         jsonValue(source.landing_json), jsonValue(source.promo_json), 'N', 'N', 'N', 'N', 1, userId]);
     const id = inserted.insertId;
+    await copyHealthEventConfiguration({ connection, source, target: { ...details, id } });
     const [images] = await connection.query(
       'SELECT * FROM health_event_image WHERE health_event_id = ? ORDER BY id ASC', [sourceId]);
     for (const image of images) {
