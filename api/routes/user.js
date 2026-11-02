@@ -2703,46 +2703,9 @@ router.put('/volunteer/notification-recipients', verifyToken, async (req, res) =
 router.use('/delivery/beneficiaries', verifyToken,
   require('./deliveryBeneficiaries').createDeliveryBeneficiariesRouter(mysqlConnection, bcryptjs));
 
-router.put('/beneficiary/reset-password', async (req, res) => {
-
-  try {
-    const { email } = req.body;
-    const { dateOfBirth } = req.body;
-    
-    if (!email || !dateOfBirth) {
-      return res.status(400).json('Email and date of birth are required');
-    }
-
-    const [rows] = await mysqlConnection.promise().query('SELECT user.id \
-                                                          FROM user \
-                                                          INNER JOIN role ON role.id = user.role_id \
-                                                          WHERE (user.email = ? or user.username = ? or (user.phone = ? AND user.phone IS NOT NULL)) and user.date_of_birth = ? and role.name = "beneficiary" and user.enabled = "Y" and user.deleted = "N"',
-      [email, email, email, dateOfBirth]);
-
-    if (rows.length > 0) {
-
-      // const newPassword = Math.random().toString(36).slice(-8);
-      const newPassword = 'bienestar';
-      let passwordHash = await bcryptjs.hash(newPassword, 8);
-
-      const [rows2] = await mysqlConnection.promise().query('update user set password = ?, reset_password = "Y" where id = ?',
-        [passwordHash, rows[0].id]);
-
-      if (rows2.affectedRows > 0) {
-        res.json({ password: newPassword });
-      } else {
-        res.status(500).json('Could not update password');
-      }
-
-    } else {
-      res.status(401).json('Unauthorized');
-    }
-  } catch (error) {
-    console.log(error);
-    logger.error(error);
-    res.status(500).json('Internal server error');
-  }
-});
+router.put('/beneficiary/reset-password', require('./passwordRecovery').createPasswordRecoveryHandler({
+  pool: mysqlConnection.promise(), bcrypt: bcryptjs, logger
+}));
 
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
