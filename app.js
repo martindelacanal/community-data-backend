@@ -29,16 +29,26 @@ app.use('/api/auth/restore', createRestoreCredentialsRouter({
   logger: require('./api/utils/logger'),
 }));
 
-const userRoute = require('./api/routes/user');
-app.use('/api',userRoute);
-
-const { createStaffPasswordRecoveryRouter } = require('./api/routes/staffPasswordRecovery');
-app.use('/api/auth/password-reset', createStaffPasswordRecoveryRouter({
-  pool: require('./api/connection/connection').promise(),
+const recoveryPool = require('./api/connection/connection').promise();
+const recoveryLogger = require('./api/utils/logger');
+const { createStaffPasswordRecovery } = require('./api/services/staffPasswordRecovery');
+const staffRecovery = createStaffPasswordRecovery({
+  pool: recoveryPool,
   sendEmail: require('./api/email/email').sendStaffPasswordRecoveryEmail,
   secret: process.env.JWT_SECRET,
-  logger: require('./api/utils/logger'),
+  logger: recoveryLogger,
+});
+// Share the mailbox quota between the common popup and existing emailed links.
+app.put('/api/beneficiary/reset-password', require('./api/routes/passwordRecovery').createPasswordRecoveryHandler({
+  pool: recoveryPool, bcrypt: require('bcryptjs'), logger: recoveryLogger, staffRecovery,
 }));
+const { createStaffPasswordRecoveryRouter } = require('./api/routes/staffPasswordRecovery');
+app.use('/api/auth/password-reset', createStaffPasswordRecoveryRouter({
+  service: staffRecovery, logger: recoveryLogger,
+}));
+
+const userRoute = require('./api/routes/user');
+app.use('/api',userRoute);
 
 const { createTicketAnalysisRouter } = require('./api/routes/ticketAnalysis');
 app.use('/api', createTicketAnalysisRouter({

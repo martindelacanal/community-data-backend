@@ -60,6 +60,36 @@ function createStaffPasswordRecovery({ pool, sendEmail, secret, logger = { error
   ])).digest('hex');
   const unavailable = () => { throw new RecoveryError('unavailable', 503); };
 
+  function queueEmail(user, language, requireMailbox = false) {
+    const email = typeof user.email === 'string' ? user.email.trim() : '';
+    if (!validEmail(email)) {
+      if (requireMailbox) throw new RecoveryError('contact_support', 409);
+      return ACCEPTED;
+    }
+    if (pending.size >= maxPending) {
+      if (requireMailbox) return unavailable();
+      return ACCEPTED;
+    }
+    // Both request paths share this mailbox quota, including simultaneous calls.
+    const mailbox = crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
+    if (!cooldown.take(mailbox, 3, 60 * 60 * 1000)) {
+      if (requireMailbox) throw new RecoveryError('rate_limited', 429);
+      return ACCEPTED;
+    }
+    const token = jwt.sign({ purpose: 'staff_password_reset', binding: binding(user),
+      iat: Math.floor(clock() / 1000) }, key, {
+      algorithm: 'HS256', audience: AUDIENCE, issuer: ISSUER, subject: String(user.id),
+      jwtid: crypto.randomBytes(16).toString('hex'), expiresIn: TTL_SECONDS
+    });
+    let job;
+    job = new Promise(resolve => schedule(resolve))
+      .then(() => sendEmail({ email, token, language: language === 'es' ? 'es' : 'en' }))
+      .catch(error => logger.error(`Staff password recovery email failed: ${error.code || error.name || 'Error'}`))
+      .finally(() => pending.delete(job));
+    pending.add(job);
+    return ACCEPTED;
+  }
+
   return {
     async request({ identifier, language } = {}) {
       if (typeof identifier !== 'string' || !identifier.trim() || identifier.trim().length > 254) {
@@ -73,26 +103,20 @@ function createStaffPasswordRecovery({ pool, sendEmail, secret, logger = { error
            AND r.name IN ('admin','client','stocker','delivery','opsmanager','director','auditor','contentmanager','eventvolunteer')
          LIMIT 2`, [normalized, normalized]);
       if (rows.length !== 1 || !eligible(rows[0])) return ACCEPTED;
-      const user = rows[0];
-      const email = typeof user.email === 'string' ? user.email.trim() : '';
-      if (!validEmail(email)) return ACCEPTED;
-      // Reserve before starting any asynchronous email work. Store only a digest
-      // of the mailbox, and respond identically when it is unknown or cooling down.
-      const mailbox = crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
-      if (!cooldown.take(mailbox, 3, 60 * 60 * 1000)) return ACCEPTED;
-      if (pending.size >= maxPending) return ACCEPTED;
-      const token = jwt.sign({ purpose: 'staff_password_reset', binding: binding(user),
-        iat: Math.floor(clock() / 1000) }, key, {
-        algorithm: 'HS256', audience: AUDIENCE, issuer: ISSUER, subject: String(user.id),
-        jwtid: crypto.randomBytes(16).toString('hex'), expiresIn: TTL_SECONDS
-      });
-      let job;
-      job = new Promise(resolve => schedule(resolve))
-        .then(() => sendEmail({ email, token, language: language === 'es' ? 'es' : 'en' }))
-        .catch(error => logger.error(`Staff password recovery email failed: ${error.code || error.name || 'Error'}`))
-        .finally(() => pending.delete(job));
-      pending.add(job);
-      return ACCEPTED;
+      return queueEmail(rows[0], language);
+    },
+
+    // Internal entry after the common form has uniquely matched identifier+DOB.
+    // Never expose this method as an HTTP operation or accept an ID from the form.
+    async requestForAccount({ userId, dateOfBirth, language } = {}) {
+      if (!Number.isSafeInteger(userId) || userId <= 0 || typeof dateOfBirth !== 'string'
+        || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) throw new RecoveryError('invalid_request');
+      if (!key || pending.size >= maxPending) return unavailable();
+      const [rows] = await pool.query(
+        `SELECT ${ACCOUNT_COLUMNS} FROM user u INNER JOIN role r ON r.id = u.role_id
+         WHERE u.id = ? AND u.date_of_birth = ? LIMIT 1`, [userId, dateOfBirth]);
+      if (rows.length !== 1 || !eligible(rows[0])) throw new RecoveryError('invalid_request', 401);
+      return queueEmail(rows[0], language, true);
     },
 
     async complete({ token, password } = {}) {
@@ -135,4 +159,5 @@ function createStaffPasswordRecovery({ pool, sendEmail, secret, logger = { error
   };
 }
 
-module.exports = { createStaffPasswordRecovery, createRecoveryLimiter, RecoveryError };
+module.exports = { createStaffPasswordRecovery, createRecoveryLimiter, RecoveryError,
+  isStaffRecoveryRole: role => STAFF_ROLES.has(role) };

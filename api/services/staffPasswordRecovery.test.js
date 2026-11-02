@@ -11,7 +11,8 @@ const KEY = crypto.createHmac('sha256', SECRET).update('staff-password-reset-sig
 const ROLES = ['admin', 'client', 'stocker', 'delivery', 'opsmanager', 'director', 'auditor', 'contentmanager', 'eventvolunteer'];
 const OLD_HASH = bcrypt.hashSync('previous-synthetic-password', 4);
 const baseUser = { id: 7, username: 'staff7', email: 'staff@example.test', password: OLD_HASH,
-  enabled: 'Y', deleted: 'N', role: 'admin', creation_date: '2020-01-02 03:04:05', reset_password: 'Y' };
+  enabled: 'Y', deleted: 'N', role: 'admin', creation_date: '2020-01-02 03:04:05', reset_password: 'Y',
+  dateOfBirth: '1985-07-19' };
 
 function fixture(changes = {}, options = {}) {
   let now = Date.UTC(2026, 10, 2, 12);
@@ -32,8 +33,10 @@ function fixture(changes = {}, options = {}) {
         .slice(0, 2).map(user => ({ ...user }))];
     }
     if (sql.startsWith('SELECT')) {
-      assert.match(sql, /WHERE u.id = \? LIMIT 1/);
-      return [users.filter(user => user.id === params[0]).map(user => ({ ...user }))];
+      assert.match(sql, /WHERE u.id = \?(?: AND u.date_of_birth = \?)? LIMIT 1/);
+      await options.beforeAccountLookupReturn?.(params[0]);
+      return [users.filter(user => user.id === params[0]
+        && (!sql.includes('AND u.date_of_birth = ?') || user.dateOfBirth === params[1])).map(user => ({ ...user }))];
     }
     assert.match(sql, /SET u.password = \?, u.reset_password = 'N'/);
     assert.match(sql, /BINARY u.password = BINARY \?/);
@@ -285,4 +288,94 @@ test('limiter bounds key storage, does not evict active limits and reuses expire
   now += 100;
   assert.equal(limiter.take('third', 1, 100), true);
   assert.equal(limiter.take('second', 1, 200), false);
+});
+
+test('internal common-form entry rechecks ID, birthday and active staff eligibility before sending', async () => {
+  const f = fixture();
+  assert.deepEqual(await f.service.requestForAccount({ userId: 7, dateOfBirth: baseUser.dateOfBirth, language: 'es' }), { status: 'accepted' });
+  await f.service.waitForIdle();
+  assert.equal(f.messages.length, 1);
+  assert.equal(f.messages[0].email, baseUser.email);
+  assert.equal(f.messages[0].language, 'es');
+  assert.equal(f.writes.length, 0);
+  assert.deepEqual(f.queries[0].params, [7, baseUser.dateOfBirth]);
+  for (const changes of [{ enabled: 'N' }, { deleted: 'Y' }, { role: 'beneficiary' }, { role: 'unsupported' }, { dateOfBirth: '1985-07-20' }]) {
+    const invalid = fixture(changes);
+    await assert.rejects(invalid.service.requestForAccount({ userId: 7, dateOfBirth: baseUser.dateOfBirth }), error => error.status === 401);
+    await invalid.service.waitForIdle();
+    assert.equal(invalid.messages.length, 0);
+    assert.equal(invalid.writes.length, 0);
+  }
+});
+
+test('internal common-form entry rejects malformed identifiers and reports unusable mailboxes to support', async () => {
+  const f = fixture();
+  for (const input of [{ userId: '7', dateOfBirth: baseUser.dateOfBirth }, { userId: 0, dateOfBirth: baseUser.dateOfBirth },
+    { userId: 7, dateOfBirth: '07/19/1985' }, { userId: 7, dateOfBirth: null }]) {
+    await assert.rejects(f.service.requestForAccount(input), error => error.code === 'invalid_request');
+  }
+  assert.equal(f.queries.length, 0);
+  for (const email of [null, '', 'invalid', 'one@example.test,two@example.test']) {
+    const invalid = fixture({ email });
+    await assert.rejects(invalid.service.requestForAccount({ userId: 7, dateOfBirth: baseUser.dateOfBirth }),
+      error => error.status === 409 && error.code === 'contact_support');
+    await invalid.service.waitForIdle();
+    assert.equal(invalid.messages.length, 0);
+  }
+});
+
+test('email-only and internal account request methods reserve one shared mailbox quota under concurrency', async () => {
+  const f = fixture();
+  const results = await Promise.allSettled([
+    ...Array.from({ length: 3 }, () => f.service.request({ identifier: 'staff7' })),
+    ...Array.from({ length: 3 }, () => f.service.requestForAccount({ userId: 7, dateOfBirth: baseUser.dateOfBirth }))
+  ]);
+  // Public calls retain a generic response, but the common form must report
+  // that no new email was queued once its verified mailbox has reached quota.
+  results.slice(0, 3).forEach(result => assert.deepEqual(result, { status: 'fulfilled', value: { status: 'accepted' } }));
+  results.slice(3).forEach(result => {
+    assert.equal(result.status, 'rejected');
+    assert.equal(result.reason.code, 'rate_limited');
+    assert.equal(result.reason.status, 429);
+  });
+  await f.service.waitForIdle();
+  assert.equal(f.messages.length, 3);
+  assert.equal(f.writes.length, 0);
+});
+
+test('internal queue saturation after lookup reports unavailable without consuming mailbox quota', async () => {
+  let delayLookups = true;
+  let releasePublicLookup, releaseInternalLookup, releaseFirstMail;
+  const sent = [];
+  const f = fixture({}, {
+    maxPending: 1,
+    users: [baseUser, { ...baseUser, id: 8, username: 'staff8', email: 'other@example.test' }],
+    beforeLookupReturn: () => delayLookups ? new Promise(resolve => { releasePublicLookup = resolve; }) : undefined,
+    beforeAccountLookupReturn: () => delayLookups ? new Promise(resolve => { releaseInternalLookup = resolve; }) : undefined,
+    sendEmail: message => {
+      sent.push(message);
+      if (sent.length === 1) return new Promise(resolve => { releaseFirstMail = resolve; });
+      return Promise.resolve();
+    }
+  });
+  const first = f.service.request({ identifier: 'staff7' });
+  const second = f.service.requestForAccount({ userId: 8, dateOfBirth: baseUser.dateOfBirth });
+  assert.equal(typeof releasePublicLookup, 'function');
+  assert.equal(typeof releaseInternalLookup, 'function');
+  releasePublicLookup();
+  assert.deepEqual(await first, { status: 'accepted' });
+  await new Promise(resolve => setImmediate(resolve));
+  const unavailable = assert.rejects(second, error => error.status === 503 && error.code === 'unavailable');
+  releaseInternalLookup();
+  await unavailable;
+  delayLookups = false;
+  releaseFirstMail();
+  await f.service.waitForIdle();
+  for (let i = 0; i < 3; i += 1) {
+    assert.deepEqual(await f.service.requestForAccount({ userId: 8, dateOfBirth: baseUser.dateOfBirth }), { status: 'accepted' });
+    await f.service.waitForIdle();
+  }
+  assert.equal(sent.filter(message => message.email === 'other@example.test').length, 3);
+  await assert.rejects(f.service.requestForAccount({ userId: 8, dateOfBirth: baseUser.dateOfBirth }),
+    error => error.status === 429 && error.code === 'rate_limited');
 });

@@ -2703,10 +2703,6 @@ router.put('/volunteer/notification-recipients', verifyToken, async (req, res) =
 router.use('/delivery/beneficiaries', verifyToken,
   require('./deliveryBeneficiaries').createDeliveryBeneficiariesRouter(mysqlConnection, bcryptjs));
 
-router.put('/beneficiary/reset-password', require('./passwordRecovery').createPasswordRecoveryHandler({
-  pool: mysqlConnection.promise(), bcrypt: bcryptjs, logger
-}));
-
 router.put('/change-password/:idUser', verifyToken, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);
   if (cabecera.role === 'admin' || cabecera.role === 'client' || cabecera.role === 'stocker' || cabecera.role === 'delivery' || cabecera.role === 'beneficiary' || cabecera.role === 'opsmanager' || cabecera.role === 'director' || cabecera.role === 'auditor' || cabecera.role === 'contentmanager' || cabecera.role === 'eventvolunteer') {
