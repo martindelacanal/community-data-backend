@@ -32,6 +32,14 @@ app.use('/api/auth/restore', createRestoreCredentialsRouter({
 const userRoute = require('./api/routes/user');
 app.use('/api',userRoute);
 
+const { createStaffPasswordRecoveryRouter } = require('./api/routes/staffPasswordRecovery');
+app.use('/api/auth/password-reset', createStaffPasswordRecoveryRouter({
+  pool: require('./api/connection/connection').promise(),
+  sendEmail: require('./api/email/email').sendStaffPasswordRecoveryEmail,
+  secret: process.env.JWT_SECRET,
+  logger: require('./api/utils/logger'),
+}));
+
 const { createTicketAnalysisRouter } = require('./api/routes/ticketAnalysis');
 app.use('/api', createTicketAnalysisRouter({
   pool: require('./api/connection/connection').promise(),

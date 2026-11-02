@@ -1563,3 +1563,11 @@ module.exports.buildAppDownloadSectionHtml = buildAppDownloadSectionHtml;
 module.exports.buildVolunteerConfirmationContent = buildVolunteerConfirmationContent;
 
 module.exports.sendAlertEmail = sendAlertEmail;
+
+module.exports.sendStaffPasswordRecoveryEmail = async function sendStaffPasswordRecoveryEmail(data) {
+  const { buildStaffPasswordRecoveryEmail } = require('./staffPasswordRecovery');
+  const result = await transporter.sendMail(buildStaffPasswordRecoveryEmail(data));
+  if (!result.accepted?.length || result.rejected?.length) {
+    throw Object.assign(new Error('Recovery email rejected'), { code: 'EMAIL_REJECTED' });
+  }
+};
