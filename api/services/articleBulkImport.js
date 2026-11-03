@@ -95,10 +95,12 @@ function validateRows(rows, catalogs) {
     for (const key of ['titleEnglish', 'titleSpanish']) {
       row[key === 'titleEnglish' ? 'slugEnglish' : 'slugSpanish'] = slug(row[key]);
       if (!slug(row[key]) && row[key]) add('invalid_title', 'The title must include letters or numbers usable in its URL.', 'El título debe incluir letras o números utilizables en su URL.', key);
-      for (const value of [normalizeName(row[key]), slug(row[key])]) {
-        const nameKey = `${key}:${value}`;
+      // Both languages share /article/:slug. Only the two translations of the
+      // same article may share a name or URL; another row must not shadow it.
+      for (const [kind, value] of [['name', normalizeName(row[key])], ['slug', slug(row[key])]]) {
+        const nameKey = `${kind}:${value}`;
         if (value && names.has(nameKey) && names.get(nameKey) !== row.row) add('duplicate_title', `This title or URL repeats article ${names.get(nameKey)}.`, `Este título o URL repite el artículo ${names.get(nameKey)}.`, key);
-        if (value) names.set(nameKey, row.row);
+        if (value && !names.has(nameKey)) names.set(nameKey, row.row);
       }
     }
     for (const key of ['contentEnglish', 'contentSpanish']) {
@@ -175,12 +177,14 @@ function validateImageManifest(images, rowCount) {
 
 async function findDatabaseConflicts(db, rows) {
   if (!rows.length) return [];
+  const titles = [...new Set(rows.flatMap(row => [row.titleEnglish, row.titleSpanish]))];
+  const slugs = [...new Set(rows.flatMap(row => [row.slugEnglish, row.slugSpanish]))];
   const [existing] = await db.query('SELECT id, title_en, title_es, slug_en, slug_es, priority FROM article WHERE title_en IN (?) OR title_es IN (?) OR slug_en IN (?) OR slug_es IN (?) OR priority IN (?)',
-    [rows.map(row => row.titleEnglish), rows.map(row => row.titleSpanish), rows.map(row => row.slugEnglish), rows.map(row => row.slugSpanish), rows.map(row => row.priority).filter(Boolean).concat([0])]);
+    [titles, titles, slugs, slugs, rows.map(row => row.priority).filter(Boolean).concat([0])]);
   const errors = [];
   for (const row of rows) {
-    for (const [key, title, slugKey, value] of [['titleEnglish', 'title_en', 'slug_en', row.slugEnglish], ['titleSpanish', 'title_es', 'slug_es', row.slugSpanish]]) {
-      if (existing.some(old => normalizeName(old[title]) === normalizeName(row[key]) || old[slugKey] === value)) errors.push(issue('existing_title', 'This title or URL already belongs to an article.', 'Este título o URL ya pertenece a un artículo.', row.row, key));
+    for (const [key, value] of [['titleEnglish', row.slugEnglish], ['titleSpanish', row.slugSpanish]]) {
+      if (existing.some(old => ['title_en', 'title_es'].some(title => normalizeName(old[title]) === normalizeName(row[key])) || ['slug_en', 'slug_es'].some(slugKey => old[slugKey] === value))) errors.push(issue('existing_title', 'This title or URL already belongs to an article.', 'Este título o URL ya pertenece a un artículo.', row.row, key));
     }
     if (row.priority && existing.some(old => Number(old.priority) === row.priority)) errors.push(issue('occupied_priority', 'This priority is already in use; leave blank or choose an available number.', 'Esta prioridad ya está en uso; deja vacío o elige un número libre.', row.row, 'priority'));
   }

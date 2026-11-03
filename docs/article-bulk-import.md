@@ -16,7 +16,7 @@ The schema endpoint is authoritative. The eight required columns and values are 
 
 Optional columns are `subtitleEnglish`, `subtitleSpanish`, `author_gender`, `filter`, `priority_category_id`, `priority_filter_id`, `priority`, `tags`, `genderIds`, `ethnicityIds`, `locationIds`, `ageRanges`, `imageCaptionEnglish`, `imageCaptionSpanish`, `showImageEnglish` and `showImageSpanish`.
 
-- Titles: 500 characters maximum; subtitles: 1,000; author: 255; each language body: 100,000. Duplicate titles or generated URLs are rejected, including existing articles.
+- Titles: 500 characters maximum; subtitles: 1,000; author: 255; each language body: 100,000. Duplicate titles or generated URLs are rejected across both languages and existing articles, because article URLs share one namespace. The two translations of the same article may share a title or URL.
 - Status: `draft`/`borrador`, `published`/`publicado`, `archived`/`archivado`, or an existing status ID. A status is mandatory so importing never publishes by accident.
 - Date: ISO date/time with explicit timezone, such as `2026-11-03T12:00:00-03:00`; stored as UTC like the ordinary editor.
 - Catalog lists: existing numeric IDs separated by `|`; `tags` also uses existing tag IDs. Primary category/filter must belong to the corresponding selected list.

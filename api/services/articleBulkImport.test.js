@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const sharp = require('sharp');
 const { createHash } = require('node:crypto');
-const { COLUMNS, parseCsv, validateRows, validateImageManifest, inspectImages, saveImport, BulkImportError } = require('./articleBulkImport');
+const { COLUMNS, parseCsv, validateRows, validateImageManifest, findDatabaseConflicts, inspectImages, saveImport, BulkImportError } = require('./articleBulkImport');
 
 const catalogs = Object.fromEntries(['categories', 'filters', 'statuses', 'tags', 'genders', 'ethnicities', 'locations'].map(key => [key, [{ id: 1 }, { id: 2 }]]));
 const raw = (overrides = {}) => ({ row: 1, titleEnglish: 'Food services', titleSpanish: 'Servicios alimentarios', contentEnglish: 'English body', contentSpanish: 'Contenido español', author: 'Test author', date: '2026-11-03T12:30:00-03:00', categoryIds: '1|2', article_status_id: 'draft', ...overrides });
@@ -53,6 +53,34 @@ test('duplicate names, URL collisions and repeated priorities are detected withi
   const result = validateRows([raw({ priority: '3' }), raw({ row: 2, titleEnglish: 'FOOD services', titleSpanish: 'Servicios alimentarios!', priority: '3' })], catalogs);
   assert.ok(result.errors.some(error => error.code === 'duplicate_title' && error.row === 2));
   assert.ok(result.errors.some(error => error.code === 'invalid_priority' && error.row === 2));
+});
+
+test('cross-language URLs cannot shadow another imported article, but matching translations of one article are allowed', () => {
+  const first = raw({ titleEnglish: 'Hello', titleSpanish: 'Hola' });
+  for (const second of [
+    raw({ row: 2, titleEnglish: 'Hola!', titleSpanish: 'Otro' }),
+    raw({ row: 2, titleEnglish: 'Other', titleSpanish: 'Hello!' })
+  ]) {
+    const result = validateRows([first, second], catalogs);
+    assert.ok(result.errors.some(error => error.code === 'duplicate_title' && error.row === 2));
+  }
+  assert.deepEqual(validateRows([raw({ titleEnglish: 'Community', titleSpanish: 'Community' })], catalogs).errors, []);
+});
+
+test('existing article URLs are checked across both language columns in both directions', async () => {
+  const rows = validateRows([raw({ titleEnglish: 'Hello', titleSpanish: 'Hola' })], catalogs).rows;
+  for (const [existing, expectedColumn] of [
+    [{ id: 3, title_en: 'Hola!', title_es: 'Otro', slug_en: 'hola', slug_es: 'otro' }, 'titleSpanish'],
+    [{ id: 4, title_en: 'Other', title_es: 'Hello!', slug_en: 'other', slug_es: 'hello' }, 'titleEnglish']
+  ]) {
+    const db = { query: async (_sql, params) => {
+      assert.deepEqual(params[2], ['hello', 'hola']);
+      assert.deepEqual(params[3], ['hello', 'hola']);
+      return [params[2].includes(existing.slug_en) || params[3].includes(existing.slug_es) ? [existing] : []];
+    } };
+    const errors = await findDatabaseConflicts(db, rows);
+    assert.ok(errors.some(error => error.code === 'existing_title' && error.column === expectedColumn && error.row === 1));
+  }
 });
 
 test('one exact numbered image per CSV article, matching MIME and distinct contents are required', () => {
