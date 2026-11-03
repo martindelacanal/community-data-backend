@@ -3,7 +3,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('node:crypto');
 const multer = require('multer');
-const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS, MAX_CONCURRENT_IMPORTS } = require('../services/chatbotLimits');
+const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS, MAX_CONCURRENT_IMPORTS, MAX_SYSTEM_PROMPT_CHARS } = require('../services/chatbotLimits');
 const { buildRestoreAuthBinding } = require('../utils/restoreAuthBinding');
 const { ChatbotError,fail,MAX_MESSAGE_CHARS,MAX_OUTPUT_TOKENS,DAILY_MESSAGE_LIMIT,DISCLAIMERS,
   validateMessage,chooseLocale,createChatbotService,createChatbotLimiter,localText } = require('../services/chatbot');
@@ -252,7 +252,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     const body=req.body;
     if(!body||typeof body.enabled!=='boolean'||!['hidden','login_required','enabled'].includes(body.publicMode)||!Array.isArray(body.allowedRoles)||body.allowedRoles.length>50
       ||body.allowedRoles.some(role=>typeof role!=='string')||new Set(body.allowedRoles).size!==body.allowedRoles.length
-      ||typeof body.systemPrompt!=='string'||!body.systemPrompt.trim()||body.systemPrompt.length>6000)fail('chatbot_invalid_request',400);
+      ||typeof body.systemPrompt!=='string'||!body.systemPrompt.trim()||body.systemPrompt.length>MAX_SYSTEM_PROMPT_CHARS)fail('chatbot_invalid_request',400);
     const [roles]=await db.query('SELECT name FROM role WHERE name IS NOT NULL');
     if(body.allowedRoles.some(role=>!roles.some(row=>row.name===role)))fail('chatbot_invalid_request',400);
     await transaction(async connection=>{

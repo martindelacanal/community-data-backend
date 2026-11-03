@@ -8,6 +8,8 @@ const cors = require('cors');
 // app.set('trust proxy', trustProxySetting);
 app.set('trust proxy', 1);
 app.use(bodyParser.urlencoded({extended: false}));
+// Bulk preflight contains a bounded CSV; keep the ordinary JSON limit unchanged.
+app.use('/api/article/bulk/validate', bodyParser.json({ limit: '5mb' }));
 app.use(bodyParser.json());
 
 // const whitelist = ['http://localhost:4200', 'http://smart-lab-frontend.s3-website-sa-east-1.amazonaws.com'];

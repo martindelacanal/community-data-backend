@@ -1,7 +1,7 @@
 'use strict';
 const axios = require('axios');
 const { nearbyIntent, explicitLocation } = require('./chatbotNavigation');
-const { MAX_CONCURRENT_CHATS, MAX_CHAT_REQUESTS_PER_MINUTE } = require('./chatbotLimits');
+const { MAX_CONCURRENT_CHATS, MAX_CHAT_REQUESTS_PER_MINUTE, MAX_SYSTEM_PROMPT_CHARS } = require('./chatbotLimits');
 
 const MAX_MESSAGE_CHARS = 2000;
 const MAX_OUTPUT_TOKENS = 800;
@@ -165,7 +165,7 @@ function createChatbotService({env=process.env,http=axios}={}) {
       const sources=(Array.isArray(retrieved)?retrieved:[]).slice(0,8).map(safeSource).filter(Boolean);
       if(!sources.length) return {...result('noContext','no_context'),model:scopeModel(),inputTokens:scope.inputTokens,outputTokens:scope.outputTokens};
       const response=await generate({selectedModel:model(),schema:ANSWER_SCHEMA,maxTokens:MAX_OUTPUT_TOKENS,system:FIXED_POLICY,
-        contents:[{role:'user',parts:[{text:JSON.stringify({currentDate:new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()),calendarTimeZone:'America/Los_Angeles',currentLocalTime:new Intl.DateTimeFormat('en-GB',{timeZone:'America/Los_Angeles',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date()),userSuppliedLocation:location||null,automaticLocationAvailable:false,ADMIN_STYLE:systemPrompt.slice(0,6000),SOURCE_DATA:sources,HISTORY_DATA:boundedHistory,USER_MESSAGE:question,preferredLanguage:locale})}]}]});
+        contents:[{role:'user',parts:[{text:JSON.stringify({currentDate:new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()),calendarTimeZone:'America/Los_Angeles',currentLocalTime:new Intl.DateTimeFormat('en-GB',{timeZone:'America/Los_Angeles',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date()),userSuppliedLocation:location||null,automaticLocationAvailable:false,ADMIN_STYLE:systemPrompt.slice(0,MAX_SYSTEM_PROMPT_CHARS),SOURCE_DATA:sources,HISTORY_DATA:boundedHistory,USER_MESSAGE:question,preferredLanguage:locale})}]}]});
       return {...validateAnswer(response.data,sources,locale),locale,model:model(),inputTokens:scope.inputTokens+response.inputTokens,outputTokens:scope.outputTokens+response.outputTokens};
     }
   };

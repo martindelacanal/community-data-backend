@@ -24962,6 +24962,11 @@ async function getAudienceTargetingForArticles(articleIds) {
   };
 }
 
+// Register before /article/:id so the import schema cannot be read as an article.
+require('./articleBulkImport').registerArticleBulkImportRoutes(router, {
+  pool: mysqlConnection.promise(), verifyToken, uploadImageWithVariants, deleteS3Objects, bucketName, logger
+});
+
 // Create article
 router.post('/article', verifyToken, articleUpload, async (req, res) => {
   const cabecera = JSON.parse(req.data.data);

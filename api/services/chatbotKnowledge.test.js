@@ -213,6 +213,50 @@ test('a city answer continues a resource search after the assistant requests loc
   assert.ok(db.calls.every(c => !c.sql.includes('chatbot_chunk')));
 });
 
+test('distribution city follow-ups retain calendar intent across two turns and never substitute other services', async () => {
+  const db = internalFixture({ calendar: [
+    { id: 1, date: '2026-11-06', organization: 'Local food distribution', community_city: 'San Bernardino: Local site', address: '100 Main St, San Bernardino, CA 92411' },
+    { id: 2, date: '2026-11-05', organization: 'Riverside food distribution', community_city: 'Riverside: Local site', address: '200 Main St, Riverside, CA 92504' },
+    { id: 3, date: '2026-11-05', organization: 'Unrelated site', community_city: 'Rialto: Riverside venue', address: '1411 S Riverside Avenue, Rialto, CA 92376' }
+  ], resources: [{ id: 1, title_english: 'Health resources', city: 'Riverside', information_english: 'Food distribution calendar referrals and health services.' }],
+  articles: [{ id: 1, title_en: 'Food distributions', slug_en: 'food-distributions', content_en: 'Food distribution information.' }] });
+  const history = [{ role: 'user', text: 'What are the upcoming distributions?' }, { role: 'assistant', text: 'See the published calendar dates.' }];
+  const first = 'Adónde puedo ir? Vivo en San bernardino';
+  const firstResult = await retrieveContext({ db, question: first, location: 'San bernardino', history });
+  assert.deepEqual(firstResult.map(source => source.id), ['calendar:1']);
+  history.push({ role: 'user', text: first }, { role: 'assistant', text: 'There are food distributions in San Bernardino.' });
+  const secondResult = await retrieveContext({ db, question: 'y en Riverside?', location: 'Riverside', history });
+  assert.deepEqual(secondResult.map(source => source.id), ['calendar:2']);
+  assert.ok(db.calls.every(call => !call.sql.includes('FROM trusted_resources') && !call.sql.includes('chatbot_chunk')));
+});
+
+test('English location follow-ups and plain city answers preserve a calendar search', async () => {
+  const db = internalFixture({ calendar: [{ id: 1, date: '2026-11-05', organization: 'Food site', community_city: 'Riverside', address: 'Main St 92504' }] });
+  const history = [{ role: 'user', text: 'What are the upcoming distributions?' }, { role: 'assistant', text: 'Published calendar dates.' }];
+  for (const question of ['Where can I go? I live in Riverside', 'Riverside']) {
+    const result = await retrieveContext({ db, question, location: 'Riverside', history });
+    assert.deepEqual(result.map(source => source.id), ['calendar:1']);
+  }
+});
+
+test('city matching uses the city field rather than another city name in a street or venue', async () => {
+  const { matchesLocation } = require('./chatbotNavigation');
+  assert.equal(matchesLocation('Rialto: Riverside center', '1411 S Riverside Ave, Rialto, CA 92376', 'Riverside'), false);
+  assert.equal(matchesLocation('Riverside: Community Church', '4850 Jurupa Ave, Riverside, CA 92504', 'Riverside'), true);
+  assert.equal(matchesLocation('Riverside', 'Main St 92504', '92504'), true);
+  assert.equal(matchesLocation('North Bannington', '123 Main St', 'Banning'), false);
+  const db = internalFixture({ resources: [{ id: 1, title_english: 'Health clinic', city: 'Rialto', address: '1411 Riverside Ave, Rialto, CA 92376' }] });
+  const result = await retrieveContext({ db, question: 'Health resources in Riverside', location: 'Riverside' });
+  assert.equal(result[0].id, 'navigation:resources');
+});
+
+test('an explicit new directory topic replaces calendar intent even when prefixed with and', async () => {
+  const db = internalFixture({ resources: [{ id: 1, title_english: 'Central Park', city: 'Riverside', services: 'Public park recreation' }] });
+  const result = await retrieveContext({ db, question: 'Y parques en Riverside?', location: 'Riverside', history: [{ role: 'user', text: 'Próximas distribuciones' }] });
+  assert.match(result[0].id, /^resource:/);
+  assert.ok(db.calls.every(call => !call.sql.includes('calendar_event')));
+});
+
 test('explicit article discovery cites internal articles without consulting external pages', async () => {
   const db = internalFixture({ articles: [{ id: 1, title_en: 'Healthy living', slug_en: 'healthy-living', tags: 'diabetes', content_en: 'General educational content about diabetes.' }] });
   const result = await retrieveContext({ db, question: 'What articles do you have about diabetes?' });

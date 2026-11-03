@@ -54,6 +54,13 @@ test('grounded responses use only registry citations, bounded history, fixed pol
   assert.equal(http.calls[1].options.maxRedirects,0);
   assert.match(http.calls[1].body.systemInstruction.parts[0].text,/These rules override/);
 });
+
+test('answer generation receives the entire 10000-character administrator prompt',async()=>{
+  const http=provider([{allowed:true,medicalEmergency:false,language:'en'},{allowed:true,answer:'Physical activity supports good health.',citationIds:[source.id]}]);
+  const systemPrompt='a'.repeat(9990)+'PROMPT_END';
+  await createChatbotService({env,http}).answer({question:'How does exercise support health?',systemPrompt,retrieve:async()=>[source]});
+  assert.equal(JSON.parse(http.calls[1].body.contents[0].parts[0].text).ADMIN_STYLE,systemPrompt);
+});
 test('hallucinated citation IDs, model URLs and active markup never reach users',()=>{
   for(const reply of [
     {allowed:true,answer:'Take a walk.',citationIds:['invented']},

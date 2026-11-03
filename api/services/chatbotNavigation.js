@@ -18,7 +18,8 @@ function calendarOverview(question) {
 }
 
 function searchQuestion(question, history = [], location = '') {
-  const previous = [...history].reverse().find(m => m.role === 'user');
+  const previousIndex = history.findLastIndex(m => m.role === 'user');
+  const previous = history[previousIndex];
   const last = history.at(-1);
   const current = normalize(question);
   const previousText = String(previous?.text || previous?.content || '');
@@ -27,12 +28,29 @@ function searchQuestion(question, history = [], location = '') {
       || /^(?:(?:y|and) )?(?:mas recetas|more recipes)$/.test(current));
   if (/\b(otra consulta|otra pregunta|cambiando de tema|another question|different topic)\b/.test(current)
     || (foodPreparationIntent(question) && !foodFollowup)) return question;
-  const continuing = /^(?:and\b|y\b|what about\b|que hay\b|where is (?:it|that)\b|donde (?:queda|esta)\b|pero donde\b|but where\b|no hay en otras\b|hay en otras\b|more\b|mas\b)/.test(current);
+  // Explicit new subjects must not inherit the prior calendar/directory topic.
+  if (calendarIntent(question) || resourceIntent(question) || articleIntent(question)) return question;
+  const continuing = /^(?:and\b|y\b|what about\b|que hay\b|where (?:is (?:it|that)|can (?:i|we) go)\b|(?:a ?donde|donde) (?:queda|esta|puedo ir|podemos ir)\b|pero donde\b|but where\b|no hay en otras\b|hay en otras\b|more\b|mas\b)/.test(current);
   // A previous city prompt must not pull an unrelated new question back to its topic.
   const locationOnly = location && [normalize(location), `en ${normalize(location)}`, `in ${normalize(location)}`, `vivo en ${normalize(location)}`, `i live in ${normalize(location)}`].includes(current);
   const answeringLocation = locationOnly && last?.role === 'assistant' && /city or zip|ciudad o codigo postal/i.test(normalize(last.text || last.content));
-  return previous && (continuing || answeringLocation || foodFollowup)
-    ? `${previousText.slice(0, 1200)}\n${question}` : question;
+  const previousSearch = previous && (continuing || answeringLocation || locationOnly || foodFollowup)
+    ? searchQuestion(previousText, history.slice(0, previousIndex)) : '';
+  // Resolve the chain of follow-ups, not just the immediately previous question:
+  // distributions -> where can I go in San Bernardino? -> and in Riverside?
+  return previous && (continuing || answeringLocation || foodFollowup ||
+    (locationOnly && (calendarIntent(previousSearch) || resourceIntent(previousSearch) || articleIntent(previousSearch))))
+    ? `${previousSearch.slice(0, 2400)}\n${question}` : question;
+}
+
+function matchesLocation(city, address, location) {
+  if (!location) return true;
+  const query = normalize(location);
+  const contains = text => ` ${normalize(text)} `.includes(` ${query} `);
+  if (/^\d{5}(?: \d{4})?$/.test(query)) return contains(address);
+  // The first part of a calendar locality is its city; the suffix is a venue.
+  // A street named Riverside in Rialto must not be offered as a Riverside site.
+  return normalize(city) ? contains(String(city).split(':')[0]) : contains(address);
 }
 
 // Only use a location actually supplied by the user. Never trust IP, VPN, UI locale,
@@ -72,4 +90,4 @@ function calendarReply(rows, locale) {
     validationSources: cited.map(row => ({ id: `calendar:${row.id}` })) };
 }
 
-module.exports = { normalize, calendarIntent, resourceIntent, articleIntent, nearbyIntent, foodPreparationIntent, calendarOverview, searchQuestion, explicitLocation, calendarReply };
+module.exports = { normalize, calendarIntent, resourceIntent, articleIntent, nearbyIntent, foodPreparationIntent, calendarOverview, searchQuestion, explicitLocation, matchesLocation, calendarReply };

@@ -10,7 +10,7 @@ const cheerio = require('cheerio');
 const ipaddr = require('ipaddr.js');
 const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
 const { indexedCandidates, serializedScan } = require('./chatbotSearch');
-const { normalize, calendarIntent, resourceIntent, articleIntent, foodPreparationIntent, calendarOverview, searchQuestion, calendarReply } = require('./chatbotNavigation');
+const { normalize, calendarIntent, resourceIntent, articleIntent, foodPreparationIntent, calendarOverview, searchQuestion, matchesLocation, calendarReply } = require('./chatbotNavigation');
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT = 1000000;
@@ -231,7 +231,7 @@ async function internalContext(db, locale, terms, { includeCalendar = true, incl
     result.push(...chunks.sort((a, b) => b.score - a.score).slice(0, 2));
   }
   for (const r of resources) {
-    if (location && !normalize(`${r.city || ''} ${r.address || ''}`).includes(normalize(location))) continue;
+    if (!matchesLocation(r.city, r.address, location)) continue;
     const title = (es ? r.title_spanish : r.title_english) || r.title_english || r.title_spanish;
     const metadata = plain([r.title_english, r.title_spanish, r.city, r.address, r.categories, r.services, r.prices].filter(Boolean).join('\n'));
     const text = plain([r.title_english, r.title_spanish,
@@ -244,7 +244,7 @@ async function internalContext(db, locale, terms, { includeCalendar = true, incl
     result.push(...chunks.sort((a, b) => b.score - a.score).slice(0, 2));
   }
   for (const c of calendar) {
-    if (location && !normalize(`${c.community_city} ${c.address}`).includes(normalize(location))) continue;
+    if (!matchesLocation(c.community_city, c.address, location)) continue;
     const title = `${c.organization} · ${c.date}`;
     const text = `${Number(c.no_distribution) === 1 ? 'NO DISTRIBUTION / SIN REPARTO' : 'Food distribution / Distribución de alimentos'}\n${c.date} ${c.time || ''} (America/Los_Angeles)\n${c.organization}\n${c.community_city}\n${c.address}\n${c.message_es || ''}\n${c.message_en || ''}`;
     result.push({ id: `calendar:${c.id}`, title, url: '/calendar', text: text.slice(0, 1400),
@@ -263,7 +263,7 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
   const terms = termsFor(search).filter(term => !locationTerms.has(term) && (!foodIntent || !calendarIntent(term)));
   const wantsCalendar = calendarIntent(search), wantsResources = resourceIntent(search);
   // Spanish "recetas" also means prescriptions: pharmacy listings are not cooking evidence.
-  const internal = await internalContext(db, locale, terms, { includeCalendar: wantsCalendar, includeResources: !foodIntent, location });
+  const internal = await internalContext(db, locale, terms, { includeCalendar: wantsCalendar, includeResources: !foodIntent && !wantsCalendar, location });
   // Navigation uses the live Community catalog. Uploaded external references cannot
   // displace resources, articles or current dates when users ask where to find them.
   const genericResources = wantsResources && terms.every(term => ['resource','resources','recurso','recursos','services','service','servicio','servicios','ayuda','help'].includes(term));
@@ -277,7 +277,7 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
       return count < (c.sourceId ? 3 : 1);
     }).slice(0, 8).map(({ score, ...safe }) => safe);
   };
-  if (wantsCalendar) return select(preferred);
+  if (wantsCalendar) return select(preferred.filter(c => c.id.startsWith('calendar:')));
   if (articleIntent(search) && !wantsResources) {
     const articles = preferred.filter(c => c.id.startsWith('article:'));
     if (articles.length) return select(articles);

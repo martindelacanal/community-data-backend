@@ -12,10 +12,13 @@ const token=(role='admin',id=1)=>jwt.sign({data:JSON.stringify({id,role})},env.J
 const privateId='fe0b7a88-7eec-4f93-8552-6f1510b9f34e';
 async function fixture({role='admin',publicMode='hidden',enabled=true,deleted=false,replayRows=null}={}){
   const calls=[];
+  let settingsPrompt='PRIVATE ADMIN PROMPT';
   const db={query:async(sql,params=[])=>{
     calls.push({sql,params});
     if(sql.includes('FROM user u JOIN role'))return[deleted?[]:[{id:1,role,enabled:'Y',deleted:'N'}]];
-    if(sql.includes('FROM chatbot_settings'))return[[{id:1,enabled:enabled?1:0,public_mode:publicMode,allowed_roles:JSON.stringify(['admin','contentmanager']),system_prompt:'PRIVATE ADMIN PROMPT',revision:1}]];
+    if(sql.includes('FROM chatbot_settings'))return[[{id:1,enabled:enabled?1:0,public_mode:publicMode,allowed_roles:JSON.stringify(['admin','contentmanager']),system_prompt:settingsPrompt,revision:1}]];
+    if(sql.startsWith('UPDATE chatbot_settings')){settingsPrompt=params[3];return[{affectedRows:1}];}
+    if(sql.startsWith('INSERT INTO chatbot_audit'))return[{affectedRows:1}];
     if(sql.includes('FROM role'))return[[{id:1,name:'admin'},{id:2,name:'beneficiary'},{id:3,name:'contentmanager'}]];
     if(sql.includes('FROM chatbot_conversation c')){
       const correct=crypto.createHmac('sha256',env.JWT_SECRET).update('user:1').digest('hex');
@@ -25,6 +28,7 @@ async function fixture({role='admin',publicMode='hidden',enabled=true,deleted=fa
     if(sql.includes('FROM chatbot_message'))return[replayRows||[{id:'m1',role:'assistant',content:'Hello',sources:'[]',status:'complete',model:'private-model',input_tokens:99}]];
     throw new Error(`Unexpected SQL: ${sql}`);
   }};
+  db.getConnection=async()=>({query:db.query,beginTransaction:async()=>{},commit:async()=>{},rollback:async()=>{},release:()=>{}});
   const app=express();app.use(express.json());app.use('/api/chatbot',createChatbotRouter({pool:db,env}));
   const server=await new Promise(resolve=>{const listening=app.listen(0,'127.0.0.1',()=>resolve(listening));});
   const base=`http://127.0.0.1:${server.address().port}/api/chatbot`;
@@ -78,6 +82,20 @@ test('admin write validates all settings before SQL writes; public upload refuse
     assert.equal((await f.request('/admin/settings',{method:'PUT',headers:{Authorization:`Bearer ${token()}`,'Content-Type':'application/json'},body:JSON.stringify({enabled:true,publicMode:'surprise',allowedRoles:['admin'],systemPrompt:'test'})})).status,400);
     assert.equal((await f.request('/admin/sources',{method:'POST',headers:{'Content-Type':'application/pdf'},body:'invalid-file'})).status,403);
     assert.equal(f.calls.some(call=>call.sql.startsWith('UPDATE')),false);
+  }finally{await f.close();}
+});
+
+test('admin accepts and preserves all 10000 prompt characters but rejects 10001 before writing',async()=>{
+  const f=await fixture();try{
+    const body={enabled:true,publicMode:'hidden',allowedRoles:['admin'],systemPrompt:'a'.repeat(9990)+'PROMPT_END'};
+    const options={method:'PUT',headers:{Authorization:`Bearer ${token()}`,'Content-Type':'application/json'}};
+    const accepted=await f.request('/admin/settings',{...options,body:JSON.stringify(body)});
+    assert.equal(accepted.status,200);assert.equal((await accepted.json()).systemPrompt,body.systemPrompt);
+    const updates=f.calls.filter(call=>call.sql.startsWith('UPDATE chatbot_settings'));
+    assert.equal(updates.length,1);assert.equal(updates[0].params[3],body.systemPrompt);
+    const rejected=await f.request('/admin/settings',{...options,body:JSON.stringify({...body,systemPrompt:body.systemPrompt+'a'})});
+    assert.equal(rejected.status,400);
+    assert.equal(f.calls.filter(call=>call.sql.startsWith('UPDATE chatbot_settings')).length,1);
   }finally{await f.close();}
 });
 test('stable client request UUID replays saved pair without another provider or quota write',async()=>{
