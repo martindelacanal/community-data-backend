@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const express=require('express');
 const jwt=require('jsonwebtoken');
 const crypto=require('node:crypto');
-const {createChatbotRouter}=require('./chatbot');
+const {createChatbotRouter,publicClientNetwork}=require('./chatbot');
 const {MAX_SOURCES,MAX_TOTAL_CHUNKS}=require('../services/chatbotLimits');
 
 const env={JWT_SECRET:'test-key-chatbot-not-real',GEMINI_API_KEY:'test-key'};
@@ -13,11 +13,12 @@ const privateId='fe0b7a88-7eec-4f93-8552-6f1510b9f34e';
 async function fixture({role='admin',publicMode='hidden',enabled=true,deleted=false,replayRows=null}={}){
   const calls=[];
   let settingsPrompt='PRIVATE ADMIN PROMPT';
+  let publicDailyMessageLimit;
   const db={query:async(sql,params=[])=>{
     calls.push({sql,params});
     if(sql.includes('FROM user u JOIN role'))return[deleted?[]:[{id:1,role,enabled:'Y',deleted:'N'}]];
-    if(sql.includes('FROM chatbot_settings'))return[[{id:1,enabled:enabled?1:0,public_mode:publicMode,allowed_roles:JSON.stringify(['admin','contentmanager']),system_prompt:settingsPrompt,revision:1}]];
-    if(sql.startsWith('UPDATE chatbot_settings')){settingsPrompt=params[3];return[{affectedRows:1}];}
+    if(sql.includes('FROM chatbot_settings'))return[[{id:1,enabled:enabled?1:0,public_mode:publicMode,allowed_roles:JSON.stringify(['admin','contentmanager']),system_prompt:settingsPrompt,revision:1,public_daily_message_limit:publicDailyMessageLimit}]];
+    if(sql.startsWith('UPDATE chatbot_settings')){settingsPrompt=params[3];publicDailyMessageLimit=params[5]??publicDailyMessageLimit;return[{affectedRows:1}];}
     if(sql.startsWith('INSERT INTO chatbot_audit'))return[{affectedRows:1}];
     if(sql.includes('FROM role'))return[[{id:1,name:'admin'},{id:2,name:'beneficiary'},{id:3,name:'contentmanager'}]];
     if(sql.includes('FROM chatbot_conversation c')){
@@ -45,6 +46,25 @@ test('public login-required mode exposes only the locked launcher',async()=>{
   const f=await fixture({publicMode:'login_required'});try{
     const data=await(await f.request('/config')).json();assert.equal(data.visible,true);assert.equal(data.requiresLogin,true);assert.equal(data.canChat,false);
   }finally{await f.close();}
+});
+test('enabled public mode exposes the launcher and daily quotas without a session',async()=>{
+  const f=await fixture({publicMode:'enabled'});try{
+    const data=await(await f.request('/config')).json();
+    assert.equal(data.visible,true);
+    assert.equal(data.canChat,true);
+    assert.equal(data.requiresLogin,false);
+    assert.equal(data.publicDailyMessageLimit,500);
+    assert.equal(data.publicDailyMessagesPerIp,20);
+    assert.equal(data.publicDailyConversationsPerIp,20);
+  }finally{await f.close();}
+});
+test('client network is derived from a direct peer or a trusted loopback proxy',()=>{
+  const request=(remoteAddress,realIp)=>({socket:{remoteAddress},headers:{'x-real-ip':realIp}});
+  assert.equal(publicClientNetwork(request('::ffff:127.0.0.1','192.0.2.1')),'192.0.2.1');
+  assert.equal(publicClientNetwork(request('192.0.2.1','198.51.100.1')),'192.0.2.1');
+  assert.equal(publicClientNetwork(request('::1','2001:db8:0:1::5')),'2001:db8:0:1::/64');
+  assert.equal(publicClientNetwork(request('::1','2001:db8:0:1:1000::8')),'2001:db8:0:1::/64');
+  assert.equal(publicClientNetwork(request('::1','::ffff:192.0.2.1')),'192.0.2.1');
 });
 test('current database role wins over stale elevated JWT role',async()=>{
   const f=await fixture({role:'beneficiary'});try{
@@ -98,6 +118,24 @@ test('admin accepts and preserves all 10000 prompt characters but rejects 10001 
     assert.equal(f.calls.filter(call=>call.sql.startsWith('UPDATE chatbot_settings')).length,1);
   }finally{await f.close();}
 });
+test('only valid integers update the saved public daily budget and legacy saves preserve it',async()=>{
+  const f=await fixture();
+  const save=body=>f.request('/admin/settings',{method:'PUT',
+    headers:{Authorization:`Bearer ${token()}`,'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:true,publicMode:'enabled',allowedRoles:['admin'],systemPrompt:'Style',...body})});
+  try{
+    const response=await save({publicDailyMessageLimit:275});
+    assert.equal(response.status,200);
+    assert.equal((await response.json()).publicDailyMessageLimit,275);
+    assert.equal((await(await save({})).json()).publicDailyMessageLimit,275);
+    for(const invalid of [null,0,-1,1.5,'25',100001]){
+      assert.equal((await save({publicDailyMessageLimit:invalid})).status,400);
+    }
+    assert.equal(f.calls.filter(call=>call.sql.startsWith('UPDATE chatbot_settings')).length,2);
+    const audits=f.calls.filter(call=>call.sql.startsWith('INSERT INTO chatbot_audit'));
+    assert.equal(JSON.parse(audits[0].params[5]).publicDailyMessageLimit,275);
+  }finally{await f.close();}
+});
 test('stable client request UUID replays saved pair without another provider or quota write',async()=>{
   const replayRows=[{id:'user-original',role:'user',content:'Hola',status:'complete',sources:[]},{id:'assistant-original',role:'assistant',content:'¡Hola!',status:'complete',sources:[]}];
   const f=await fixture({replayRows});try{
@@ -108,6 +146,91 @@ test('stable client request UUID replays saved pair without another provider or 
     const conflict=await f.request(`/conversations/${privateId}/messages`,{...request,body:JSON.stringify({...JSON.parse(request.body),message:'Different text'})});
     assert.equal(conflict.status,409);
   }finally{await f.close();}
+});
+
+test('anonymous daily budget is shared across networks and charged only before fresh provider work',async()=>{
+  const sessions=[crypto.randomUUID(),crypto.randomUUID(),crypto.randomUUID()];
+  const conversations=sessions.map(session=>({
+    id:crypto.randomUUID(),
+    owner_key:crypto.createHmac('sha256',env.JWT_SECRET).update(`guest:${session}`).digest('hex'),
+    locale:'en',
+    message_count:0
+  }));
+  const messages=[];
+  const configuration={enabled:1,public_mode:'enabled',allowed_roles:'[]',public_daily_message_limit:2,revision:1};
+  let providerCalls=0,usage=new Map();
+  const query=async(sql,params=[])=>{
+    if(sql.includes('FROM chatbot_settings'))return[[configuration]];
+    if(sql.includes('FROM chatbot_conversation c'))return[conversations.filter(row=>row.id===params[0]&&row.owner_key===params[1])];
+    if(sql.includes('FROM chatbot_message')){
+      if(sql.includes('id IN'))return[messages.filter(row=>params.includes(row.id))];
+      if(sql.includes('request_id=?'))return[messages.filter(row=>row.conversation_id===params[0]&&row.request_id===params[1])];
+      return[[]];
+    }
+    if(sql.startsWith('UPDATE chatbot_conversation SET processing_token=?')){
+      conversations.find(row=>row.id===params[1]).processing_token=params[0];
+    }else if(sql.startsWith('SELECT processing_token')){
+      return[[conversations.find(row=>row.id===params[0])]];
+    }else if(sql.startsWith('INSERT INTO chatbot_usage')){
+      const [key,day]=params;
+      const bucket=`${key}:${day}`;
+      if(!usage.has(bucket))usage.set(bucket,0);
+    }else if(sql.startsWith('UPDATE chatbot_usage')){
+      const [key,day,limit]=params;
+      const bucket=`${key}:${day}`;
+      if(usage.get(bucket)>=limit)return[{affectedRows:0}];
+      usage.set(bucket,usage.get(bucket)+1);
+    }else if(sql.startsWith('INSERT INTO chatbot_message')){
+      const [id,conversation_id,content]=params;
+      const assistant=sql.includes("'assistant'");
+      messages.push({id,conversation_id,content,role:assistant?'assistant':'user',request_id:assistant?params[10]:params[3]});
+    }
+    return[{affectedRows:1}];
+  };
+  const pool={query,getConnection:async()=>{
+    const before=new Map(usage);
+    return{query,beginTransaction:async()=>{},commit:async()=>{},rollback:async()=>{usage=before;},release:()=>{}};
+  }};
+  const service={model:()=>null,answer:async()=>{
+    providerCalls++;
+    return{content:'Answer',status:'complete',model:null,sources:[]};
+  }};
+  const app=express();
+  app.use(express.json());
+  app.use(createChatbotRouter({pool,env,service}));
+  const server=await new Promise(resolve=>{const listening=app.listen(0,'127.0.0.1',()=>resolve(listening));});
+  const send=(index,clientRequestId,ip=`192.0.2.${index+1}`)=>fetch(`http://127.0.0.1:${server.address().port}/conversations/${conversations[index].id}/messages`,{
+    method:'POST',headers:{'Content-Type':'application/json','X-Chatbot-Session':sessions[index],'X-Real-IP':ip},
+    body:JSON.stringify({message:'Where is the next distribution?',clientRequestId})
+  });
+  try {
+    const firstRequest=crypto.randomUUID();
+    assert.equal((await send(0,firstRequest)).status,200);
+    assert.equal((await send(1,crypto.randomUUID())).status,200);
+    const rejected=await send(2,crypto.randomUUID());
+    assert.equal(rejected.status,429);
+    assert.equal((await rejected.json()).error,'chatbot_daily_limit');
+    assert.ok(Number(rejected.headers.get('Retry-After'))>0);
+    assert.deepEqual([...usage.values()].sort(),[1,1,2]);
+    assert.equal((await send(0,firstRequest)).status,200);
+    assert.equal(providerCalls,2);
+    // Simulate an accepted message left without its answer after an interrupted attempt.
+    messages.splice(messages.findIndex(row=>row.role==='assistant'&&row.request_id===firstRequest),1);
+    assert.equal((await send(0,firstRequest)).status,429);
+    assert.equal(providerCalls,2);
+    assert.deepEqual([...usage.values()].sort(),[1,1,2]);
+    configuration.public_daily_message_limit=3;
+    assert.equal((await send(0,firstRequest)).status,200);
+    assert.equal(providerCalls,3);
+    assert.equal(messages.filter(row=>row.role==='user'&&row.request_id===firstRequest).length,1);
+    configuration.public_daily_message_limit=10;
+    const firstNetwork=crypto.createHmac('sha256',env.JWT_SECRET).update('ip:192.0.2.1').digest('hex');
+    const day=new Date().toISOString().slice(0,10);
+    usage.set(`${firstNetwork}:${day}`,20);
+    assert.equal((await send(2,crypto.randomUUID(),'192.0.2.1')).status,429);
+    assert.equal(providerCalls,3);
+    assert.deepEqual([...usage.values()].sort((a,b)=>a-b),[1,3,20]);
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 
 async function sourceFixture({sourceCount=0,chunkCount=0,chunksPerSource=2,concurrentSourceCount,ingestWait}={}){
