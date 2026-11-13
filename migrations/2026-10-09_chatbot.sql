@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS chatbot_settings (
   id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
   enabled TINYINT(1) NOT NULL DEFAULT 1,
   public_mode VARCHAR(24) NOT NULL DEFAULT 'hidden',
+  public_daily_message_limit INT UNSIGNED NOT NULL DEFAULT 500,
   allowed_roles JSON NOT NULL,
   system_prompt TEXT NOT NULL,
   revision INT UNSIGNED NOT NULL DEFAULT 1,

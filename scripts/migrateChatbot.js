@@ -4,6 +4,7 @@ const path = require('node:path');
 const mysql = require('mysql2/promise');
 const { databaseConfig } = require('./migrateHealthWristbands');
 const { migrateSearch } = require('./migrateChatbotSearch');
+const { migratePublicLimit } = require('./migrateChatbotPublicLimit');
 
 async function migrate(target) {
   const connection = await mysql.createConnection(databaseConfig(target));
@@ -16,6 +17,7 @@ async function migrate(target) {
     const [[row]] = await connection.query(`SELECT COUNT(*) AS total FROM information_schema.TABLES
       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('chatbot_settings','chatbot_source','chatbot_chunk','chatbot_conversation','chatbot_message','chatbot_usage','chatbot_audit')`);
     if (Number(row.total) !== 7) throw new Error('Chatbot tables missing');
+    await migratePublicLimit(connection);
     await migrateSearch(connection);
     console.log(`Chatbot migration verified (${target}): seven tables, existing settings preserved.`);
   } finally { await connection.end(); }

@@ -3,7 +3,10 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('node:crypto');
 const multer = require('multer');
-const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS, MAX_CONCURRENT_IMPORTS, MAX_SYSTEM_PROMPT_CHARS } = require('../services/chatbotLimits');
+const ipaddr = require('ipaddr.js');
+const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS, MAX_CONCURRENT_IMPORTS, MAX_SYSTEM_PROMPT_CHARS,
+  DEFAULT_PUBLIC_DAILY_MESSAGE_LIMIT, MAX_PUBLIC_DAILY_MESSAGE_LIMIT,
+  PUBLIC_DAILY_MESSAGES_PER_IP, PUBLIC_DAILY_CONVERSATIONS_PER_IP } = require('../services/chatbotLimits');
 const { buildRestoreAuthBinding } = require('../utils/restoreAuthBinding');
 const { ChatbotError,fail,MAX_MESSAGE_CHARS,MAX_OUTPUT_TOKENS,DAILY_MESSAGE_LIMIT,DISCLAIMERS,
   validateMessage,chooseLocale,createChatbotService,createChatbotLimiter,localText } = require('../services/chatbot');
@@ -17,6 +20,38 @@ const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const iso = value => value instanceof Date?value.toISOString():value;
 const cleanSearch = value => typeof value==='string'?value.trim().slice(0,160):'';
 const searchLike = value => `%${value.replace(/[\\%_]/g,'\\$&')}%`;
+const PUBLIC_DAILY_QUOTA_KEY = digest('chatbot:public:daily-messages');
+
+function publicClientNetwork(req) {
+  const socket = req.socket.remoteAddress;
+  if (!socket || !ipaddr.isValid(socket)) return 'unknown';
+  const peer = ipaddr.process(socket);
+  // Production Nginx is the direct loopback peer and overwrites X-Real-IP.
+  const forwarded = req.headers['x-real-ip'];
+  const address = peer.range()==='loopback' && typeof forwarded==='string' && ipaddr.isValid(forwarded)
+    ? ipaddr.process(forwarded) : peer;
+  if (address.kind()==='ipv4') return address.toString();
+  // IPv6 clients often rotate addresses within the same /64 network.
+  return `${address.parts.slice(0,4).map(part=>part.toString(16)).join(':')}::/64`;
+}
+
+function publicLimits(configuration) {
+  return {
+    publicDailyMessageLimit: configuration.public_daily_message_limit ?? DEFAULT_PUBLIC_DAILY_MESSAGE_LIMIT,
+    publicDailyMessagesPerIp: PUBLIC_DAILY_MESSAGES_PER_IP,
+    publicDailyConversationsPerIp: PUBLIC_DAILY_CONVERSATIONS_PER_IP
+  };
+}
+
+async function consumeDaily(connection,key,day,limit) {
+  // The duplicate branch takes an exclusive row lock before the conditional update.
+  await connection.query('INSERT INTO chatbot_usage(owner_key,usage_date,message_count) VALUES(?,?,0) ON DUPLICATE KEY UPDATE owner_key=owner_key',[key,day]);
+  const [usage]=await connection.query('UPDATE chatbot_usage SET message_count=message_count+1 WHERE owner_key=? AND usage_date=? AND message_count<?',[key,day,limit]);
+  if(usage.affectedRows===1)return;
+  const error=new ChatbotError('chatbot_daily_limit',429);
+  error.retryAfter=Math.max(1,Math.ceil((Date.parse(day)+86400000-Date.now())/1000));
+  throw error;
+}
 
 function conversationDTO(row) {
   return {id:row.id,title:row.title,preview:row.preview,locale:row.locale,messageCount:Number(row.message_count),
@@ -74,8 +109,8 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     for(const name of ['article','resource','calendar'])if(groups[name].length){const [rows]=await db.query(checks[name],[groups[name]]);if(groups[name].some(id=>!rows.some(row=>Number(row.id)===id)))return false;}
     return true;
   }
-  async function settings(connection=db) {
-    const [[row]]=await connection.query('SELECT * FROM chatbot_settings WHERE id=1');
+  async function settings(connection=db,lock=false) {
+    const [[row]]=await connection.query(`SELECT * FROM chatbot_settings WHERE id=1${lock?' LOCK IN SHARE MODE':''}`);
     if(!row)fail('chatbot_unavailable',503);
     return {...row,enabled:boolean(row.enabled),allowed_roles:json(row.allowed_roles,[])};
   }
@@ -87,8 +122,6 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
   router.use(wrap(async(req,res,next)=>{
     if(!secret())fail('chatbot_unavailable',503);
     const authorization=req.headers.authorization;
-    const ipKey=hash(`ip:${req.ip || req.socket.remoteAddress || 'unknown'}`,secret());
-    req.chatbotActor={id:null,role:'public',ownerKey:null,quotaKey:ipKey};
     if(authorization){
       let identity,claims;
       try {
@@ -109,7 +142,9 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
       req.chatbotActor={id:Number(row.id),role:row.role,ownerKey,quotaKey:ownerKey};
     } else {
       const session=req.headers['x-chatbot-session'];
-      if(session!==undefined){if(typeof session!=='string'||!UUID.test(session))fail('chatbot_invalid_request',400);req.chatbotActor.ownerKey=hash(`guest:${session}`,secret());}
+      if(session!==undefined&&(typeof session!=='string'||!UUID.test(session)))fail('chatbot_invalid_request',400);
+      req.chatbotActor={id:null,role:'public',ownerKey:session?hash(`guest:${session}`,secret()):null,
+        quotaKey:hash(`ip:${publicClientNetwork(req)}`,secret())};
     }
     // Bound reads and admin operations too. Public clients cannot bypass this by rotating session IDs.
     const now=Date.now(),key=req.chatbotActor.quotaKey;
@@ -124,7 +159,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     const configuration=await settings(),actor=req.chatbotActor;
     res.json({enabled:configuration.enabled,visible:configuration.enabled && (actor.id?configuration.allowed_roles.includes(actor.role):configuration.public_mode!=='hidden'),
       canChat:allowed(actor,configuration),requiresLogin:configuration.enabled&&!actor.id&&configuration.public_mode==='login_required',
-      publicMode:configuration.public_mode,maxMessageChars:MAX_MESSAGE_CHARS,disclaimer:DISCLAIMERS});
+      publicMode:configuration.public_mode,maxMessageChars:MAX_MESSAGE_CHARS,disclaimer:DISCLAIMERS,...publicLimits(configuration)});
   }));
 
   async function readConversation(id,ownerKey=null,connection=db) {
@@ -155,9 +190,8 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     // Public clients cannot evade creation quotas by rotating their random session ID.
     const creationKey=hash(`conversation-create:${actor.quotaKey}`,secret());
     await transaction(async connection=>{
-      await connection.query('INSERT IGNORE INTO chatbot_usage(owner_key,usage_date,message_count) VALUES(?,UTC_DATE(),0)',[creationKey]);
-      const [usage]=await connection.query('UPDATE chatbot_usage SET message_count=message_count+1 WHERE owner_key=? AND usage_date=UTC_DATE() AND message_count<?',[creationKey,actor.id?60:20]);
-      if(usage.affectedRows!==1)fail('chatbot_daily_limit',429);
+      const day=new Date().toISOString().slice(0,10);
+      await consumeDaily(connection,creationKey,day,actor.id?60:PUBLIC_DAILY_CONVERSATIONS_PER_IP);
       await connection.query('INSERT INTO chatbot_conversation(id,owner_key,user_id,user_role,locale) VALUES(?,?,?,?,?)',[id,actor.ownerKey,actor.id,actor.role,locale]);
       await audit(actor,'conversation_created',id,{},connection);
     });
@@ -171,7 +205,8 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
 
   router.post('/conversations/:id/messages',requireAccess,wrap(async(req,res)=>{
     const question=validateMessage(req.body?.message),actor=req.chatbotActor;
-    const conversation=await readConversation(req.params.id,actor.ownerKey),configuration=req.chatbotSettings;
+    const conversation=await readConversation(req.params.id,actor.ownerKey);
+    let configuration=req.chatbotSettings;
     const previousLocale=Number(conversation.message_count)>0?conversation.locale:undefined;
     const locale=chooseLocale(question,req.body?.locale,previousLocale);
     if(req.body?.clientRequestId!==undefined&&(typeof req.body.clientRequestId!=='string'||!UUID.test(req.body.clientRequestId)))fail('chatbot_invalid_request',400);
@@ -195,11 +230,17 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
         if(lock.affectedRows!==1)fail('chatbot_busy',429);
         const existing=await priorAttempt(connection);
         if(existing.user&&existing.assistant){await connection.query('UPDATE chatbot_conversation SET processing_token=NULL,processing_until=NULL WHERE id=? AND processing_token=?',[conversation.id,processingToken]);return existing;}
+        if(!actor.id){
+          configuration=await settings(connection,true);
+          if(!allowed(actor,configuration))fail('chatbot_authentication_required',401);
+          const day=new Date().toISOString().slice(0,10);
+          // A partial attempt may call the provider again; completed replays never reserve quota.
+          await consumeDaily(connection,actor.quotaKey,day,PUBLIC_DAILY_MESSAGES_PER_IP);
+          await consumeDaily(connection,PUBLIC_DAILY_QUOTA_KEY,day,publicLimits(configuration).publicDailyMessageLimit);
+        }
         if(existing.user)userMessageId=existing.user.id;
         else {
-          await connection.query('INSERT IGNORE INTO chatbot_usage(owner_key,usage_date,message_count) VALUES(?,UTC_DATE(),0)',[actor.quotaKey]);
-          const [usage]=await connection.query('UPDATE chatbot_usage SET message_count=message_count+1 WHERE owner_key=? AND usage_date=UTC_DATE() AND message_count<?',[actor.quotaKey,actor.id?DAILY_MESSAGE_LIMIT:20]);
-          if(usage.affectedRows!==1)fail('chatbot_daily_limit',429);
+          if(actor.id)await consumeDaily(connection,actor.quotaKey,new Date().toISOString().slice(0,10),DAILY_MESSAGE_LIMIT);
           await connection.query(`INSERT INTO chatbot_message(id,conversation_id,role,content,status,request_id,settings_revision) VALUES(?,?,'user',?,'complete',?,?)`,[userMessageId,conversation.id,question,requestId,configuration.revision]);
           await connection.query(`UPDATE chatbot_conversation SET title=CASE WHEN message_count=0 THEN ? ELSE title END,preview=?,locale=?,message_count=message_count+1 WHERE id=?`,[question.slice(0,200),question.slice(0,300),locale,conversation.id]);
         }
@@ -245,20 +286,23 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
   async function adminSettings() {
     const row=await settings();const [roles]=await db.query('SELECT id,name FROM role WHERE name IS NOT NULL ORDER BY id');
     return {enabled:row.enabled,publicMode:row.public_mode,allowedRoles:row.allowed_roles,systemPrompt:row.system_prompt,revision:row.revision,
-      availableRoles:roles,model:ai.model(),scopeModel:ai.scopeModel?.(),providerConfigured:ai.isConfigured(),maxMessageChars:MAX_MESSAGE_CHARS,maxOutputTokens:MAX_OUTPUT_TOKENS,dailyMessageLimit:DAILY_MESSAGE_LIMIT};
+      availableRoles:roles,model:ai.model(),scopeModel:ai.scopeModel?.(),providerConfigured:ai.isConfigured(),maxMessageChars:MAX_MESSAGE_CHARS,maxOutputTokens:MAX_OUTPUT_TOKENS,dailyMessageLimit:DAILY_MESSAGE_LIMIT,
+      ...publicLimits(row)};
   }
   router.get('/admin/settings',wrap(async(req,res)=>res.json(await adminSettings())));
   router.put('/admin/settings',wrap(async(req,res)=>{
     const body=req.body;
     if(!body||typeof body.enabled!=='boolean'||!['hidden','login_required','enabled'].includes(body.publicMode)||!Array.isArray(body.allowedRoles)||body.allowedRoles.length>50
       ||body.allowedRoles.some(role=>typeof role!=='string')||new Set(body.allowedRoles).size!==body.allowedRoles.length
+      ||(body.publicDailyMessageLimit!==undefined&&(!Number.isInteger(body.publicDailyMessageLimit)||body.publicDailyMessageLimit<1||body.publicDailyMessageLimit>MAX_PUBLIC_DAILY_MESSAGE_LIMIT))
       ||typeof body.systemPrompt!=='string'||!body.systemPrompt.trim()||body.systemPrompt.length>MAX_SYSTEM_PROMPT_CHARS)fail('chatbot_invalid_request',400);
     const [roles]=await db.query('SELECT name FROM role WHERE name IS NOT NULL');
     if(body.allowedRoles.some(role=>!roles.some(row=>row.name===role)))fail('chatbot_invalid_request',400);
     await transaction(async connection=>{
-      await connection.query('UPDATE chatbot_settings SET enabled=?,public_mode=?,allowed_roles=?,system_prompt=?,revision=revision+1,updated_by=? WHERE id=1',
-        [body.enabled?1:0,body.publicMode,JSON.stringify(body.allowedRoles),body.systemPrompt.trim(),req.chatbotActor.id]);
-      await audit(req.chatbotActor,'settings_updated','1',{enabled:body.enabled,publicMode:body.publicMode,allowedRoles:body.allowedRoles,promptSha256:digest(body.systemPrompt.trim())},connection);
+      await connection.query('UPDATE chatbot_settings SET enabled=?,public_mode=?,allowed_roles=?,system_prompt=?,revision=revision+1,updated_by=?,public_daily_message_limit=COALESCE(?,public_daily_message_limit) WHERE id=1',
+        [body.enabled?1:0,body.publicMode,JSON.stringify(body.allowedRoles),body.systemPrompt.trim(),req.chatbotActor.id,body.publicDailyMessageLimit??null]);
+      await audit(req.chatbotActor,'settings_updated','1',{enabled:body.enabled,publicMode:body.publicMode,allowedRoles:body.allowedRoles,
+        publicDailyMessageLimit:body.publicDailyMessageLimit,promptSha256:digest(body.systemPrompt.trim())},connection);
     });
     res.json(await adminSettings());
   }));
@@ -359,8 +403,8 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
     const safe=error instanceof ChatbotError || (typeof error.code==='string'&&/^chatbot_[a-z_]+$/.test(error.code)&&Number.isInteger(error.status)&&error.status>=400&&error.status<=599);
     const code=safe?error.code:'chatbot_unavailable',status=safe?error.status:503;
     if(!safe)logger?.error?.('Chatbot request failed',{code:error.code||'CHATBOT_ERROR'});
-    if(status===429)res.set('Retry-After','60');res.status(status).json({error:code,message:code});
+    if(status===429)res.set('Retry-After',String(error.retryAfter||60));res.status(status).json({error:code,message:code});
   });
   return router;
 }
-module.exports={createChatbotRouter,conversationDTO,messageDTO,pagination};
+module.exports={createChatbotRouter,conversationDTO,messageDTO,pagination,publicClientNetwork};
