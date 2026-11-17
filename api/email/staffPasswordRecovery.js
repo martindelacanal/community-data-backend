@@ -7,8 +7,8 @@ function buildStaffPasswordRecoveryEmail({ email, token, language }) {
   const url = new URL('https://api.bienestarcommunity.org/api/auth/password-reset/open');
   url.hash = new URLSearchParams({ token, lang: spanish ? 'es' : 'en' }).toString();
   const subject = spanish ? 'Restablece tu contraseña de Bienestar Community' : 'Reset your Bienestar Community password';
-  const intro = spanish ? 'Recibimos una solicitud para restablecer la contraseña de tu cuenta del equipo.'
-    : 'We received a request to reset the password for your staff account.';
+  const intro = spanish ? 'Recibimos una solicitud para restablecer la contraseña de tu cuenta de Bienestar Community.'
+    : 'We received a request to reset the password for your Bienestar Community account.';
   const action = spanish ? 'Elegir una nueva contraseña' : 'Choose a new password';
   const note = spanish ? 'El enlace vence en 20 minutos y solo puede usarse una vez. Si no solicitaste este cambio, ignora este correo. Tu contraseña no se modificará.'
     : 'This link expires in 20 minutes and can only be used once. If you did not request this change, ignore this email. Your password will remain unchanged.';

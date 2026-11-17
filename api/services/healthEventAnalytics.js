@@ -1393,7 +1393,7 @@ function buildVolunteersTable(snapshot, analytics, filters, lang) {
   const headers = [
     'User ID', label(lang, 'Volunteer', 'Voluntario'), label(lang, 'Username', 'Usuario'),
     label(lang, 'Email', 'Correo'), label(lang, 'Phone', 'Teléfono'),
-    label(lang, 'Account approved', 'Cuenta aprobada'),
+    label(lang, 'Account approved', 'Cuenta aprobada'), label(lang, 'Approved for this clinic', 'Aprobado para esta clínica'),
     label(lang, 'Registered at', 'Registrado el'),
     label(lang, 'Total scans', 'Escaneos totales'),
     label(lang, 'Check-ins', 'Check-ins'), label(lang, 'Check-outs', 'Check-outs'),
@@ -1414,7 +1414,8 @@ function buildVolunteersTable(snapshot, analytics, filters, lang) {
       username: registration.username || '',
       email: registration.email || registration.contact_email || '',
       phone: registration.phone || '',
-      approved: registration.user_enabled === 'Y',
+      accountApproved: registration.user_enabled === 'Y',
+      clinicApproved: registration.status === 'registered',
       registered_at: registration.submitted_at_local || ''
     });
   }
@@ -1427,7 +1428,8 @@ function buildVolunteersTable(snapshot, analytics, filters, lang) {
       username: stats.username,
       email: stats.email,
       phone: '',
-      approved: true,
+      accountApproved: true,
+      clinicApproved: null,
       registered_at: ''
     });
   }
@@ -1441,7 +1443,7 @@ function buildVolunteersTable(snapshot, analytics, filters, lang) {
         name: person.name,
         values: [
           person.user_id, person.name, person.username, person.email, person.phone,
-          yesNo(person.approved, lang), person.registered_at,
+          yesNo(person.accountApproved, lang), person.clinicApproved == null ? '' : yesNo(person.clinicApproved, lang), person.registered_at,
           stats ? stats.total : 0,
           stats ? stats.checkins : 0,
           stats ? stats.checkouts : 0,

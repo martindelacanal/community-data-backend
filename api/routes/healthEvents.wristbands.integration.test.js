@@ -84,6 +84,7 @@ test('Health Events wristbands: ACL, concurrent bindings, history, reuse and att
     const regA = await register(eventA, benA), regB = await register(eventA, benB), regOther = await register(eventB, benOther);
     const regCancelled = await register(eventA, cancelledBen, 'cancelled'), regStaff = await register(eventA, staff);
     await register(eventA, entryOperator);
+    await register(eventB, entryOperator, 'pending');
     await register(eventA, pendingOperator);
     await register(eventB, otherOperator);
     await db.query('INSERT INTO health_event_volunteer_assignment(health_event_id,user_id,stand_id) VALUES (?,?,?), (?,?,?), (?,?,?)',
@@ -108,6 +109,14 @@ test('Health Events wristbands: ACL, concurrent bindings, history, reuse and att
     }
     function ok(result, status = 200, code) { assert.equal(result.status, status, `Unexpected status: ${JSON.stringify(result.body)}`); if (code) assert.equal(result.body.error, code); return result.body; }
     const list = `/${eventA}/wristbands`;
+    const context = ok(await request('/volunteer/context', entryOperator));
+    assert.deepEqual(context.events.map(event => event.id), [eventA]);
+    assert.equal(context.active_assignment.event_id, eventA);
+    ok(await request('/volunteer/assignment', entryOperator, { event_id: eventB, stand_id: otherEntry }), 403, 'FORBIDDEN');
+    ok(await request(`/stand/${otherEntry}/attending`, entryOperator), 403, 'FORBIDDEN');
+    ok(await request('/scan', entryOperator, { event_id: eventB, stand_id: otherEntry }), 403, 'FORBIDDEN');
+    ok(await request(`/stand/${entry}/attending`, entryOperator));
+    assert.equal(ok(await request('/volunteer/context', entryOperator)).active_assignment.event_id, eventA);
     ok(await request(list, null), 401);
     ok(await request(list, benA), 403);
     ok(await request(list, entryOperator), 403);
