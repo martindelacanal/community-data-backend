@@ -51,6 +51,7 @@ const healthEventAnalytics = require('../services/healthEventAnalytics');
 const healthEventWristbands = require('../services/healthEventWristbands');
 const { manageReservation, readReservationToken, ReservationError } = require('../services/healthEventReservation');
 const { saveParticipantRegistration } = require('../services/healthEventParticipantRegistration');
+const { VolunteerRegistrationError, volunteerApprovalStatus, requestVolunteerRegistration, reviewVolunteerRegistration } = require('../services/healthEventVolunteerRegistration');
 const { DEFAULT_HEALTH_PASSWORD } = require('../services/healthEventConfirmation');
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
 const { normalizeWristbandSource, assertAssignableRegistration, buildHealthStaffDebounceKey, HealthWristbandError } = require('../utils/healthWristband');
@@ -1172,14 +1173,18 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
 
     const account = req.body.account || {};
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
-    if (!validPersonName(account.firstName) || !validPersonName(account.lastName)) {
+    const returning = req.body.use_existing_account === true;
+    const authUser = returning ? getOptionalAuthUser(req) : null;
+    if (returning && !authUser) return res.status(401).json({ error: 'UNAUTHORIZED' });
+    if (returning && authUser.role !== 'eventvolunteer') return res.status(403).json({ error: 'FORBIDDEN' });
+    if (!returning && (!validPersonName(account.firstName) || !validPersonName(account.lastName))) {
       return res.status(400).json({ error: 'INVALID_NAME_CHARACTERS' });
     }
     if (!validPrivacyConsent(account.privacyConsent)) {
       return res.status(400).json({ error: 'PRIVACY_CONSENT_REQUIRED' });
     }
-    const email = account.email ? String(account.email).trim() : null;
-    if (!account.firstName || !account.phone || !email) {
+    let email = account.email ? String(account.email).trim() : null;
+    if (!returning && (!account.firstName || !account.phone || !email)) {
       logger.error('POST /health-events/:slug/register/volunteer 400 INVALID_ACCOUNT_DATA (missing firstName/phone/email)');
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
@@ -1190,7 +1195,7 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
         message: 'Legal consent must be accepted to register as a volunteer'
       });
     }
-    if (!/^[0-9]{10}$/.test(String(account.phone).trim())) {
+    if (!returning && !/^[0-9]{10}$/.test(String(account.phone).trim())) {
       logger.error('POST /health-events/:slug/register/volunteer 400 INVALID_ACCOUNT_DATA (phone not 10 digits)');
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
@@ -1202,38 +1207,36 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
 
-    const [emailTaken] = await connection.query('SELECT id FROM user WHERE email = ? LIMIT 1', [email]);
-    if (emailTaken.length) {
-      await connection.rollback();
-      return res.status(409).json({ error: 'EMAIL_TAKEN' });
+    let userId, registrationId, credentials = null;
+    if (returning) {
+      userId = authUser.id;
+      const result = await requestVolunteerRegistration(connection, event.id, userId);
+      registrationId = result.registration_id;
+      email = result.email;
+      if (result.already_registered) {
+        await connection.commit();
+        return res.json({ registration_id: registrationId, credentials, already_registered: true,
+          approval_status: result.approval_status, pending_approval: result.approval_status === 'pending' });
+      }
+    } else {
+      const [emailTaken] = await connection.query('SELECT id FROM user WHERE email = ? LIMIT 1', [email]);
+      if (emailTaken.length) {
+        await connection.rollback();
+        return res.status(409).json({ error: 'EMAIL_TAKEN' });
+      }
+      const username = await generateUniqueUsername(connection, account.firstName, account.lastName);
+      credentials = { username, password: DEFAULT_HEALTH_PASSWORD };
+      userId = await createHealthEventUser(connection, {
+        username, passwordHash: await bcryptjs.hash(credentials.password, 8), email, roleId: 11,
+        firstName: account.firstName, lastName: account.lastName, dateOfBirth: account.dateOfBirth || null,
+        phone: String(account.phone).trim(), zipcode: account.zipcode || null, locationId: event.location_id,
+        uiLanguage: account.uiLanguage, enabled: 'N', resetPassword: 'Y'
+      });
+      const [insert] = await connection.query(
+        `INSERT INTO health_event_registration(health_event_id, user_id, registration_role, status, contact_email, source, submitted_at)
+         VALUES (?,?,'volunteer','pending_activation',?,'web',NOW())`, [event.id, userId, email]);
+      registrationId = insert.insertId;
     }
-
-    const username = await generateUniqueUsername(connection, account.firstName, account.lastName);
-    const password = DEFAULT_HEALTH_PASSWORD;
-    const passwordHash = await bcryptjs.hash(password, 8);
-
-    // Security: self-registered volunteer accounts start DISABLED and cannot
-    // sign in until an admin approves them from the event's Volunteers tab.
-    const userId = await createHealthEventUser(connection, {
-      username,
-      passwordHash,
-      email,
-      roleId: 11,
-      firstName: account.firstName,
-      lastName: account.lastName,
-      dateOfBirth: account.dateOfBirth || null,
-      phone: String(account.phone).trim(),
-      zipcode: account.zipcode || null,
-      locationId: event.location_id,
-      uiLanguage: account.uiLanguage,
-      enabled: 'N',
-      resetPassword: 'Y'
-    });
-
-    const [regInsert] = await connection.query(
-      'INSERT INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, submitted_at) \
-       VALUES (?,?,?,?,?,NOW())', [event.id, userId, 'volunteer', email, 'web']);
-    const registrationId = regInsert.insertId;
 
     await savePrivacyConsent(connection, account.privacyConsent, { userId, registrationId, email });
     await upsertAnswers(connection, registrationId, answers, questionsById, 'web-register');
@@ -1246,14 +1249,13 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     try {
       const emailModule = require('../email/email');
       const language = account.uiLanguage === 'es' ? 'es' : 'en';
-      if (typeof emailModule.sendHealthEventVolunteerCredentials === 'function') {
+      if (credentials && typeof emailModule.sendHealthEventVolunteerCredentials === 'function') {
         emailModule.sendHealthEventVolunteerCredentials({
           to: email,
           language,
           eventNameEn: event.name_en,
           eventNameEs: event.name_es,
-          username,
-          password,
+          ...credentials,
           pendingApproval: true
         }).catch(() => { /* logged inside */ });
       }
@@ -1272,7 +1274,8 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     // Notification to the admin-configured volunteer recipient list (best effort).
     dispatchRegistrationEmails(event, registrationId, 'volunteer');
 
-    res.status(200).json({ registration_id: registrationId, credentials: { username, password }, pending_approval: true });
+    res.status(200).json({ registration_id: registrationId, credentials, already_registered: false,
+      approval_status: 'pending', pending_approval: true });
   } catch (error) {
     if (connection) {
       try { await connection.rollback(); } catch (e) { /* noop */ }
@@ -1280,6 +1283,7 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     if (error && error.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ error: 'DUPLICATE', message: error.message });
     }
+    if (error instanceof VolunteerRegistrationError) return res.status(error.status).json({ error: error.code });
     logger.error('POST /health-events/:slug/register/volunteer error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
   } finally {
@@ -1575,13 +1579,28 @@ router.post('/health-events/:eventId(\\d+)/pin', verifyToken, requireBeneficiary
 // VOLUNTEER CONSOLE ENDPOINTS
 // =====================================================================
 
+// Both the console list and individual operations use the same event approvals.
+const approvedVolunteerEvents = `SELECT r.health_event_id
+  FROM health_event_registration r INNER JOIN user u ON u.id = r.user_id
+  WHERE r.user_id = ? AND r.registration_role = 'volunteer' AND r.status = 'registered'
+    AND u.enabled = 'Y' AND u.deleted = 'N'`;
+
+async function canAccessVolunteerEvent(user, eventId) {
+  if (ADMIN_ROLES.includes(user.role)) return true;
+  const [rows] = await mysqlConnection.promise().query(
+    `${approvedVolunteerEvents} AND r.health_event_id = ? LIMIT 1`, [user.id, eventId]);
+  return rows.length > 0;
+}
+
 router.get('/health-events/volunteer/context', verifyToken, requireVolunteer, async (req, res) => {
   try {
+    const isManager = ADMIN_ROLES.includes(req.currentUser.role);
     const [events] = await mysqlConnection.promise().query(
       `SELECT he.*, l.organization, l.community_city, l.address
        FROM health_event he INNER JOIN location l ON l.id = he.location_id
        WHERE he.enabled = 'Y' AND he.end_date >= (CURDATE() - INTERVAL 7 DAY)
-       ORDER BY he.start_date ASC`);
+       ${isManager ? '' : `AND he.id IN (${approvedVolunteerEvents})`}
+       ORDER BY he.start_date ASC`, isManager ? [] : [req.currentUser.id]);
 
     const eventIds = events.map(e => e.id);
     let stands = [];
@@ -1630,7 +1649,7 @@ router.get('/health-events/volunteer/context', verifyToken, requireVolunteer, as
           }))
         };
       }),
-      active_assignment: assignments.length ? {
+      active_assignment: assignments.length && eventIds.includes(assignments[0].health_event_id) ? {
         id: assignments[0].id,
         event_id: assignments[0].health_event_id,
         stand_id: assignments[0].stand_id,
@@ -1659,6 +1678,9 @@ router.post('/health-events/volunteer/assignment', verifyToken, requireVolunteer
       [standId, eventId]);
     if (!standRows.length) {
       return res.status(404).json({ error: 'STAND_NOT_FOUND' });
+    }
+    if (!(await canAccessVolunteerEvent(req.currentUser, eventId))) {
+      return res.status(403).json({ error: 'FORBIDDEN' });
     }
     if (hasEventEnded({ timezone: standRows[0].event_timezone, end_date: standRows[0].event_end_date })) {
       return res.status(410).json({ error: 'EVENT_ENDED' });
@@ -1728,6 +1750,9 @@ router.post('/health-events/scan', verifyToken, requireVolunteer, async (req, re
       return res.status(404).json({ error: 'STAND_NOT_FOUND' });
     }
     const stand = standRows[0];
+    if (!(await canAccessVolunteerEvent(req.currentUser, eventId))) {
+      return res.status(403).json({ error: 'FORBIDDEN' });
+    }
     if (req.body.event_checkout === true && (stand.is_entry !== 'Y' || !(await canOperateHealthStand(req.currentUser, eventId, standId)))) {
       return res.status(403).json({ error: 'FORBIDDEN' });
     }
@@ -2140,6 +2165,9 @@ router.post('/health-events/scan/:scanId(\\d+)/answers', verifyToken, requireVol
     // Evento terminado: los voluntarios ya no cargan respuestas de checkout;
     // los admins conservan la corrección posterior de datos.
     if (!ADMIN_ROLES.includes(req.currentUser.role)) {
+      if (!(await canAccessVolunteerEvent(req.currentUser, scan.health_event_id))) {
+        return res.status(403).json({ error: 'FORBIDDEN' });
+      }
       const scanEvent = await getEventById(scan.health_event_id);
       if (scanEvent && hasEventEnded(scanEvent)) {
         return res.status(410).json({ error: 'EVENT_ENDED' });
@@ -2221,11 +2249,15 @@ router.get('/health-events/stand/:standId(\\d+)/attending', verifyToken, require
     // lista se vaciaba a las 5 PM de California con gente todavía dentro del puesto, y a
     // la mañana siguiente arrastraba a los asistentes de la noche anterior.
     const [standRows] = await mysqlConnection.promise().query(
-      `SELECT he.timezone AS event_timezone
+      `SELECT he.id AS event_id, he.timezone AS event_timezone
        FROM health_event_stand s
        INNER JOIN health_event he ON he.id = s.health_event_id
        WHERE s.id = ? LIMIT 1`, [standId]);
-    const timezone = (standRows.length && standRows[0].event_timezone) || 'America/Los_Angeles';
+    if (!standRows.length) return res.status(404).json({ error: 'STAND_NOT_FOUND' });
+    if (!(await canAccessVolunteerEvent(req.currentUser, standRows[0].event_id))) {
+      return res.status(403).json({ error: 'FORBIDDEN' });
+    }
+    const timezone = standRows[0].event_timezone || 'America/Los_Angeles';
     const [rows] = await mysqlConnection.promise().query(
       `SELECT s.id AS scan_id, s.scanned_user_id AS user_id, u.firstname, u.lastname,
               s.scanned_at AS checked_in_at, s.service_id, ss.name_en AS service_name_en,
@@ -2257,6 +2289,10 @@ router.get('/health-events/volunteer/recent-scans', verifyToken, requireVoluntee
     if (Number.isInteger(standId)) {
       standFilter = ' AND s.stand_id = ?';
       params.push(standId);
+    }
+    if (!ADMIN_ROLES.includes(req.currentUser.role)) {
+      standFilter += ` AND s.health_event_id IN (${approvedVolunteerEvents})`;
+      params.push(req.currentUser.id);
     }
     params.push(limit);
     const [rows] = await mysqlConnection.promise().query(
@@ -2296,14 +2332,7 @@ async function hasActiveEntryAssignment(userId, eventId) {
  */
 async function canOperateEntryDesk(currentUser, eventId) {
   if (ADMIN_ROLES.includes(currentUser.role)) return true;
-  const [registered] = await mysqlConnection.promise().query(
-    `SELECT r.id
-     FROM health_event_registration r
-     INNER JOIN user u ON u.id = r.user_id
-     WHERE r.health_event_id = ? AND r.user_id = ? AND r.registration_role = 'volunteer'
-       AND r.status = 'registered' AND u.enabled = 'Y' AND u.deleted = 'N'
-     LIMIT 1`, [eventId, currentUser.id]);
-  if (!registered.length) return false;
+  if (!(await canAccessVolunteerEvent(currentUser, eventId))) return false;
   return hasActiveEntryAssignment(currentUser.id, eventId);
 }
 
@@ -3166,6 +3195,9 @@ router.get('/health-events/:id(\\d+)/registrations', verifyToken, requireAdmin, 
        WHERE r.health_event_id = ? AND r.registration_role = ?${searchFilter}
        ORDER BY r.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
 
+    if (role === 'volunteer') {
+      for (const row of rows) row.approval_status = volunteerApprovalStatus(row.status);
+    }
     res.status(200).json({ total: countRows[0].total, page, pageSize, rows });
   } catch (error) {
     logger.error('GET /health-events/:id/registrations error: ' + error.message);
@@ -3298,7 +3330,7 @@ router.get('/health-events/:id(\\d+)/registrations/csv', verifyToken, requireAdm
         checkins: row.checkins || 0
       };
       if (role === 'volunteer') {
-        record.approved = row.user_enabled === 'Y' ? 'Yes' : 'No';
+        record.approved = volunteerApprovalStatus(row.status) === 'approved' ? 'Yes' : 'No';
       }
       const registrationAnswers = answersByRegistration.get(row.registration_id);
       for (const question of questions) {
@@ -3424,11 +3456,10 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
     connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
 
-    const [emailTaken] = await connection.query('SELECT id, role_id, enabled FROM user WHERE email = ? LIMIT 1', [String(email).trim()]);
+    const [emailTaken] = await connection.query('SELECT id, role_id, enabled FROM user WHERE email = ? LIMIT 1 FOR UPDATE', [String(email).trim()]);
     let userId;
     let credentials = null;
-    // Self-registered volunteers stay enabled='N' until approved: the
-    // credentials email must keep saying "pending approval" in that case.
+    // Adding an existing account never changes its credentials or activates it.
     let pendingApproval = false;
     if (emailTaken.length) {
       userId = emailTaken[0].id;
@@ -3454,19 +3485,8 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
     }
 
     const [regResult] = await connection.query(
-      'INSERT IGNORE INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, submitted_at) \
-       VALUES (?,?,?,?,?,NOW())', [id, userId, 'volunteer', String(email).trim(), 'admin']);
-
-    // Existing role-11 user: rotate credentials only when this call actually
-    // attached them to a new event — a duplicate add must not silently break
-    // a password that may already be in use.
-    if (emailTaken.length && emailTaken[0].role_id === 11 && regResult.affectedRows > 0) {
-      const password = DEFAULT_HEALTH_PASSWORD;
-      await connection.query('UPDATE user SET password = ?, reset_password = "Y" WHERE id = ?',
-        [await bcryptjs.hash(password, 8), userId]);
-      const [userRow] = await connection.query('SELECT username FROM user WHERE id = ?', [userId]);
-      credentials = { username: userRow[0].username, password };
-    }
+      `INSERT IGNORE INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, status, submitted_at)
+       VALUES (?,?,?,?,?,?,NOW())`, [id, userId, 'volunteer', String(email).trim(), 'admin', pendingApproval ? 'pending' : 'registered']);
     await connection.commit();
 
     // Best-effort emails after commit: credentials to the volunteer (when fresh
@@ -3505,20 +3525,31 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
   }
 });
 
-router.put('/health-events/volunteers/:userId(\\d+)/approve', verifyToken, requireAdmin, async (req, res) => {
+async function decideVolunteerRegistration(req, res) {
+  let connection;
   try {
-    const userId = Number(req.params.userId);
-    const [result] = await mysqlConnection.promise().query(
-      'UPDATE user SET enabled = "Y" WHERE id = ? AND role_id = 11', [userId]);
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'NOT_FOUND' });
-    }
-    res.status(200).json({ approved: true });
+    connection = await mysqlConnection.promise().getConnection();
+    await connection.beginTransaction();
+    const [[manager]] = await connection.query(
+      `SELECT u.id FROM user u JOIN role r ON r.id = u.role_id WHERE u.id = ?
+         AND u.enabled = 'Y' AND u.deleted = 'N' AND r.name IN ('admin','opsmanager') LOCK IN SHARE MODE`,
+      [req.currentUser.id]);
+    if (!manager) throw new VolunteerRegistrationError('FORBIDDEN', 403);
+    const result = await reviewVolunteerRegistration(connection,
+      req.params.eventId ? Number(req.params.eventId) : null, Number(req.params.userId), req.params.decision !== 'reject');
+    await connection.commit();
+    res.json({ approved: result === 'approved', approval_status: result });
   } catch (error) {
-    logger.error('PUT /health-events/volunteers/:id/approve error: ' + error.message);
+    if (connection) await connection.rollback();
+    if (error instanceof VolunteerRegistrationError) return res.status(error.status).json({ error: error.code });
+    logger.error('Health event volunteer review error: ' + error.message);
     res.status(500).json({ error: 'INTERNAL', message: 'Internal server error' });
+  } finally {
+    if (connection) connection.release();
   }
-});
+}
+router.put('/health-events/:eventId(\\d+)/volunteers/:userId(\\d+)/:decision(approve|reject)', verifyToken, requireAdmin, decideVolunteerRegistration);
+router.put('/health-events/volunteers/:userId(\\d+)/approve', verifyToken, requireAdmin, decideVolunteerRegistration);
 
 /**
  * Shared reset: sets the account back to the default health-event password and

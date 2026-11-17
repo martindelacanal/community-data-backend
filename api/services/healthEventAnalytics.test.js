@@ -568,6 +568,7 @@ test('volunteers export lists registered volunteers who never scanned, and scann
   assert.equal(volTwo['Total scans'], 3);
   assert.equal(volTwo['People scanned (unique)'], 2);
   assert.equal(volTwo['Account approved'], 'No');
+  assert.equal(volTwo['Approved for this clinic'], 'Yes');
   assert.equal(volTwo['Scans · Dental'], 3);
   assert.equal(volTwo['Scans · Resource Table · IHSS'], 0);
 

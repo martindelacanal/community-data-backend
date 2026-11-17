@@ -5,7 +5,9 @@ const { once } = require('node:events');
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { createPasswordRecoveryHandler } = require('./passwordRecovery');
+const { createStaffPasswordRecoveryRouter } = require('./staffPasswordRecovery');
 const { createStaffPasswordRecovery } = require('../services/staffPasswordRecovery');
+const { buildStaffPasswordRecoveryEmail } = require('../email/staffPasswordRecovery');
 
 const account = {
   id: 12, email: 'person@example.test', username: 'participant12', phone: '9515550123',
@@ -47,6 +49,8 @@ async function fixture(t, users = [account], options = {}) {
       if (sql.startsWith('SELECT') && sql.includes('TRIM(u.email)')) {
         assert.match(sql, /u.enabled = 'Y' AND u.deleted = 'N'/);
         assert.match(sql, /r.name IN/);
+        assert.match(sql, /'eventvolunteer'/);
+        assert.doesNotMatch(sql, /date_of_birth/);
         return [users.filter(user => active(user) && user.role !== 'beneficiary'
           && [user.email, user.username].some(value => value?.trim().toLowerCase() === params[0].toLowerCase()))
           .slice(0, 2).map(user => ({ ...user }))];
@@ -79,6 +83,7 @@ async function fixture(t, users = [account], options = {}) {
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json());
+  app.use('/api/auth/password-reset', createStaffPasswordRecoveryRouter({ service: staffRecovery, logger }));
   app.put('/api/beneficiary/reset-password', createPasswordRecoveryHandler({ pool,
     bcrypt: { async hash(...args) { hashCalls.push(args); return bcrypt.hash(...args); } }, logger,
     staffRecovery, clock: () => now, perIp: options.perIp ?? 30, globalLimit: options.globalLimit ?? 100 }));
@@ -87,6 +92,12 @@ async function fixture(t, users = [account], options = {}) {
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
   return {
     calls, writes, logs, messages, hashCalls, staffRecovery, lastHeaders, advance: ms => { now += ms; },
+    async postEmailRecovery(operation, body) {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/api/auth/password-reset/${operation}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      return { status: response.status, data: await response.json() };
+    },
     async reset(body = { email: account.email, dateOfBirth: account.dateOfBirth }, ip) {
       const response = await fetch(`http://127.0.0.1:${server.address().port}/api/beneficiary/reset-password`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json', ...(ip ? { 'X-Forwarded-For': ip } : {}) }, body: JSON.stringify(body),
@@ -97,6 +108,41 @@ async function fixture(t, users = [account], options = {}) {
     }
   };
 }
+
+test('an approved event volunteer without a birth date can choose a password through the emailed link', async t => {
+  const volunteer = { ...account, role: 'eventvolunteer', dateOfBirth: null };
+  const f = await fixture(t, [volunteer]);
+  const requested = await f.postEmailRecovery('request', { identifier: volunteer.email, language: 'en' });
+  assert.deepEqual(requested, { status: 202, data: { status: 'accepted' } });
+  await f.staffRecovery.waitForIdle();
+  assert.equal(f.messages.length, 1);
+  const mail = buildStaffPasswordRecoveryEmail(f.messages[0]);
+  assert.equal(mail.to, volunteer.email);
+  assert.equal(f.writes.length, 0);
+  const link = new URL(mail.text.match(/https:\/\/\S+/)[0]);
+  assert.equal(link.origin + link.pathname, 'https://api.bienestarcommunity.org/api/auth/password-reset/open');
+  const token = new URLSearchParams(link.hash.slice(1)).get('token');
+  const password = 'chosen volunteer password';
+  assert.deepEqual(await f.postEmailRecovery('complete', { token, password }), {
+    status: 200, data: { status: 'password_changed', username: volunteer.username }
+  });
+  assert.ok(await bcrypt.compare(password, volunteer.password));
+  assert.equal(volunteer.reset_password, 'N');
+  assert.equal((await f.postEmailRecovery('complete', { token, password })).status, 400);
+  assert.equal(f.writes.length, 1);
+});
+
+test('email recovery leaves volunteers waiting for approval disabled', async t => {
+  const pending = { ...account, role: 'eventvolunteer', enabled: 'N' };
+  const f = await fixture(t, [pending]);
+  assert.deepEqual(await f.postEmailRecovery('request', { identifier: pending.email }), {
+    status: 202, data: { status: 'accepted' }
+  });
+  await f.staffRecovery.waitForIdle();
+  assert.equal(f.messages.length, 0);
+  assert.equal(f.writes.length, 0);
+  assert.equal(pending.enabled, 'N');
+});
 
 test('legacy mobile payload keeps its password response and marks the account for password change', async t => {
   const f = await fixture(t);
