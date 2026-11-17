@@ -56,14 +56,14 @@ function confidentChoice(answers, name, minConfidence = 0.8) {
 }
 
 // Several candidate actions can share the same safe next step.
-function sharedSourceConfidence(answers, ...choices) {
+function sharedSourceConfidence(answers, choices, minimum = 0.9) {
   const top = confidentChoice(answers, 'source', 0.45);
   if (!choices.includes(top)) return false;
   const probabilities = answers.source.probabilities;
   const scores = choices.map(choice => probabilities?.[choice]);
   if (!scores.every(p => Number.isFinite(p) && p >= 0 && p <= 1)) return false;
   const sum = scores.reduce((total, p) => total + p, 0);
-  return sum >= 0.9 && sum <= 1.000001;
+  return sum >= minimum && sum <= 1.000001;
 }
 
 function createDecisionRouter(http, apiKey) {
@@ -90,7 +90,7 @@ function createDecisionRouter(http, apiKey) {
     if (!policy || !language) return { inputTokens };
     const data = { allowed: policy === 'allowed', medicalEmergency: policy === 'emergency', clarify: policy === 'clarify', language };
     if (policy === 'social') {
-      const social = confidentChoice(answers, 'source') || (sharedSourceConfidence(answers, 'thanks', 'goodbye') && answers.source.choice);
+      const social = confidentChoice(answers, 'source') || (sharedSourceConfidence(answers, ['thanks', 'goodbye']) && answers.source.choice);
       if (!confidentChoice(answers, 'policy', 0.9) || (social !== 'thanks' && social !== 'goodbye')) return { inputTokens };
       return { inputTokens, data:{...data, allowed:true, social}, enrich:false };
     }
@@ -101,12 +101,12 @@ function createDecisionRouter(http, apiKey) {
       return { inputTokens, data:{...data, allowed:false, clarify:true}, enrich:false };
     }
     const sections = ['calendar','articles','resources'];
-    if (!source) source = sections.find(section => sharedSourceConfidence(answers, section, 'open_' + section));
+    if (!source) source = sections.find(section => sharedSourceConfidence(answers, [section, 'open_' + section]));
     // Both the calendar and directory need the user's city for a "near me" request.
     // On a first turn with no known location, resolving that question can precede source selection.
     if (!source && !input.history.length && nearbyIntent(input.question) &&
         confidentChoice(answers, 'locality', 0.9) === 'nearby' &&
-        sharedSourceConfidence(answers, 'calendar', 'open_calendar', 'resources', 'open_resources')) {
+        sharedSourceConfidence(answers, ['calendar', 'open_calendar', 'resources', 'open_resources'], 0.8)) {
       return { inputTokens, data:{...data, needsLocality:true}, enrich:false };
     }
     if (!source || ['other','thanks','goodbye','clarify'].includes(source)) return { inputTokens };
