@@ -1,9 +1,12 @@
 'use strict';
 const express = require('express');
+const { publicHomeHealthEvents } = require('../services/healthEventPublicHome');
 const jwt = require('jsonwebtoken');
 const crypto = require('node:crypto');
 const multer = require('multer');
 const ipaddr = require('ipaddr.js');
+const { isSiteHelpCitation } = require('../services/chatbotSiteHelp');
+const { createProviderUsage } = require('../services/chatbotProviderUsage');
 const { MAX_SOURCES, MAX_TOTAL_CHUNKS, MAX_SOURCE_CHUNKS, MAX_CONCURRENT_IMPORTS, MAX_SYSTEM_PROMPT_CHARS,
   DEFAULT_PUBLIC_DAILY_MESSAGE_LIMIT, MAX_PUBLIC_DAILY_MESSAGE_LIMIT,
   PUBLIC_DAILY_MESSAGES_PER_IP, PUBLIC_DAILY_CONVERSATIONS_PER_IP } = require('../services/chatbotLimits');
@@ -91,13 +94,19 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
       [actor?.id||null,actor?.role||'public',action,entityId||null,requestId,JSON.stringify(details)]);
   }
   async function citationsCurrent(sources) {
-    const groups={source:[],article:[],resource:[],calendar:[]};
+    const groups={source:[],article:[],resource:[],calendar:[],healthEvent:[]};
     for(const source of sources){
       const match=/^(source):([0-9a-f-]{36}):(\d+)$/.exec(source.id);
       if(match){groups.source.push({id:source.id,chunkId:Number(match[3])});continue;}
       const internal=/^(article|resource|calendar):(\d+)(?::\d+)?$/.exec(source.id);
       if(internal){groups[internal[1]].push(Number(internal[2]));continue;}
-      if(!['calendar:current','navigation:resources','navigation:articles'].includes(source.id))return false;
+      if (/^health-event:\d+$/.test(source.id)) { groups.healthEvent.push(source); continue; }
+      if (source.id==='navigation:health-events' && source.url==='/home' || source.id==='navigation:impact' && source.url==='/who-we-are') continue;
+      if(!['calendar:current','navigation:resources','navigation:articles'].includes(source.id) && !isSiteHelpCitation(source))return false;
+    }
+    if (groups.healthEvent.length) {
+      const published = await publicHomeHealthEvents(db);
+      if (!groups.healthEvent.every(s=>published.some(e=>s.id==='health-event:'+e.id && s.url==='/health-event/'+encodeURIComponent(e.slug)))) return false;
     }
     if(groups.source.length){
       const [rows]=await db.query("SELECT CONCAT('source:',s.id,':',c.id) AS id FROM chatbot_chunk c JOIN chatbot_source s ON s.id=c.source_id WHERE c.id IN (?) AND s.enabled=1 AND s.status='ready'",[groups.source.map(s=>s.chunkId)]);
@@ -249,10 +258,11 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
       if(raced)return replay(raced);
       acquired=true;
       const [history]=await db.query('SELECT role,content FROM chatbot_message WHERE conversation_id=? AND id<>? AND status NOT IN (\'error\',\'processing\') ORDER BY sequence DESC LIMIT 6',[conversation.id,userMessageId]);
+      const providerUsage=createProviderUsage();
       let reply,errorCode=null;
       try {
-        reply=await ai.answer({question,locale,previousLocale,systemPrompt:configuration.system_prompt,history:history.reverse(),
-          retrieve:args=>getKnowledge().retrieveContext({...args,db,env})});
+        reply=await ai.answer({question,locale,previousLocale,systemPrompt:configuration.system_prompt,history:history.reverse(),providerUsage,
+          retrieve:args=>getKnowledge().retrieveContext({...args,db,env,providerUsage})});
       } catch(error) {
         errorCode=error instanceof ChatbotError?error.code:'chatbot_unavailable';
         logger?.warn?.('Chatbot answer failed',{code:errorCode,requestId});
@@ -271,7 +281,7 @@ function createChatbotRouter({pool,env=process.env,service,knowledge,logger,limi
         await connection.query(`INSERT INTO chatbot_message(id,conversation_id,role,content,sources,status,model,input_tokens,output_tokens,latency_ms,error_code,request_id,settings_revision)
           VALUES(?,?,'assistant',?,?,?,?,?,?,?,?,?,?)`,[assistantMessageId,conversation.id,reply.content,JSON.stringify(reply.sources),reply.status,reply.model,reply.inputTokens||0,reply.outputTokens||0,Date.now()-started,errorCode,requestId,configuration.revision]);
         await connection.query('UPDATE chatbot_conversation SET message_count=message_count+1,preview=?,locale=?,processing_token=NULL,processing_until=NULL WHERE id=? AND processing_token=?',[reply.content.slice(0,300),replyLocale,conversation.id,processingToken]);
-        await audit(actor,'message_answered',conversation.id,{status:reply.status,locale:replyLocale,model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens,citationIds:reply.citationIds||[],errorCode},connection,requestId);
+        await audit(actor,'message_answered',conversation.id,{status:reply.status,locale:replyLocale,model:reply.model,inputTokens:reply.inputTokens,outputTokens:reply.outputTokens,citationIds:reply.citationIds||[],errorCode,providerUsage},connection,requestId);
       });
       completed=true;
       const [messages]=await db.query('SELECT * FROM chatbot_message WHERE id IN (?,?)',[userMessageId,assistantMessageId]);
