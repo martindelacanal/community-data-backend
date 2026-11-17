@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Your reservation · Bienestar Community</title>
+  <style>
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: #f2f9f9; color: #283c3c; font: 1rem/1.55 system-ui, sans-serif; }
+    main { margin: clamp(1rem, 7vh, 5rem) auto; width: min(38rem, calc(100% - 2rem)); background: white; border: 1px solid #cce1e1; border-radius: 1rem; overflow: hidden; }
+    header { padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex-wrap: wrap; background: #d1f8f8; }
+    header strong { font-size: 1.05rem; color: #184a51; }
+    article { padding: clamp(1rem, 5vw, 2rem); }
+    h1, h2, h3, p { margin: 0 0 .8rem; }
+    h1 { font-size: clamp(1.65rem, 6vw, 2.25rem); line-height: 1.2; }
+    h2 { margin-top: 1.3rem; font-size: 1.3rem; }
+    h3 { font-size: 1.05rem; }
+    dl { margin: 1rem 0; }
+    dt { margin-top: .8rem; font-weight: 650; }
+    dd, ul { margin: .1rem 0; }
+    ul { padding-left: 1.25rem; }
+    dt, dd, h2, footer { overflow-wrap: anywhere; }
+    button { cursor: pointer; border: 1px solid #486c70; border-radius: .55rem; padding: .65rem 1rem; font: inherit; font-weight: 600; color: #214f56; background: white; }
+    button:focus-visible, a:focus-visible { outline: 3px solid #006a83; outline-offset: 3px; }
+    button:disabled { cursor: wait; opacity: .65; }
+    header button { border: 0; background: transparent; padding: .5rem; text-decoration: underline; }
+    #question { padding: 1rem; background: #fdf4f7; border-radius: .7rem; }
+    #question button { margin: .25rem .25rem 0 0; }
+    #confirm { background: #a82457; border-color: #a82457; color: white; }
+    #actions { margin-top: 1.5rem; }
+    footer { border-top: 1px solid #dce9e9; margin-top: 1.75rem; padding-top: 1rem; font-size: .9rem; }
+    a { color: #175d6b; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><strong>Bienestar Community</strong><button id="language" type="button">Español</button></header>
+    <article>
+      <h1 id="title">Your reservation</h1>
+      <p id="status" role="status"></p>
+      <button id="retry" type="button" hidden></button>
+      <section id="details" hidden>
+        <h2 id="event"></h2>
+        <dl id="facts"></dl>
+        <section id="slots" hidden><h3 id="slots-title"></h3><ul id="slot-list"></ul></section>
+      </section>
+      <section id="actions" hidden>
+        <button id="cancel" type="button"></button>
+        <div id="question" hidden>
+          <h3 id="question-title" tabindex="-1"></h3><p id="warning"></p>
+          <button id="keep" type="button"></button><button id="confirm" type="button"></button>
+        </div>
+      </section>
+      <footer><span id="help"></span> <a href="mailto:community@bienestariswellbeing.org">community@bienestariswellbeing.org</a></footer>
+      <noscript>Enable JavaScript to view your reservation. / Activa JavaScript para ver tu reserva.</noscript>
+    </article>
+  </main>
+  <script>
+    (() => {
+      'use strict';
+      const token = location.hash.slice(1);
+      const preference = new URLSearchParams(location.search).get('lang') || navigator.language;
+      let lang = preference.startsWith('es') ? 'es' : 'en';
+      // The private link is only used in request bodies. Reopening the email restores it.
+      history.replaceState(history.state, '', location.pathname + location.search);
+      window.addEventListener('hashchange', () => { if (location.hash) location.reload(); });
+      const copy = {
+        en: {
+          title: 'Your reservation', loading: 'Loading your reservation…', active: 'Your registration is confirmed.',
+          closed: 'Your registration is confirmed. Contact the clinic if you need to make a change.',
+          cancelled: 'Your reservation has been cancelled.', invalid: 'Open the link in your most recent confirmation email to view your reservation.',
+          failed: 'We could not check the current status of your reservation.', retry: 'Check again', busy: 'Cancelling your reservation…',
+          participant: 'Participant', dates: 'Dates', address: 'Location', slots: 'Your appointments', timezone: 'Clinic time zone',
+          cancel: 'Cancel reservation', question: 'Cancel this reservation?', warning: 'Cancelling releases all appointments on this registration.',
+          keep: 'Keep reservation', confirm: 'Yes, cancel reservation', help: 'Need help?', dental: 'Dental', vision: 'Vision'
+        },
+        es: {
+          title: 'Tu reserva', loading: 'Cargando tu reserva…', active: 'Tu inscripción está confirmada.',
+          closed: 'Tu inscripción está confirmada. Si necesitas hacer un cambio, comunícate con la clínica.',
+          cancelled: 'Tu reserva está cancelada.', invalid: 'Abre el enlace de tu correo de confirmación más reciente para consultar tu reserva.',
+          failed: 'No pudimos comprobar el estado actual de tu reserva.', retry: 'Volver a consultar', busy: 'Cancelando tu reserva…',
+          participant: 'Participante', dates: 'Fechas', address: 'Lugar', slots: 'Tus turnos', timezone: 'Zona horaria de la clínica',
+          cancel: 'Cancelar reserva', question: '¿Quieres cancelar esta reserva?', warning: 'Al cancelar, se liberan todos los turnos de esta inscripción.',
+          keep: 'Conservar reserva', confirm: 'Sí, cancelar reserva', help: '¿Necesitas ayuda?', dental: 'Dental', vision: 'Visión'
+        }
+      };
+      const el = id => document.getElementById(id);
+      let reservation = null;
+      let state = 'loading';
+      let asking = false;
+      let busy = false;
+
+      function formatDate(day) {
+        return new Intl.DateTimeFormat(lang, { dateStyle: 'long', timeZone: 'UTC' }).format(new Date(day + 'T12:00:00Z'));
+      }
+      function formatTime(time) {
+        return time ? time.slice(0, 5) : '';
+      }
+      function addFact(label, value) {
+        if (!value) return;
+        const term = document.createElement('dt');
+        const detail = document.createElement('dd');
+        term.textContent = label;
+        detail.textContent = value;
+        el('facts').append(term, detail);
+      }
+      function render() {
+        const t = copy[lang];
+        document.documentElement.lang = lang;
+        document.title = t.title + ' · Bienestar Community';
+        el('title').textContent = t.title;
+        el('language').textContent = lang === 'es' ? 'English' : 'Español';
+        el('language').lang = lang === 'es' ? 'en' : 'es';
+        el('help').textContent = t.help;
+        el('status').textContent = t[state];
+        el('retry').hidden = state !== 'failed';
+        el('retry').textContent = t.retry;
+        el('details').hidden = !reservation;
+        el('actions').hidden = !reservation?.can_cancel || (state !== 'active' && state !== 'busy');
+        el('cancel').hidden = asking;
+        el('question').hidden = !asking;
+        el('cancel').textContent = t.cancel;
+        el('question-title').textContent = t.question;
+        el('warning').textContent = t.warning;
+        el('keep').textContent = t.keep;
+        el('confirm').textContent = t.confirm;
+        el('keep').disabled = el('confirm').disabled = busy;
+        if (!reservation) return;
+        const { event, participant_firstname, dates, appointments } = reservation;
+        el('event').textContent = event['name_' + lang] || event.name_en || event.name_es;
+        el('facts').replaceChildren();
+        addFact(t.participant, participant_firstname);
+        const days = dates.length ? dates.map(d => d.event_date) : [event.start_date, event.end_date];
+        addFact(t.dates, [...new Set(days.filter(Boolean))].map(formatDate).join(dates.length ? ' · ' : ' – '));
+        addFact(t.address, event.address);
+        addFact(t.timezone, appointments.length ? event.timezone : '');
+        el('slots-title').textContent = t.slots;
+        el('slots').hidden = !appointments.length || state === 'cancelled';
+        el('slot-list').replaceChildren();
+        for (const slot of appointments) {
+          const item = document.createElement('li');
+          const service = ['dental', 'vision'].includes(slot.service_key) ? t[slot.service_key] : slot.service_key;
+          const time = [formatTime(slot.start_time), formatTime(slot.end_time)].filter(Boolean).join(' – ');
+          item.textContent = [service, formatDate(slot.slot_date), time].filter(Boolean).join(' · ');
+          el('slot-list').append(item);
+        }
+      }
+      async function request(action) {
+        if (busy) return;
+        if (!token) { state = 'invalid'; render(); return; }
+        busy = true;
+        state = action === 'cancel' ? 'busy' : 'loading';
+        render();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30000);
+        try {
+          const response = await fetch('./' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            credentials: 'omit', cache: 'no-store', body: JSON.stringify({token}), signal: controller.signal });
+          if (response.ok) {
+            reservation = await response.json();
+            state = reservation.status === 'cancelled' ? 'cancelled' : reservation.can_cancel ? 'active' : 'closed';
+          } else if (action === 'cancel' && response.status === 409) {
+            reservation.can_cancel = false;
+            state = 'closed';
+          } else {
+            reservation = null;
+            state = response.status === 404 || response.status === 400 ? 'invalid' : 'failed';
+          }
+        } catch {
+          reservation = null;
+          state = 'failed';
+        } finally {
+          clearTimeout(timer);
+          busy = asking = false;
+          render();
+        }
+      }
+      el('language').onclick = () => { lang = lang === 'es' ? 'en' : 'es'; render(); };
+      el('retry').onclick = () => request('view');
+      el('cancel').onclick = () => { asking = true; render(); el('question-title').focus(); };
+      el('keep').onclick = () => { asking = false; render(); el('cancel').focus(); };
+      el('confirm').onclick = () => { if (asking) request('cancel'); };
+      request('view');
+    })();
+  </script>
+</body>
+</html>

@@ -1183,14 +1183,23 @@ function formatHealthEventDate(dateStr, language) {
     : m.locale('en').format('dddd, MMMM D, YYYY');
 }
 
+function healthAppointmentLines(appointments, language) {
+  return (appointments || []).map(a => {
+    const rawKey = String(a.service_key || '');
+    const service = rawKey ? rawKey.charAt(0).toUpperCase() + rawKey.slice(1) : '';
+    return `${service} · ${formatHealthEventDate(a.slot_date, language)} · ${a.start_time}`;
+  });
+}
+
 function buildHealthBeneficiaryConfirmationContent({
   language, eventNameEn, eventNameEs, firstname,
   locationName, address, startTime, endTime,
-  eventStartDate, eventEndDate, dates = [], appointments = [], credentials = null
+  eventStartDate, eventEndDate, dates = [], appointments = [], credentials = null, manageUrl = null
 }) {
   {
     const lang = language === 'es' ? 'es' : 'en';
     const t = HEALTH_BENEFICIARY_CONFIRMATION_I18N[lang];
+    const manageLabel = lang === 'es' ? 'Ver o cancelar mi reserva' : 'View or cancel my reservation';
     const B = VOLUNTEER_NOTIFICATION_BRAND;
     const eventName = lang === 'es' ? (eventNameEs || eventNameEn) : (eventNameEn || eventNameEs);
 
@@ -1205,11 +1214,7 @@ function buildHealthBeneficiaryConfirmationContent({
           .filter((v, i, arr) => v && arr.indexOf(v) === i).join(' — ') ].filter(Boolean);
     const timeLine = startTime && endTime ? `${startTime} — ${endTime}` : (startTime || endTime || null);
     // service_key is a machine key ('dental', 'vision'); capitalize for the registrant-facing email.
-    const appointmentLines = (appointments || []).map(a => {
-      const rawKey = String(a.service_key || '');
-      const service = rawKey ? rawKey.charAt(0).toUpperCase() + rawKey.slice(1) : '';
-      return `${service} · ${formatHealthEventDate(a.slot_date, lang)} · ${a.start_time}`;
-    });
+    const appointmentLines = healthAppointmentLines(appointments, lang);
 
     const detailRow = (label, valueHtml) => `
       <tr>
@@ -1239,6 +1244,7 @@ function buildHealthBeneficiaryConfirmationContent({
           </td>
         </tr>
       </table>
+      ${manageUrl ? `<p style="margin:0 0 20px;"><a style="font-weight:700;color:#145a64;" href="${escapeHtmlValue(manageUrl)}">${manageLabel}</a></p>` : ''}
       <p style="margin:0 0 4px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;">${escapeHtmlValue(t.qrHint)}</p>
       <p style="margin:0 0 4px 0;font-family:'Quicksand',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.7;color:#5c6a6a;font-weight:600;">${escapeHtmlValue(t.familyHint)}</p>
       ${credentials && credentials.username && credentials.password ? `
@@ -1273,6 +1279,7 @@ function buildHealthBeneficiaryConfirmationContent({
     if (dateLines.length) text += `${t.datesLabel}: ${dateLines.join(' | ')}\n`;
     if (timeLine) text += `${t.timeLabel}: ${timeLine}\n`;
     if (appointmentLines.length) text += `${t.appointmentsLabel}: ${appointmentLines.join(' | ')}\n`;
+    if (manageUrl) text += `\n${manageLabel}: ${manageUrl}\n`;
     text += `\n${t.qrHint}\n`;
     text += `\n${t.familyHint}\n`;
     if (credentials && credentials.username && credentials.password) {
@@ -1291,19 +1298,13 @@ function buildHealthBeneficiaryConfirmationContent({
  * details, the chosen dates/appointments and the app download invitation.
  */
 async function sendHealthEventBeneficiaryConfirmation(params) {
-  try {
-    if (!params || !params.to) return;
-    const { subject, html, text } = buildHealthBeneficiaryConfirmationContent(params);
-    await transporter.sendMail({
-      from: 'bienestarcommunity@gmail.com',
-      to: params.to,
-      subject,
-      text,
-      html
-    });
-  } catch (error) {
-    console.log('Error sending health event beneficiary confirmation email:', error);
-  }
+  const { subject, html, text } = buildHealthBeneficiaryConfirmationContent(params);
+  return transporter.sendMail({
+    from: 'bienestarcommunity@gmail.com',
+    to: params.to,
+    messageId: params.messageId,
+    subject, html, text
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,6 +1564,27 @@ module.exports.buildAppDownloadSectionHtml = buildAppDownloadSectionHtml;
 module.exports.buildVolunteerConfirmationContent = buildVolunteerConfirmationContent;
 
 module.exports.sendAlertEmail = sendAlertEmail;
+
+module.exports.sendHealthEventParticipantEmail = function sendHealthEventParticipantEmail({ to, subject, message, reservations }) {
+  const html = [`<p>${escapeHtmlValue(message).replace(/\r\n|\r|\n/g, '<br>')}</p>`];
+  const text = [message];
+  for (const reservation of reservations) {
+    const { language, manageUrl } = reservation;
+    const title = [reservation.firstname, reservation.eventName].filter(Boolean).join(' · ');
+    const label = language === 'es' ? 'Ver o cancelar mi reserva' : 'View or cancel my reservation';
+    const schedule = healthAppointmentLines(reservation.appointments, language);
+    const lines = [title, ...schedule];
+    text.push([...lines, label, manageUrl].join('\n'));
+    html.push(`<p lang="${language}">${lines.map(escapeHtmlValue).join('<br>')}<br><a href="${escapeHtmlValue(manageUrl)}">${label}</a></p>`);
+  }
+  return transporter.sendMail({
+    from: 'bienestarcommunity@gmail.com',
+    to: { address: to, name: '' },
+    subject,
+    text: text.join('\n\n'),
+    html: html.join('\n')
+  });
+};
 
 module.exports.sendStaffPasswordRecoveryEmail = async function sendStaffPasswordRecoveryEmail(data) {
   const { buildStaffPasswordRecoveryEmail } = require('./staffPasswordRecovery');

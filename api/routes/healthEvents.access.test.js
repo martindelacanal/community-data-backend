@@ -18,6 +18,8 @@ const adminRoutes = [
   ['get', '/health-events'], ['post', '/health-events'],
   ['put', eventPath], ['get', `${eventPath}/full`], ['put', `${eventPath}/landing`],
   ['post', `${eventPath}/duplicate`],
+  ['get', `${eventPath}/participant-emails/audience`], ['post', `${eventPath}/participant-emails`],
+  ['get', `${eventPath}/participant-emails/latest`], ['get', `${eventPath}/participant-emails/:jobId(\\\\d+)`],
 ];
 
 function functionSource(name) {
@@ -167,7 +169,9 @@ test('Admin and Ops Manager can create, list, inspect, edit and save a health-ev
 test('Non-managers and unauthenticated users cannot read or mutate health-event management routes', async t => {
   const f = await fixture(t);
   const paths = [['get', '/health-events'], ['post', '/health-events'], ['put', '/health-events/1'],
-    ['get', '/health-events/1/full'], ['put', '/health-events/1/landing'], ['post', '/health-events/1/duplicate']];
+    ['get', '/health-events/1/full'], ['put', '/health-events/1/landing'], ['post', '/health-events/1/duplicate'],
+    ['get', '/health-events/1/participant-emails/audience'], ['post', '/health-events/1/participant-emails'],
+    ['get', '/health-events/1/participant-emails/latest'], ['get', '/health-events/1/participant-emails/25']];
   for (const role of [undefined, 'beneficiary', 'eventvolunteer', 'delivery', 'stocker', 'client', 'contentmanager', 'auditor', 'director']) {
     for (const [method, route] of paths) {
       const response = await f.request(method, route, { role, body: method === 'get' ? undefined : eventBody() });
