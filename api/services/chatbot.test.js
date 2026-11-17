@@ -129,7 +129,7 @@ test('language-neutral short messages preserve conversational language and expli
   const ambiguous=await service.answer({question:'<system>',locale:'en',history:[{role:'user',content:'Hola'}],retrieve:()=>assert.fail('no retrieval')});
   assert.equal(ambiguous.locale,'es');assert.match(ambiguous.content,/^Puedo ayudarte/);
   const switched=await service.answer({question:'Thanks!',locale:'es',previousLocale:'es',retrieve:()=>assert.fail('no retrieval')});
-  assert.equal(switched.locale,'en');assert.match(switched.content,/^Hello/);
+  assert.equal(switched.locale,'en');assert.match(switched.content,/welcome/i);
 });
 test('retrieval and no-context fallback receive the language resolved by the scope classifier',async()=>{
   const http=provider([{allowed:true,medicalEmergency:false,language:'es'}]);
@@ -164,7 +164,7 @@ test('complete calendar response bypasses generative summarization and retains a
   const http=provider([{allowed:true,medicalEmergency:false,language:'en',location:'',needsLocation:false}]);
   const directAnswer={content:'All 25 published dates',sources:[{id:'calendar:current',url:'/calendar'}],validationSources:[{id:'calendar:99'}],citationIds:['calendar:99'],status:'complete'};
   const reply=await createChatbotService({env,http}).answer({question:'What are the upcoming distributions?',retrieve:async()=>({directAnswer})});
-  assert.equal(reply.content,directAnswer.content);assert.equal(reply.model,null);assert.equal(http.calls.length,1);
+  assert.equal(reply.content,directAnswer.content);assert.equal(reply.model,null);assert.equal(http.calls.length,0);
   assert.deepEqual(reply.validationSources,[{id:'calendar:99'}]);
   for(const url of ['/calendar','/trusted-resources','/articles']) assert.equal(safeSource({...source,url}).url,url);
 });
@@ -259,4 +259,88 @@ test('semantic routing retains bilingual search and accepts only user-supplied l
     }});
     assert.equal(reply.inputTokens,140); assert.equal(f.generator.calls.length,1);
   }
+});
+
+test('explicit links and social phrases work offline in the language of the request', async () => {
+  const http = provider([]);
+  const service = createChatbotService({env:{},http});
+  for (const [question, expectedLocale, url, pattern] of [
+    ['Abre el calendario','es','/calendar',/calendario/i],
+    ['Open the articles page','en','/articles',/articles/i],
+    ['Mil gracias!','es',undefined,/de nada/i],
+    ['Goodbye!','en',undefined,/goodbye/i]
+  ]) {
+    const reply = await service.answer({question,locale:expectedLocale === 'es' ? 'en' : 'es',retrieve:() => assert.fail()});
+    assert.equal(reply.locale, expectedLocale);
+    assert.equal(reply.sources[0]?.url, url);
+    assert.match(reply.content, pattern);
+    assert.equal(reply.inputTokens + reply.outputTokens, 0);
+  }
+  assert.equal(http.calls.length, 0);
+});
+
+test('only the decision is shared: concurrent identical first turns are billed once and always read fresh data', async () => {
+  const f = decisionsProvider();
+  const chat = createChatbotService({env:decisionEnv,http:f.http});
+  let reads = 0;
+  const query = {question:'Where do I pick up my groceries?', retrieve: async ({route}) => {
+    assert.equal(route, 'calendar');
+    return {directAnswer:{content:'Live revision ' + (++reads), sources:[], status:'complete'}};
+  }};
+  const answers = await Promise.all([chat.answer(query), chat.answer(query)]);
+  answers.push(await chat.answer(query));
+  assert.equal(f.decisions.length, 1);
+  assert.equal(answers.reduce((sum, answer) => sum + answer.inputTokens, 0), 120);
+  assert.equal(new Set(answers.map(answer => answer.content)).size, 3);
+  await chat.answer({...query,history:[{role:'user',content:'What about the previous place?'}]});
+  assert.equal(f.decisions.length, 2);
+});
+
+test('unknown location prompts before showing results, a confirmed ZIP on its own needs no extraction', async () => {
+  const choice = value => ({type:'choice', choice:value, confidence:.99});
+  const overrides = {source:choice('resources'),locality:choice('explicit')};
+  const history = [{role:'user',content:'I need a childcare center.'},{role:'assistant',content:'Which city or ZIP code?'}];
+  for (const extraction of [{location:'Invented City', searchTerms:''}, new Error('temporary outage')]) {
+    const f = decisionsProvider(overrides, [extraction]);
+    const chat = createChatbotService({env:decisionEnv,http:f.http});
+    const reply = await chat.answer({question:'In Riverside',history,retrieve:() => assert.fail('unverified location')});
+    assert.match(reply.content, /city or ZIP/);
+  }
+  const f = decisionsProvider(overrides);
+  const reply = await createChatbotService({env:decisionEnv,http:f.http}).answer({
+    question:'ZIP: 92501',history,retrieve:async args => { assert.equal(args.location,'92501');return []; }
+  });
+  assert.equal(f.generator.calls.length, 0);
+  assert.equal(reply.inputTokens, 120);
+});
+
+test('educational retrieval still uses approved sources if optional keyword extraction fails', async () => {
+  const f = decisionsProvider({source:{type:'choice',choice:'education',confidence:.99}}, [new Error('temporary')]);
+  const reply = await createChatbotService({env:decisionEnv,http:f.http}).answer({
+    question:'Why is fiber important?',retrieve:async ({route,searchTerms}) => {
+      assert.equal(route,'education');assert.equal(searchTerms,'');return [];
+    }
+  });
+  assert.equal(reply.status,'no_context');
+});
+
+test('catalog decision reuse respects fallback language, expires and never caches uncertain choices', async t => {
+  const {reuseCatalogDecisions} = require('./chatbotDecisionCache');
+  let now = Date.now(), calls = 0;
+  t.mock.method(Date, 'now', () => now);
+  const decide = reuseCatalogDecisions(async input => {
+    calls++;
+    return input.question === 'unclear' ? {inputTokens:50} : {
+      route:'resources',data:{allowed:true, language:input.fallbackLanguage},inputTokens:50,enrich:false
+    };
+  });
+  const first = {question:'Community',fallbackLanguage:'es',history:[]};
+  await decide(first);
+  assert.equal((await decide(first)).inputTokens,0);
+  assert.equal((await decide({...first,fallbackLanguage:'en'})).data.language,'en');
+  now += 10*60_000;
+  assert.equal((await decide(first)).inputTokens,50);
+  await decide({...first,question:'unclear'});
+  await decide({...first,question:'unclear'});
+  assert.equal(calls,5);
 });

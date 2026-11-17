@@ -10,7 +10,7 @@ const cheerio = require('cheerio');
 const ipaddr = require('ipaddr.js');
 const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
 const { indexedCandidates, serializedScan } = require('./chatbotSearch');
-const { normalize, calendarIntent, resourceIntent, articleIntent, foodPreparationIntent, calendarOverview, searchQuestion, matchesLocation, calendarReply } = require('./chatbotNavigation');
+const { normalize, calendarIntent, resourceIntent, articleIntent, foodPreparationIntent, calendarOverview, searchQuestion, matchesLocation, calendarReply, sectionLinkReply } = require('./chatbotNavigation');
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT = 1000000;
@@ -150,6 +150,8 @@ async function ingestSource({ file, url, title }, { env = process.env, fetcher =
       embeddingModel: EMBEDDING_MODEL, embeddingDimensions: 768, fetchedAt: new Date().toISOString() } };
 }
 const STOP = new Set('what when where how which with from this that have does about there their please can could would should que como donde cuando cual para del los las una unos unas por con mis sus hay quiero saber sobre puedes puedo necesito me the and for are is to en de el la un a y mi do i find encontrar available disponibles algun alguna algunos algunas gracias muchas muchos dieron ultimo ultima recibimos recomendacion recomendaciones listado lista opciones lugares'.split(' '));
+// These words describe the catalog or how to search it, rather than a subject.
+const CATALOG_WORDS = new Set('community comunitario comunitarios comunitaria comunitarias sitio site website web articles article articulos articulo publicaciones publicacion stories story recurso recursos resource resources help ayuda servicio servicios service services directory directorio trusted confiable confiables busco buscar search looking tiene tienen tienes hay list lists browse read leer ver show get published publicados publicadas any some you your tiene tengan quisiera muestrame dime recomendar recomiendas'.split(' '));
 const INGREDIENT_GROUPS = ['fresa fresas frutilla frutillas strawberry strawberries', 'anana ananas pina pinas pineapple pineapples',
   'berenjena berenjenas eggplant eggplants', 'legumbre legumbres lentils lentejas beans frijoles garbanzos chickpeas'];
 function ingredientTerms(question) {
@@ -167,7 +169,7 @@ function termsFor(question) {
     'receta recetas recipe recipes cocinar cooking', 'guardar conservar almacenar storage storing refrigeration refrigerar',
     'fruta frutas fruit fruits', 'verdura verduras vegetable vegetables',
     'parque parques park parks recreation recreacion', 'escuela escuelas school schools educativos educational',
-    'guarderia guarderias childcare daycare', 'mayores senior seniors elderly envejecimiento aging', ...INGREDIENT_GROUPS];
+    'guarderia guarderias childcare daycare', 'biblioteca bibliotecas library libraries', 'mayores senior seniors elderly envejecimiento aging', ...INGREDIENT_GROUPS];
   const found = new Set(terms.filter(t => !STOP.has(t)));
   for (const group of groups) { const values = group.split(' '); if (values.some(v => found.has(v))) values.forEach(v => found.add(v)); }
   return [...found].slice(0, 40);
@@ -204,14 +206,14 @@ async function calendarRows(db, now = new Date()) {
   return rows.sort((a, b) => a.date.localeCompare(b.date) || String(a.time).localeCompare(String(b.time)) || a.id - b.id);
 }
 
-async function internalContext(db, locale, terms, { includeCalendar = true, includeResources = true, location = '' } = {}) {
+async function internalContext(db, locale, terms, { includeCalendar = true, includeResources = true, includeArticles = true, location = '' } = {}) {
   const es = locale === 'es';
   const [articles, resources, calendar] = await Promise.all([
-    readInternalPages(db, `SELECT a.id,title_en,title_es,subtitle_en,subtitle_es,content_en,content_es,slug_en,slug_es,
+    includeArticles ? readInternalPages(db, `SELECT a.id,title_en,title_es,subtitle_en,subtitle_es,content_en,content_es,slug_en,slug_es,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',c.name_en,c.name_es) SEPARATOR ', ') FROM article_category ac JOIN category c ON c.id=ac.category_id WHERE ac.article_id=a.id) categories,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',f.name_en,f.name_es) SEPARATOR ', ') FROM article_filter af JOIN filter f ON f.id=af.filter_id WHERE af.article_id=a.id) filters,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',t.name_en,t.name_es) SEPARATOR ', ') FROM article_tags atg JOIN tags t ON t.id=atg.tag_id WHERE atg.article_id=a.id) tags
-      FROM article a WHERE article_status_id=2 AND (publication_date IS NULL OR publication_date<=NOW()) AND a.id>? ORDER BY a.id LIMIT 200`),
+      FROM article a WHERE article_status_id=2 AND (publication_date IS NULL OR publication_date<=NOW()) AND a.id>? ORDER BY a.id LIMIT 200`) : [],
     includeResources ? readInternalPages(db, `SELECT r.id,title_english,title_spanish,description_english,description_spanish,
       information_english,information_spanish,address,phone_number,website,rc.name city,
       (SELECT GROUP_CONCAT(CONCAT_WS(' ',f.name_english,f.name_spanish) SEPARATOR ', ') FROM resource_filter_relations rf JOIN resource_filters f ON f.id=rf.filter_id WHERE rf.resource_id=r.id) categories,
@@ -250,9 +252,24 @@ async function internalContext(db, locale, terms, { includeCalendar = true, incl
     result.push({ id: `calendar:${c.id}`, title, url: '/calendar', text: text.slice(0, 1400),
       score: lexical(text, terms) + 2 });
   }
-  if (includeCalendar && !result.some(c => c.id.startsWith('calendar:'))) result.push({ id: 'calendar:current', title: es ? 'Calendario de distribuciones' : 'Distribution calendar',
-    url: '/calendar', text: location ? `No published upcoming calendar entries match the user-supplied location: ${location}. This is an exact city/address match, not a distance search. Do not offer another city as nearby.` : 'The current published calendar has no enabled upcoming entries. Do not infer dates. Invite the user to check the calendar again.', score: 2 });
   return result;
+}
+function emptyCatalogReply(route, locale, location) {
+  const reply = sectionLinkReply(route, locale);
+  const es = locale === 'es';
+  let message;
+  if (route === 'calendar') {
+    message = location
+      ? (es ? 'No encontré fechas de distribución próximas publicadas para la ciudad o el código postal que indicaste.' : 'I found no published upcoming distribution dates for the city or ZIP code you provided.')
+      : (es ? 'No hay fechas de distribución próximas publicadas en el calendario.' : 'There are no upcoming distribution dates published in the calendar.');
+  } else if (route === 'resources') {
+    message = location
+      ? (es ? 'No encontré recursos del directorio que coincidan con tu búsqueda en la ciudad o el código postal que indicaste.' : 'I found no matching directory resources for the city or ZIP code you provided.')
+      : (es ? 'No encontré recursos del directorio que coincidan con tu búsqueda.' : 'I found no directory resources matching your search.');
+  } else {
+    message = es ? 'No encontré artículos publicados que coincidan con tu búsqueda.' : 'I found no published articles matching your search.';
+  }
+  return { directAnswer: { ...reply, content: `${message} ${reply.content}` } };
 }
 async function retrieveContext({ db, question, history = [], locale = 'en', location = '', searchTerms = '', route, env = process.env, embedder = embed }) {
   if ((!route || route === 'calendar') && calendarOverview(question) && !location) return { directAnswer: calendarReply(await calendarRows(db), locale) };
@@ -260,16 +277,20 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
   const foodIntent = route ? route === 'cooking' : foodPreparationIntent(search);
   const ingredients = foodIntent ? ingredientTerms(search) : [];
   const locationTerms = new Set(normalize(location).split(' '));
-  const terms = termsFor(search).filter(term => !locationTerms.has(term) && (!foodIntent || !calendarIntent(term)));
   const wantsCalendar = route ? route === 'calendar' : calendarIntent(search);
   const wantsResources = route ? route === 'resources' : resourceIntent(search);
   const wantsArticles = route ? route === 'articles' : articleIntent(search);
-  // Spanish "recetas" also means prescriptions: pharmacy listings are not cooking evidence.
-  const internal = await internalContext(db, locale, terms, { includeCalendar: wantsCalendar, includeResources: !foodIntent && !wantsCalendar, location });
+  const catalog = wantsResources || wantsArticles;
+  const terms = termsFor(search).filter(term => !locationTerms.has(term) && (!foodIntent || !calendarIntent(term))
+    && (!catalog || !CATALOG_WORDS.has(term)));
+  const internal = await internalContext(db, locale, terms, {
+    includeCalendar: wantsCalendar,
+    includeResources: !wantsCalendar && !foodIntent && (!wantsArticles || wantsResources) && route !== 'education',
+    includeArticles: !wantsCalendar && (!wantsResources || wantsArticles), location
+  });
   // Navigation uses the live Community catalog. Uploaded external references cannot
   // displace resources, articles or current dates when users ask where to find them.
-  const genericResources = wantsResources && terms.every(term => ['resource','resources','recurso','recursos','services','service','servicio','servicios','ayuda','help'].includes(term));
-  if (wantsResources) internal.forEach(c => { if (c.id.startsWith('resource:') && (c.score > 0 || genericResources)) c.score += 1; });
+  if (catalog && !terms.length) internal.forEach(c => { c.score = 1; });
   const preferred = internal.filter(c => c.score > 0).sort((a, b) => b.score - a.score);
   const select = candidates => {
     const counts = new Map();
@@ -279,18 +300,19 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
       return count < (c.sourceId ? 3 : 1);
     }).slice(0, 8).map(({ score, ...safe }) => safe);
   };
-  if (wantsCalendar) return select(preferred.filter(c => c.id.startsWith('calendar:')));
+  if (wantsCalendar) {
+    if (!preferred.length) return emptyCatalogReply('calendar', locale, location);
+    return select(preferred);
+  }
   if (wantsArticles && !wantsResources) {
     const articles = preferred.filter(c => c.id.startsWith('article:'));
     if (articles.length) return select(articles);
-    return [{ id: 'navigation:articles', title: locale === 'es' ? 'Artículos de Community' : 'Community articles', url: '/articles',
-      text: 'No matching published Community articles were found for this request. Invite the user to browse the articles section or clarify the topic. Do not invent an article.' }];
+    return emptyCatalogReply('articles', locale, location);
   }
   if (wantsResources) {
     const resources = preferred.filter(c => c.id.startsWith('resource:'));
     if (resources.length) return select([...resources, ...preferred.filter(c => c.id.startsWith('article:'))]);
-    return [{ id: 'navigation:resources', title: locale === 'es' ? 'Recursos de Community' : 'Community resources', url: '/trusted-resources',
-      text: `No matching active Community resources were found for this request${location ? ` in the user-supplied city/ZIP ${location}` : ''}. Do not invent a local option. Invite the user to browse the directory or specify another city or service. City/ZIP matching does not establish distance or current availability.` }];
+    return emptyCatalogReply('resources', locale, location);
   }
   const readBatch = after => db.query(`SELECT c.id,c.source_id,c.content,c.embedding,s.title,s.url FROM chatbot_chunk c
     JOIN chatbot_source s ON s.id=c.source_id WHERE s.enabled=1 AND s.status='ready' AND c.id>? ORDER BY c.id LIMIT 500`, [after]);

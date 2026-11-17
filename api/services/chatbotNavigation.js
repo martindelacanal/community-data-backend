@@ -17,6 +17,46 @@ function calendarOverview(question) {
   return /^(?:(?:cuales son|muestra(?:me)?|dime|ver|quiero ver|todas|todas las|las|proximas|el|what are|show(?: me)?|list|all|the|upcoming|next|available|todas las fechas|fechas disponibles|de|del|of|dates|please|por favor)\s+)*(?:distribuciones|distribuciones disponibles|distributions|distribution dates|calendario(?: de distribuciones)?|distribution calendar)(?:\s+(?:proximas|disponibles|upcoming|available|please|por favor))*$/.test(normalize(question));
 }
 
+const PUBLIC_SECTIONS = {
+  articles: {
+    id: 'navigation:articles', url: '/articles',
+    es: ['Artículos de Community', 'Abre la sección Artículos para leer las publicaciones de Community.'],
+    en: ['Community articles', 'Open Articles to read Community publications.']
+  },
+  resources: {
+    id: 'navigation:resources', url: '/trusted-resources',
+    es: ['Recursos de Community', 'Abre el directorio de recursos para buscar organizaciones y servicios.'],
+    en: ['Community resources', 'Open the resource directory to browse organizations and services.']
+  },
+  calendar: {
+    id: 'calendar:current', url: '/calendar',
+    es: ['Calendario de distribuciones', 'Abre el calendario de distribuciones para consultar las fechas, las sedes y los avisos publicados.'],
+    en: ['Distribution calendar', 'Open the distribution calendar for published dates, locations and notices.']
+  }
+};
+
+function sectionLinkReply(route, locale) {
+  if (!Object.hasOwn(PUBLIC_SECTIONS, route)) return null;
+  const section = PUBLIC_SECTIONS[route];
+  const [title, content] = section[locale === 'es' ? 'es' : 'en'];
+  return { content, status: 'complete', sources: [{ id: section.id, title, url: section.url }], citationIds: [section.id] };
+}
+
+function sectionNavigation(question, locale) {
+  const text = normalize(question).replace(/^(?:por favor|please) /, '').replace(/ (?:por favor|please)$/, '');
+  const command = text.match(/^(?:open|go to|take me to|(?:give me (?:a|the) )?link to|where is|how (?:do|can) i (?:open|get to|access)|(?:i want to|i d like to) (?:open|visit)) /)
+    || text.match(/^(?:abrir|abre|abri|abreme|abrime|llevame al?|ir al?|quiero (?:abrir|ir al?)|(?:dame (?:el|un) )?enlace al?|donde (?:esta|encuentro)|como (?:abro|accedo al?)) /)
+    || text.match(/^(?:show me|quiero ver|muestrame|mostrame|ver) (?=(?:la |el )?(?:pagina|seccion|directorio)\b|.* (?:page|section|directory)$)/);
+  if (!command) return null;
+  const label = text.slice(command[0].length).replace(/^(?:the|a|la|el|los|las|al) /, '')
+    .replace(/^(?:(?:pagina|seccion) de (?:los |las |el |la )?|(?:page|section) (?:for|of) )/, '')
+    .replace(/ (?:page|section)$/, '');
+  if (/^(?:articles|articulos|publicaciones)(?: de community)?$/.test(label)) return sectionLinkReply('articles', locale);
+  if (/^(?:(?:trusted |community )?resources|(?:trusted )?resource directory|(?:directorio de )?recursos(?: confiables| de community)?)$/.test(label)) return sectionLinkReply('resources', locale);
+  if (/^(?:(?:food )?distribution calendar|calendar|calendario(?: de (?:distribuciones|repartos)(?: de alimentos)?)?)$/.test(label)) return sectionLinkReply('calendar', locale);
+  return null;
+}
+
 function searchQuestion(question, history = [], location = '') {
   const previousIndex = history.findLastIndex(m => m.role === 'user');
   const previous = history[previousIndex];
@@ -90,4 +130,4 @@ function calendarReply(rows, locale) {
     validationSources: cited.map(row => ({ id: `calendar:${row.id}` })) };
 }
 
-module.exports = { normalize, calendarIntent, resourceIntent, articleIntent, nearbyIntent, foodPreparationIntent, calendarOverview, searchQuestion, explicitLocation, matchesLocation, calendarReply };
+module.exports = { normalize, calendarIntent, resourceIntent, articleIntent, nearbyIntent, foodPreparationIntent, calendarOverview, searchQuestion, explicitLocation, matchesLocation, calendarReply, sectionNavigation, sectionLinkReply };
