@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const jwt = require('jsonwebtoken');
 const moment = require('moment-timezone');
+const express = require('express');
 
 const RUN_INTEGRATION = process.env.RUN_HEALTH_SCAN_INTEGRATION === 'development';
 const BACKEND_ROOT = path.resolve(__dirname, '..', '..');
@@ -132,28 +133,10 @@ async function postScan(baseUrl, token, payload) {
   return body;
 }
 
-function selectUsableEvent(rows) {
-  const byEvent = new Map();
-  for (const row of rows) {
-    const timezone = row.event_timezone || 'America/Los_Angeles';
-    const today = moment().tz(timezone).format('YYYY-MM-DD');
-    if (!row.event_end_date || row.event_end_date < today) continue;
-
-    if (!byEvent.has(row.event_id)) byEvent.set(row.event_id, []);
-    byEvent.get(row.event_id).push({ ...row, event_timezone: timezone });
-  }
-
-  for (const stands of byEvent.values()) {
-    const primary = stands.find(row => Number(row.checkout_form_count) > 0);
-    const secondary = stands.find(row => !primary || row.stand_id !== primary.stand_id);
-    if (primary && secondary) return { primary, secondary };
-  }
-  return null;
-}
-
-async function createFixture(pool, selectedEvent) {
+async function createFixture(pool, event) {
   const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
   const username = `__health_scan_${suffix}`;
+  const operatorUsername = `__scan_operator_${suffix}`;
   const connection = await pool.promise().getConnection();
   let userId = null;
   let registrationId = null;
@@ -198,12 +181,24 @@ async function createFixture(pool, selectedEvent) {
       `INSERT INTO health_event_registration
          (health_event_id, user_id, registration_role, status, source, submitted_at)
        VALUES (?, ?, 'beneficiary', 'registered', 'admin', NOW())`,
-      [selectedEvent.event_id, userId]
+      [event.event_id, userId]
     );
     registrationId = Number(registrationInsert.insertId);
+
+    const [operator] = await connection.query(
+      `INSERT INTO user(username, firstname, lastname, role_id, enabled, deleted, language)
+       SELECT ?, 'Scan Operator', 'Integration Test', id, 'Y', 'N', 'en' FROM role WHERE name = 'eventvolunteer'`,
+      [operatorUsername]);
+    assert.equal(operator.affectedRows, 1, 'Development database needs the event volunteer role.');
+    const operatorId = Number(operator.insertId);
+    await connection.query(
+      `INSERT INTO health_event_registration(health_event_id,user_id,registration_role,status,source,submitted_at)
+       VALUES (?,?,'volunteer','registered','admin',NOW())`, [event.event_id, operatorId]);
+    const token = jwt.sign({ data: JSON.stringify({ id: operatorId, role: 'eventvolunteer' }) },
+      process.env.JWT_SECRET, { expiresIn: '10m' });
     await connection.commit();
 
-    return { userId, registrationId, username, phone };
+    return { userId, registrationId, username, phone, operatorId, operatorUsername, token };
   } catch (error) {
     try { await connection.rollback(); } catch (rollbackError) { /* preserve original error */ }
     throw error;
@@ -223,10 +218,10 @@ async function cleanupFixture(pool, fixture) {
       [fixture.userId]
     );
     await connection.query('DELETE FROM health_event_scan WHERE scanned_user_id = ?', [fixture.userId]);
-    await connection.query('DELETE FROM health_event_registration WHERE user_id = ?', [fixture.userId]);
+    await connection.query('DELETE FROM health_event_registration WHERE user_id IN (?, ?)', [fixture.userId, fixture.operatorId]);
     await connection.query(
-      'DELETE FROM user WHERE id = ? AND username = ?',
-      [fixture.userId, fixture.username]
+      'DELETE FROM user WHERE (id = ? AND username = ?) OR (id = ? AND username = ?)',
+      [fixture.userId, fixture.username, fixture.operatorId, fixture.operatorUsername]
     );
     await connection.commit();
   } catch (error) {
@@ -239,9 +234,9 @@ async function cleanupFixture(pool, fixture) {
   const [auditRows] = await pool.promise().query(
     `SELECT
        (SELECT COUNT(*) FROM health_event_scan WHERE scanned_user_id = ?) AS scans,
-       (SELECT COUNT(*) FROM health_event_registration WHERE user_id = ?) AS registrations,
-       (SELECT COUNT(*) FROM user WHERE id = ?) AS users`,
-    [fixture.userId, fixture.userId, fixture.userId]
+       (SELECT COUNT(*) FROM health_event_registration WHERE user_id IN (?, ?)) AS registrations,
+       (SELECT COUNT(*) FROM user WHERE id IN (?, ?)) AS users`,
+    [fixture.userId, fixture.userId, fixture.operatorId, fixture.userId, fixture.operatorId]
   );
   assert.deepEqual(
     {
@@ -277,6 +272,7 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
 }, async () => {
   let pool = null;
   let server = null;
+  let event = null;
   let fixture = null;
   let testError = null;
   const cleanupErrors = [];
@@ -287,49 +283,18 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
 
     pool = require('../connection/connection');
     sharedPool = pool;
-    const app = require('../../app');
+    const app = express();
+    app.use('/api', express.json(), require('./healthEvents'));
     const { formatDailyQrDate } = require('../utils/dailyBeneficiaryQr');
 
-    const [standRows] = await pool.promise().query(
-      `SELECT he.id AS event_id,
-              DATE_FORMAT(he.end_date, '%Y-%m-%d') AS event_end_date,
-              he.timezone AS event_timezone,
-              st.id AS stand_id,
-              (SELECT COUNT(*)
-                 FROM health_event_form f
-                WHERE f.health_event_id = he.id AND f.stand_id = st.id
-                  AND f.audience = 'checkout' AND f.enabled = 'Y') AS checkout_form_count
-         FROM health_event he
-         INNER JOIN health_event_stand st ON st.health_event_id = he.id
-        WHERE he.enabled = 'Y' AND st.enabled = 'Y' AND st.has_checkout = 'Y'
-        ORDER BY he.end_date ASC, he.id ASC, checkout_form_count DESC, st.id ASC`
-    );
-    const selected = selectUsableEvent(standRows);
-    assert.ok(selected, 'Development database needs a non-ended event with two checkout stands.');
-
-    const [volunteerRows] = await pool.promise().query(
-      `SELECT u.id, r.name AS role
-         FROM user u
-         INNER JOIN role r ON r.id = u.role_id
-        WHERE r.name IN ('eventvolunteer', 'opsmanager', 'admin')
-          AND u.enabled = 'Y' AND u.deleted = 'N'
-        ORDER BY FIELD(r.name, 'eventvolunteer', 'opsmanager', 'admin'), u.id ASC
-        LIMIT 1`
-    );
-    assert.equal(volunteerRows.length, 1, 'Development database needs an active volunteer or admin user.');
-
-    fixture = await createFixture(pool, selected.primary);
-    const token = jwt.sign({
-      data: JSON.stringify({
-        id: Number(volunteerRows[0].id),
-        role: volunteerRows[0].role
-      })
-    }, process.env.JWT_SECRET, { expiresIn: '10m' });
-    const qrDate = formatDailyQrDate(new Date(), selected.primary.event_timezone);
+    event = await createScanEvent(pool, { checkoutForm: true });
+    fixture = await createFixture(pool, event);
+    const { token } = fixture;
+    const qrDate = formatDailyQrDate(new Date(), event.event_timezone);
     const qr = `B${fixture.userId}.${qrDate}`;
     const primaryPayload = {
-      event_id: Number(selected.primary.event_id),
-      stand_id: Number(selected.primary.stand_id),
+      event_id: Number(event.event_id),
+      stand_id: Number(event.dental_stand_id),
       qr,
       confirmed: true
     };
@@ -349,7 +314,7 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
     assert.equal(concurrent.filter(result => result.duplicate === false).length, 1);
     assert.equal(concurrent.filter(result => result.duplicate === true).length, CONCURRENT_REQUESTS - 1);
     assert.deepEqual(
-      await loadFixtureScans(pool, fixture, selected.primary.event_id, selected.primary.stand_id),
+      await loadFixtureScans(pool, fixture, event.event_id, event.dental_stand_id),
       [{ id: firstScanId, scan_type: 'checkin', paired_scan_id: null }]
     );
 
@@ -365,15 +330,15 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
     assert.equal(secondRefresh.scan_type, 'checkin');
     assert.equal(secondRefresh.duplicate, true);
     assert.deepEqual(
-      await loadFixtureScans(pool, fixture, selected.primary.event_id, selected.primary.stand_id),
+      await loadFixtureScans(pool, fixture, event.event_id, event.dental_stand_id),
       [{ id: firstScanId, scan_type: 'checkin', paired_scan_id: null }],
       'Repeated frames more than ten seconds after the original scan must remain debounced.'
     );
 
     await delay(SLIDING_EXPIRY_DELAY_MS);
     const phonePayload = {
-      event_id: Number(selected.primary.event_id),
-      stand_id: Number(selected.primary.stand_id),
+      event_id: Number(event.event_id),
+      stand_id: Number(event.dental_stand_id),
       phone: fixture.phone,
       user_id: fixture.userId,
       confirmed: true
@@ -397,7 +362,7 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
       assert.equal(duplicate.checkout_form, null);
     }
     assert.deepEqual(
-      await loadFixtureScans(pool, fixture, selected.primary.event_id, selected.primary.stand_id),
+      await loadFixtureScans(pool, fixture, event.event_id, event.dental_stand_id),
       [
         { id: firstScanId, scan_type: 'checkin', paired_scan_id: null },
         { id: checkoutScanId, scan_type: 'checkout', paired_scan_id: firstScanId }
@@ -410,20 +375,20 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
     assert.equal(qrAfterPhoneCheckout.duplicate, true);
     assert.equal(qrAfterPhoneCheckout.checkout_form, null);
     assert.equal(
-      (await loadFixtureScans(pool, fixture, selected.primary.event_id, selected.primary.stand_id)).length,
+      (await loadFixtureScans(pool, fixture, event.event_id, event.dental_stand_id)).length,
       2
     );
 
     const secondaryPayload = {
       ...primaryPayload,
-      stand_id: Number(selected.secondary.stand_id)
+      stand_id: Number(event.haircuts_stand_id)
     };
     const otherStand = await postScan(baseUrl, token, secondaryPayload);
     assert.equal(otherStand.scan_type, 'checkin');
     assert.equal(otherStand.duplicate, false);
     assert.notEqual(Number(otherStand.scan_id), checkoutScanId);
     assert.equal(
-      (await loadFixtureScans(pool, fixture, selected.secondary.event_id, selected.secondary.stand_id)).length,
+      (await loadFixtureScans(pool, fixture, event.event_id, event.haircuts_stand_id)).length,
       1,
       'A different stand must have an independent debounce key.'
     );
@@ -438,6 +403,11 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
     try {
       // cleanupFixture commits the deletes and then asserts scan/registration/user are all zero.
       if (pool) await cleanupFixture(pool, fixture);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (pool) await cleanupScanEvent(pool, event);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -456,7 +426,7 @@ test('health scan endpoint serializes QR/phone requests and applies a ten-second
 
 const DB_WINDOW_EXPIRY_DELAY_MS = 10_500;
 
-async function createDailyRuleEvent(pool) {
+async function createScanEvent(pool, { checkoutForm = false } = {}) {
   const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
   const connection = await pool.promise().getConnection();
   try {
@@ -473,10 +443,15 @@ async function createDailyRuleEvent(pool) {
     const eventId = Number(eventInsert.insertId);
     const [haircuts] = await connection.query(
       `INSERT INTO health_event_stand (health_event_id, name_en, name_es, is_entry, has_checkout, sort_order, enabled)
-       VALUES (?, 'Haircuts', 'Cortes de pelo', 'N', 'N', 1, 'Y')`, [eventId]);
+       VALUES (?, 'Haircuts', 'Cortes de pelo', 'N', ?, 1, 'Y')`, [eventId, checkoutForm ? 'Y' : 'N']);
     const [dental] = await connection.query(
       `INSERT INTO health_event_stand (health_event_id, name_en, name_es, is_entry, has_checkout, sort_order, enabled)
        VALUES (?, 'Dental', 'Dental', 'N', 'Y', 2, 'Y')`, [eventId]);
+    if (checkoutForm) {
+      await connection.query(
+        `INSERT INTO health_event_form(health_event_id,audience,stand_id,title_en,title_es)
+         VALUES (?,'checkout',?,'Synthetic checkout','Salida de prueba')`, [eventId, dental.insertId]);
+    }
     await connection.commit();
     return {
       event_id: eventId,
@@ -493,7 +468,7 @@ async function createDailyRuleEvent(pool) {
   }
 }
 
-async function cleanupDailyRuleEvent(pool, event) {
+async function cleanupScanEvent(pool, event) {
   if (!event) return;
   // Scans/stands/registrations cascade from the event row; the fixture user is
   // removed by cleanupFixture, which also asserts nothing was left behind.
@@ -523,24 +498,12 @@ test('health scan endpoint enforces one visit per stand per day', {
 
     pool = require('../connection/connection');
     sharedPool = pool;
-    const app = require('../../app');
+    const app = express();
+    app.use('/api', express.json(), require('./healthEvents'));
 
-    const [volunteerRows] = await pool.promise().query(
-      `SELECT u.id, r.name AS role
-         FROM user u
-         INNER JOIN role r ON r.id = u.role_id
-        WHERE r.name IN ('eventvolunteer', 'opsmanager', 'admin')
-          AND u.enabled = 'Y' AND u.deleted = 'N'
-        ORDER BY FIELD(r.name, 'eventvolunteer', 'opsmanager', 'admin'), u.id ASC
-        LIMIT 1`
-    );
-    assert.equal(volunteerRows.length, 1, 'Development database needs an active volunteer or admin user.');
-
-    event = await createDailyRuleEvent(pool);
-    fixture = await createFixture(pool, { event_id: event.event_id });
-    const token = jwt.sign({
-      data: JSON.stringify({ id: Number(volunteerRows[0].id), role: volunteerRows[0].role })
-    }, process.env.JWT_SECRET, { expiresIn: '10m' });
+    event = await createScanEvent(pool);
+    fixture = await createFixture(pool, event);
+    const { token } = fixture;
 
     server = await listenOnEphemeralPort(app);
     const address = server.address();
@@ -635,7 +598,7 @@ test('health scan endpoint enforces one visit per stand per day', {
       cleanupErrors.push(error);
     }
     try {
-      if (pool) await cleanupDailyRuleEvent(pool, event);
+      if (pool) await cleanupScanEvent(pool, event);
     } catch (error) {
       cleanupErrors.push(error);
     }
