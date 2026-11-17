@@ -135,6 +135,57 @@ function internalFixture({ articles = [], resources = [], calendar = [], externa
   } };
 }
 
+test('link requests open only a supported public section while article searches and calendar dates use retrieval', () => {
+  const { sectionNavigation, sectionLinkReply } = require('./chatbotNavigation');
+  for (const [question, locale, id, path] of [
+    ['¿Cómo abro la sección de artículos?', 'es', 'navigation:articles', '/articles'],
+    ['Show me the articles page, please', 'en', 'navigation:articles', '/articles'],
+    ['Quiero ver el directorio de recursos confiables', 'es', 'navigation:resources', '/trusted-resources'],
+    ['Open the trusted resource directory', 'en', 'navigation:resources', '/trusted-resources'],
+    ['Llévame al calendario de distribuciones', 'es', 'calendar:current', '/calendar'],
+    ['Dame el enlace al calendario de repartos', 'es', 'calendar:current', '/calendar'],
+    ['Take me to the calendar', 'en', 'calendar:current', '/calendar']
+  ]) {
+    const reply = sectionNavigation(question, locale);
+    assert.equal(reply.sources[0].url, path);
+    assert.deepEqual(reply.citationIds, [id]);
+    assert.equal(reply.status, 'complete');
+    assert.match(reply.content, locale === 'es' ? /^Abre / : /^Open /);
+  }
+  for (const question of ['calendario', 'Show me the distribution calendar', 'Quiero ver las próximas distribuciones',
+    'Open the article about diabetes', 'Where is a clinic near me?', 'Open the articles page and tell me a dose',
+    'How do I access the private directory?', 'Open https://other.example/calendar']) {
+    assert.equal(sectionNavigation(question, 'en'), null);
+  }
+  for (const route of ['private', 'cooking', '__proto__']) assert.equal(sectionLinkReply(route, 'es'), null);
+});
+
+test('an empty targeted search answers in the requested language using just the relevant public catalog', async () => {
+  const fixture = {
+    articles: [{ id: 1, title_en: 'Community articles', slug_en: 'housing', content_en: 'Our housing publication' }],
+    resources: [{ id: 1, title_english: 'Community resources', information_english: 'Housing services', city: 'Riverside' }],
+    calendar: [{ id: 1, date: '2027-02-03', community_city: 'Riverside', address: 'Site 1' }]
+  };
+  for (const [question, route, locale, location, table, id, message] of [
+    ['Any Community articles about audiology?', 'articles', 'en', '', 'FROM article a', 'navigation:articles', /no published articles matching/i],
+    ['¿Hay artículos sobre audiología?', 'articles', 'es', '', 'FROM article a', 'navigation:articles', /artículos publicados que coincidan/],
+    ['¿Hay recursos de audiología?', 'resources', 'es', '', 'FROM trusted_resources r', 'navigation:resources', /recursos del directorio que coincidan/],
+    ['Audiology resources in Riverside', 'resources', 'en', 'Riverside', 'FROM trusted_resources r', 'navigation:resources', /city or ZIP/],
+    ['¿Hay repartos en Banning?', 'calendar', 'es', 'Banning', 'FROM calendar_event', 'calendar:current', /fechas de distribución próximas.*ciudad/],
+    ['Food pickup in Banning?', 'calendar', 'en', 'Banning', 'FROM calendar_event', 'calendar:current', /upcoming distribution dates.*city/i]
+  ]) {
+    const db = internalFixture(fixture);
+    const { directAnswer } = await retrieveContext({ db, question, route, locale, location, embedder: () => assert.fail('no embedding for a public catalog search') });
+    assert.equal(db.calls.length, 1);
+    assert.ok(db.calls[0].sql.includes(table));
+    assert.deepEqual(directAnswer.citationIds, [id]);
+    assert.equal(directAnswer.sources[0].id, id);
+    assert.match(directAnswer.content, message);
+  }
+  const db = { query: () => { throw Error('catalog unavailable'); } };
+  await assert.rejects(retrieveContext({db, question:'Any articles about audiology?', route:'articles'}), /catalog unavailable/);
+});
+
 test('semantic routes select the intended source collection when keyword rules would choose a different topic', async () => {
   const calendar = [{id:1,date:'2027-01-03',organization:'Community',address:'100 Main St',community_city:'Riverside'}];
   const articles = [{id:1,title_en:'Eating well',slug_en:'eating-well',content_en:'Balanced meals support good health.'}];
@@ -206,9 +257,9 @@ test('unknown cities and ZIPs do not silently return options from a different ci
   const db = internalFixture({ resources: [{ id: 1, title_english: 'Health clinic', city: 'Banning', address: '123 Main St 92220' }] });
   for (const location of ['Los Angeles', '99999']) {
     const result = await retrieveContext({ db, question: `Health resources in ${location}`, location });
-    assert.equal(result[0].id, 'navigation:resources');
-    assert.equal(result[0].url, '/trusted-resources');
-    assert.match(result[0].text, /No matching active Community resources/);
+    assert.equal(result.directAnswer.sources[0].id, 'navigation:resources');
+    assert.equal(result.directAnswer.sources[0].url, '/trusted-resources');
+    assert.match(result.directAnswer.content, /no matching directory resources.*city or ZIP/i);
   }
 });
 
@@ -272,7 +323,7 @@ test('city matching uses the city field rather than another city name in a stree
   assert.equal(matchesLocation('North Bannington', '123 Main St', 'Banning'), false);
   const db = internalFixture({ resources: [{ id: 1, title_english: 'Health clinic', city: 'Rialto', address: '1411 Riverside Ave, Rialto, CA 92376' }] });
   const result = await retrieveContext({ db, question: 'Health resources in Riverside', location: 'Riverside' });
-  assert.equal(result[0].id, 'navigation:resources');
+  assert.equal(result.directAnswer.sources[0].id, 'navigation:resources');
 });
 
 test('an explicit new directory topic replaces calendar intent even when prefixed with and', async () => {
