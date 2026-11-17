@@ -112,7 +112,7 @@ test('emergencies, policy refusals and uncertainty take precedence over public n
 
 test('nearby catalog ambiguity asks for the city without guessing a source or forgetting an earlier location', async () => {
   const overrides = {
-    source:{...choice('calendar',.48), probabilities:{calendar:.48,open_calendar:.21,resources:.22,open_resources:.02}},
+    source:{...choice('calendar',.58), probabilities:{calendar:.58,open_calendar:.14,resources:.13,open_resources:.01}},
     locality:choice('nearby',.98)
   };
   const question = 'Is there a food pickup near me?';
@@ -121,4 +121,6 @@ test('nearby catalog ambiguity asks for the city without guessing a source or fo
   const followup = await classify(question, overrides, [{role:'user',text:'I live in Riverside.'}]);
   assert.equal(followup.data,undefined);
   assert.equal((await classify('Where is the next pickup?',overrides)).data,undefined);
+  const uncertain = {...overrides, source:{...choice('calendar',.48),probabilities:{calendar:.48,open_calendar:.14,resources:.13,open_resources:.01}}};
+  assert.equal((await classify(question,uncertain)).data,undefined);
 });
