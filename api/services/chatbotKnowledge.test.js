@@ -135,6 +135,31 @@ function internalFixture({ articles = [], resources = [], calendar = [], externa
   } };
 }
 
+test('semantic routes select the intended source collection when keyword rules would choose a different topic', async () => {
+  const calendar = [{id:1,date:'2027-01-03',organization:'Community',address:'100 Main St',community_city:'Riverside'}];
+  const articles = [{id:1,title_en:'Eating well',slug_en:'eating-well',content_en:'Balanced meals support good health.'}];
+  const resources = [{id:1,title_english:'Public library',city:'Riverside',services:'Books and activities'}];
+  for (const [question,route,prefix] of [
+    ['When can I pick up my free groceries?','calendar','calendar:'],
+    ['What did the site publish about eating well?','articles','article:'],
+    ['Is there a public library?','resources','resource:']
+  ]) {
+    const db = internalFixture({calendar,articles,resources});
+    const passages = await retrieveContext({db,question,route,embedder:()=>assert.fail('navigation uses the live catalog')});
+    assert.ok(passages[0].id.startsWith(prefix));
+    assert.ok(db.calls.every(c => !c.sql.includes('chatbot_chunk')));
+  }
+  for (const [question,route] of [
+    ['How should I store eggplant from the food distribution?','cooking'],
+    ['What do trusted resources say about blood pressure?','education']
+  ]) {
+    const db = internalFixture({calendar, external:[{id:1,source_id:'guide',title:'Approved guide',content:'Eggplant storage and blood pressure guide',embedding:[1,0]}]});
+    const passages = await retrieveContext({db,question,route,embedder:async()=>[[1,0]]});
+    assert.ok(passages.some(p => p.id.startsWith('source:')));
+    assert.ok(db.calls.every(c => !c.sql.includes('calendar_event')));
+  }
+});
+
 test('default distribution questions list every published date beyond eight passages and 120 days, including cancellations', async () => {
   const calendar = Array.from({ length: 425 }, (_, i) => ({ id: i + 1, date: `2027-01-${String(i % 25 + 1).padStart(2, '0')}`, no_distribution: i % 25 === 24 ? '1' : '0', time: '9:00 AM' }));
   for (const question of ['¿Cuáles son las próximas distribuciones?', 'What are the upcoming distributions?']) {

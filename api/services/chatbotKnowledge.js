@@ -254,14 +254,16 @@ async function internalContext(db, locale, terms, { includeCalendar = true, incl
     url: '/calendar', text: location ? `No published upcoming calendar entries match the user-supplied location: ${location}. This is an exact city/address match, not a distance search. Do not offer another city as nearby.` : 'The current published calendar has no enabled upcoming entries. Do not infer dates. Invite the user to check the calendar again.', score: 2 });
   return result;
 }
-async function retrieveContext({ db, question, history = [], locale = 'en', location = '', searchTerms = '', env = process.env, embedder = embed }) {
-  if (calendarOverview(question) && !location) return { directAnswer: calendarReply(await calendarRows(db), locale) };
+async function retrieveContext({ db, question, history = [], locale = 'en', location = '', searchTerms = '', route, env = process.env, embedder = embed }) {
+  if ((!route || route === 'calendar') && calendarOverview(question) && !location) return { directAnswer: calendarReply(await calendarRows(db), locale) };
   const search = searchQuestion(question, history, location);
-  const foodIntent = foodPreparationIntent(search);
+  const foodIntent = route ? route === 'cooking' : foodPreparationIntent(search);
   const ingredients = foodIntent ? ingredientTerms(search) : [];
   const locationTerms = new Set(normalize(location).split(' '));
   const terms = termsFor(search).filter(term => !locationTerms.has(term) && (!foodIntent || !calendarIntent(term)));
-  const wantsCalendar = calendarIntent(search), wantsResources = resourceIntent(search);
+  const wantsCalendar = route ? route === 'calendar' : calendarIntent(search);
+  const wantsResources = route ? route === 'resources' : resourceIntent(search);
+  const wantsArticles = route ? route === 'articles' : articleIntent(search);
   // Spanish "recetas" also means prescriptions: pharmacy listings are not cooking evidence.
   const internal = await internalContext(db, locale, terms, { includeCalendar: wantsCalendar, includeResources: !foodIntent && !wantsCalendar, location });
   // Navigation uses the live Community catalog. Uploaded external references cannot
@@ -278,7 +280,7 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
     }).slice(0, 8).map(({ score, ...safe }) => safe);
   };
   if (wantsCalendar) return select(preferred.filter(c => c.id.startsWith('calendar:')));
-  if (articleIntent(search) && !wantsResources) {
+  if (wantsArticles && !wantsResources) {
     const articles = preferred.filter(c => c.id.startsWith('article:'));
     if (articles.length) return select(articles);
     return [{ id: 'navigation:articles', title: locale === 'es' ? 'Artículos de Community' : 'Community articles', url: '/articles',

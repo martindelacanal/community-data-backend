@@ -18,13 +18,15 @@ npm run test:chatbot
 
 The optional idempotent seed imports three exact pages from WHO, MedlinePlus/NIH and CDC. It does not crawl linked pages. Existing references, including disabled references, are not overwritten.
 
-## Model and retrieval decision (2026-10-09)
+## Model and retrieval selection (2026-11-17)
 
-The existing Google key was tested against both models. `gemini-3.8-flash` generates grounded answers with low thinking. `gemini-3.5-flash-lite` performs a small structured scope classification with minimal thinking. No additional decision API, external agent framework, open web search or model tools are required. Source ingestion uses `gemini-embedding-001`, 768 dimensions, for multilingual text retrieval. Vectors are created once per document import and retained in MySQL; each question needs only its query embedding.
+The chatbot uses its existing server-side Google key for the [Decisions API](https://aistudio.google.com/docs/decisions-api). After the local emergency, injection and greeting checks, `gemini-decision-1` evaluates scope, intended source, language and location needs in one request. A choice requires at least 0.80 confidence. Clear requests select the current food distribution calendar, Community articles, the resource directory, approved health education or cooking sources. An unclear request can prompt the user to specify a topic. Educational searches retain bilingual keywords and geographic searches use an explicit city or ZIP verified against user text. When needed, `gemini-3.5-flash-lite` extracts these free-text fields. Uncertain scope or routing and provider outages use the previous classifier and local routing. An API request failure pauses Decisions attempts for 60 seconds on that process.
+
+`gemini-3.8-flash` generates answers using the existing citation registry and approved evidence. Source ingestion uses `gemini-embedding-001`, 768 dimensions, for multilingual text retrieval. Vectors are created once per document import and retained in MySQL. Google lists USD 0.10 per million input tokens for the paid Decisions tier, with zero output tokens. An extraction, query embedding or answer generation has its own model cost. [Google pricing](https://aistudio.google.com/docs/pricing#gemini-decision)
 
 Official references: [Google model catalog](https://ai.google.dev/gemini-api/docs/models), [pricing](https://ai.google.dev/gemini-api/docs/pricing), [embeddings](https://ai.google.dev/gemini-api/docs/embeddings), [managed File Search alternative](https://ai.google.dev/gemini-api/docs/file-search). The local index was selected to keep source enable/delete controls and audit provenance in the existing database rather than a second managed document store. Model names are pinned, not `latest` aliases.
 
-Server configuration: `CHATBOT_GEMINI_API_KEY` optionally overrides existing `GEMINI_API_KEY`; `CHATBOT_MODEL`, `CHATBOT_SCOPE_MODEL`, and `CHATBOT_SESSION_SECRET` optionally override defaults. Otherwise session ownership is HMAC-derived with `JWT_SECRET`. Changing the session secret changes ownership hashes, so preserve it across deployments. Keys and prompts are never returned by public endpoints or bundled in Angular.
+The server reads `CHATBOT_GEMINI_API_KEY` or the existing `GEMINI_API_KEY`. Set `CHATBOT_DECISIONS_ENABLED=false` to use the previous classification and routing path. `CHATBOT_SCOPE_MODEL` selects the extraction and fallback model. `CHATBOT_MODEL` selects the answer model. `CHATBOT_SESSION_SECRET` optionally overrides the ownership secret derived from `JWT_SECRET`. Changing the session secret changes ownership hashes, so preserve it across deployments. Keys and prompts are never returned by public endpoints or bundled in Angular.
 
 ## Limits and operational behavior
 
