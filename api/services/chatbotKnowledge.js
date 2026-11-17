@@ -6,10 +6,13 @@ const https = require('node:https');
 const path = require('node:path');
 const { fork } = require('node:child_process');
 const axios = require('axios');
+const { observeProvider } = require('./chatbotProviderUsage');
 const cheerio = require('cheerio');
+const { healthFairContext } = require('./chatbotPublicListings');
 const ipaddr = require('ipaddr.js');
 const { MAX_TOTAL_CHUNKS } = require('./chatbotLimits');
 const { indexedCandidates, serializedScan } = require('./chatbotSearch');
+const { calendarCountRequest, resolveCountScope, calendarCountReply } = require('./chatbotCalendarCount');
 const { normalize, calendarIntent, resourceIntent, articleIntent, foodPreparationIntent, calendarOverview, searchQuestion, matchesLocation, calendarReply, sectionLinkReply } = require('./chatbotNavigation');
 
 const MAX_BYTES = 10 * 1024 * 1024;
@@ -101,17 +104,17 @@ function splitText(text, size = 1400, overlap = 180) {
   }
   return chunks;
 }
-async function embed(texts, taskType, env = process.env, http = axios) {
+async function embed(texts, taskType, env = process.env, http = axios, providerUsage) {
   const key = env.CHATBOT_GEMINI_API_KEY || env.GEMINI_API_KEY;
   if (!key) throw fail('chatbot_not_configured', 503);
   const result = [];
   // Batch indexing embeds each fragment once; chat only embeds the short question.
   for (let i = 0; i < texts.length; i += 100) {
     try {
-      const response = await http.post(`https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents`, {
+      const response = await observeProvider(providerUsage, 'embedding', EMBEDDING_MODEL, () => http.post(`https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents`, {
         requests: texts.slice(i, i + 100).map(text => ({ model: `models/${EMBEDDING_MODEL}`,
           content: { parts: [{ text }] }, taskType, outputDimensionality: 768 }))
-      }, { headers: { 'x-goog-api-key': key }, timeout: 25000, maxContentLength: 4 * 1024 * 1024 });
+      }, { headers: { 'x-goog-api-key': key }, timeout: 25000, maxContentLength: 4 * 1024 * 1024 }));
       const vectors = response.data.embeddings?.map(e => e.values);
       if (!Array.isArray(vectors) || vectors.length !== Math.min(100, texts.length - i)
         || vectors.some(v => !Array.isArray(v) || v.length !== 768 || v.some(x => !Number.isFinite(x)))) throw Error();
@@ -200,7 +203,7 @@ async function readInternalPages(db, sql, params = []) {
 
 async function calendarRows(db, now = new Date()) {
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-  const rows = await readInternalPages(db, `SELECT ce.id,DATE_FORMAT(ce.date,'%Y-%m-%d') date,ce.time,ce.no_distribution,ce.message_en,ce.message_es,
+  const rows = await readInternalPages(db, `SELECT ce.id,ce.location_id,DATE_FORMAT(ce.date,'%Y-%m-%d') date,ce.time,ce.no_distribution,ce.message_en,ce.message_es,
     l.organization,l.community_city,l.address FROM calendar_event ce JOIN location l ON l.id=ce.location_id
     WHERE ce.enabled='Y' AND l.enabled='Y' AND ce.date>=? AND ce.id>? ORDER BY ce.id LIMIT 200`, [today]);
   return rows.sort((a, b) => a.date.localeCompare(b.date) || String(a.time).localeCompare(String(b.time)) || a.id - b.id);
@@ -271,7 +274,30 @@ function emptyCatalogReply(route, locale, location) {
   }
   return { directAnswer: { ...reply, content: `${message} ${reply.content}` } };
 }
-async function retrieveContext({ db, question, history = [], locale = 'en', location = '', searchTerms = '', route, env = process.env, embedder = embed }) {
+async function retrieveContext({ db, question, history = [], locale = 'en', location = '', searchTerms = '', route, healthFairListing, calendarCountOnly = false, calendarCountCache, env = process.env, embedder = embed, providerUsage }) {
+  if (route === 'health_fairs') return healthFairContext(db, location, locale, healthFairListing);
+  const count = (!route || route === 'calendar') && calendarCountRequest(question);
+  if (count) {
+    const scope = resolveCountScope(count, history, location);
+    if (scope) {
+      // Reuse this message's calendar read after classification. A new
+      // message always reads the current published schedule.
+      const rows = await (calendarCountCache ? (calendarCountCache.rows ??= calendarRows(db)) : calendarRows(db));
+      const reply = calendarCountReply(scope, rows, locale);
+      if (reply) return { directAnswer: reply };
+    }
+    if (!calendarCountOnly) {
+      const section = sectionLinkReply('calendar', locale);
+      let content = locale === 'es'
+        ? '¿Quieres contar las distribuciones de todo el calendario o las de una ciudad o sede en particular?'
+        : 'Would you like a count for the full calendar or for a particular city or site?';
+      if (scope) content = locale === 'es'
+        ? '¿Puedes indicar la ciudad y el nombre de la sede tal como aparecen en el calendario? Necesito identificar el lugar para contar las distribuciones publicadas.'
+        : 'Can you give the city and site name as listed in the calendar? I need to identify the location to count its published distributions.';
+      return { directAnswer: { ...section, content } };
+    }
+  }
+  if (calendarCountOnly) return [];
   if ((!route || route === 'calendar') && calendarOverview(question) && !location) return { directAnswer: calendarReply(await calendarRows(db), locale) };
   const search = searchQuestion(question, history, location);
   const foodIntent = route ? route === 'cooking' : foodPreparationIntent(search);
@@ -321,7 +347,7 @@ async function retrieveContext({ db, question, history = [], locale = 'en', loca
   catch (error) { if (error.code !== 'ER_NO_SUCH_TABLE') throw error; legacyIndex = true; }
   let vector;
   if (candidates.length || legacyIndex) {
-    try { [vector] = await embedder([search], 'RETRIEVAL_QUERY', env); } catch { /* Lexical retrieval remains available on a temporary embedding outage. */ }
+    try { [vector] = await embedder([search], 'RETRIEVAL_QUERY', env, axios, providerUsage); } catch { /* Lexical retrieval remains available on a temporary embedding outage. */ }
   }
   let external = [];
   const rank = stored => {

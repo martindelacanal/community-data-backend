@@ -135,6 +135,53 @@ function internalFixture({ articles = [], resources = [], calendar = [], externa
   } };
 }
 
+test('calendar counts use every active published event at the exact site, retaining its dates and excluding cancellations', async () => {
+  const school = { location_id: 21, organization: 'Testville Saint Meadow High School', community_city: 'Testville: St. Meadow High School' };
+  const calendar = Array.from({ length: 11 }, (_, i) => ({ ...school, id: i + 1, no_distribution: '0', date: '2028-01-' + String(1 + i % 6).padStart(2, '0') }));
+  calendar.push({ ...school, id: 12, date: '2028-01-31', no_distribution: '1' },
+    { id: 13, location_id: 22, date: '2028-02-01', organization: 'Saint Meadow High School North', community_city: 'Testville: St. Meadow High School North' },
+    { id: 14, location_id: 23, date: '2028-02-02', organization: 'Food Depot', community_city: 'Broadvale: Testville Community Hall', address: 'Testville Avenue' });
+  for (const [question, locale, expected, rows] of [
+    ['How many distrbutions are there at the Saint Meadow Highschool?', 'en', /11 distributions in St\. Meadow High School, Testville/, 12],
+    ['¿Cuántas distrbuciones tiene Saint Meadow Highschool en Testville?', 'es', /11 distribuciones en St\. Meadow High School, Testville/, 12],
+    ['¿Me puedes decir la cantidad de repartos en St. Meadow High School?', 'es', /11 distribuciones/, 12],
+    ['What is the total number of food distributions at St Meadow High School?', 'en', /11 distributions/, 12],
+    ['How many food distributions does Testville Saint Meadow High School have?', 'en', /11 distributions/, 12],
+    ['¿Cuántos repartos hay en la ciudad de Testville?', 'es', /12 distribuciones en Testville/, 13],
+    ['How many upcoming distributions are there?', 'en', /13 distributions/, 14]
+  ]) {
+    const db = internalFixture({calendar});
+    const { directAnswer } = await retrieveContext({ db, question, locale, route:'calendar', calendarCountOnly:true });
+    assert.match(directAnswer.content, expected);
+    assert.match(directAnswer.content, locale === 'es' ? /1 aviso sin reparto/ : /1 no-distribution notice/);
+    assert.match(directAnswer.content, /2028-01-06/);
+    assert.doesNotMatch(directAnswer.content, /2028-01-31/);
+    assert.equal(directAnswer.citationIds.length, rows);
+    assert.equal(directAnswer.validationSources.length, rows);
+    assert.equal(directAnswer.sources[0].url, '/calendar');
+    assert.equal(db.calls.length,1);
+    assert.match(db.calls[0].sql, /ce.enabled='Y' AND l.enabled='Y' AND ce.date>=\?/);
+  }
+});
+
+test('ambiguous or unrecognized venues, unsupported time filters and dates versus event counts never yield an unfiltered total', async () => {
+  const calendar = [
+    { id: 1, date: '2028-01-03', location_id: 1, organization: 'Saint Milo', community_city: 'City A: St. Milo' },
+    { id: 2, date: '2028-01-04', location_id: 2, organization: 'Saint Milo', community_city: 'City B: St. Milo', no_distribution: '1' }
+  ];
+  const run = (question, extra = {}) => retrieveContext({ db: internalFixture({calendar}), question, route: 'calendar', calendarCountOnly: true, ...extra });
+  assert.match((await run('How many distributions at Saint Milo?')).directAnswer.content, /multiple calendar locations/);
+  const zero = (await run('How many distributions at Saint Milo in City B?')).directAnswer;
+  assert.match(zero.content, /0 distributions/);
+  assert.doesNotMatch(zero.content, /2028-01-04/);
+  assert.deepEqual(zero.citationIds, ['calendar:2']);
+  for (const q of ['How many distributions at Saint?', 'How many distributions last year?', 'How many distribution dates are there?',
+    'How many distributions in December?', 'How many distributions at Saint Milo on Friday?', '¿Cuántos repartos hubo ayer?']) {
+    assert.deepEqual(await run(q), []);
+  }
+  assert.deepEqual(await run('How many distributions?', {history:[{role:'user',text:'Food in City B'}]}), []);
+});
+
 test('link requests open only a supported public section while article searches and calendar dates use retrieval', () => {
   const { sectionNavigation, sectionLinkReply } = require('./chatbotNavigation');
   for (const [question, locale, id, path] of [

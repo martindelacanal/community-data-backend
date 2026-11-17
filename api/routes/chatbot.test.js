@@ -355,12 +355,12 @@ test('expanded chunk capacity accepts its boundary and rolls back overflow with 
   }finally{await full.close();}
 });
 
-test('new internal citations pass route validation and every calendar overview row is rechecked',async()=>{
-  for(const revoked of [false,true]) {
+test('rechecks every cited calendar row and the current health event publication and URL',async()=>{
+  for(const revoked of [null,'calendar','health-event','slug']) {
     let processingToken;const messages=[];
     const reply={content:'Calendar overview',status:'complete',model:null,sources:[{id:'calendar:current',url:'/calendar',title:'Calendar'}],
-      validationSources:[{id:'calendar:1'},{id:'calendar:2'}],citationIds:['calendar:1','calendar:2']};
-    let checked=[];
+      validationSources:[{id:'calendar:1'},{id:'calendar:2'},{id:'health-event:3',url:'/health-event/community'}],citationIds:['calendar:1','calendar:2','health-event:3']};
+    let checked=[], answeredAudit;
     const query=async(sql,params=[])=>{
       if(sql.includes('FROM user u JOIN role'))return[[{id:1,role:'admin'}]];
       if(sql.includes('FROM chatbot_settings'))return[[{enabled:1,public_mode:'hidden',allowed_roles:'["admin"]',system_prompt:'Style',revision:1}]];
@@ -368,7 +368,9 @@ test('new internal citations pass route validation and every calendar overview r
       if(sql.includes('FROM chatbot_message'))return[sql.includes('id IN')?messages:[]];
       if(sql.startsWith('UPDATE chatbot_conversation SET processing_token=?'))processingToken=params[0];
       if(sql.includes('SELECT processing_token'))return[[{processing_token:processingToken}]];
-      if(sql.startsWith('SELECT ce.id')){checked=params[0];return[revoked?[{id:1}]:[{id:1},{id:2}]];}
+      if(sql.includes('FROM health_event he'))return [revoked==='health-event' ? [] : [{id:3,slug:revoked==='slug'?'changed':'community',end_date:'2099-10-31'}]];
+      if(sql.startsWith('SELECT ce.id')){checked=params[0];return[revoked==='calendar'?[{id:1}]:[{id:1},{id:2}]];}
+      if(sql.startsWith('INSERT INTO chatbot_audit')&&params[2]==='message_answered')answeredAudit=JSON.parse(params[5]);
       if(sql.startsWith('INSERT INTO chatbot_message')) {
         const assistant=sql.includes("'assistant'");
         messages.push({id:params[0],role:assistant?'assistant':'user',content:params[2],sources:assistant?params[3]:'[]',status:assistant?params[4]:'complete'});
@@ -377,16 +379,22 @@ test('new internal citations pass route validation and every calendar overview r
     };
     const connection={query,beginTransaction:async()=>{},commit:async()=>{},rollback:async()=>{},release:()=>{}};
     const app=express();app.use(express.json());
-    app.use('/api/chatbot',createChatbotRouter({pool:{query,getConnection:async()=>connection},env,service:{answer:async()=>reply,model:()=>null}}));
+    app.use('/api/chatbot',createChatbotRouter({pool:{query,getConnection:async()=>connection},env,service:{answer:async({providerUsage})=>{
+      providerUsage.decisionCache='hit';
+      return reply;
+    },model:()=>null}}));
     const server=await new Promise(resolve=>{const listening=app.listen(0,'127.0.0.1',()=>resolve(listening));});
     try {
       const response=await fetch(`http://127.0.0.1:${server.address().port}/api/chatbot/conversations/${privateId}/messages`,{
         method:'POST',headers:{Authorization:`Bearer ${token()}`,'Content-Type':'application/json'},
         body:JSON.stringify({message:'What are the upcoming distributions?',clientRequestId:crypto.randomUUID()})});
       const data=await response.json();
-      assert.equal(response.status,200);assert.deepEqual(checked,[1,2]);
+      assert.equal(response.status,200);
+      if(!revoked || revoked==='calendar')assert.deepEqual(checked,[1,2]);
       assert.equal(data.assistantMessage.status,revoked?'no_context':'complete');
       assert.equal(data.assistantMessage.validationSources,undefined);
+      assert.equal(data.assistantMessage.providerUsage,undefined);
+      assert.deepEqual(answeredAudit.providerUsage,{version:1,calls:[],decisionCache:'hit'});
     } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
   }
 });

@@ -13,6 +13,7 @@
  * Every scan is stored with millisecond timestamps for future metrics.
  */
 const express = require('express');
+const { nowInTimezone, toSqlDateString, hasEventEnded, publicHomeHealthEvents } = require('../services/healthEventPublicHome');
 const { issueSessionForUser } = require('../services/beneficiarySession');
 const { assignBeneficiaryUsername } = require('../utils/beneficiaryUsername');
 const jwt = require('jsonwebtoken');
@@ -220,23 +221,6 @@ function clockInTimezone(value, timeZone) {
   }
 }
 
-/** Current wall-clock in the event timezone as 'YYYY-MM-DD HH:mm:ss' (lexicographically comparable). */
-function nowInTimezone(timeZone) {
-  try {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timeZone || 'America/Los_Angeles',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-      hour12: false
-    }).formatToParts(new Date());
-    const get = (type) => (parts.find(p => p.type === type) || {}).value || '00';
-    const hour = get('hour') === '24' ? '00' : get('hour');
-    return `${get('year')}-${get('month')}-${get('day')} ${hour}:${get('minute')}:${get('second')}`;
-  } catch (error) {
-    return new Date().toISOString().slice(0, 19).replace('T', ' ');
-  }
-}
-
 function toSqlDateTimeString(value) {
   if (!value) return null;
   if (value instanceof Date) {
@@ -247,15 +231,6 @@ function toSqlDateTimeString(value) {
   return String(value).replace('T', ' ').slice(0, 19);
 }
 
-function toSqlDateString(value) {
-  if (!value) return null;
-  if (value instanceof Date) {
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
-  }
-  return String(value).slice(0, 10);
-}
-
 function isRegistrationOpen(event) {
   const now = nowInTimezone(event.timezone);
   const opens = toSqlDateTimeString(event.registration_opens_at);
@@ -263,14 +238,6 @@ function isRegistrationOpen(event) {
   if (opens && now < opens) return false;
   if (closes && now > closes) return false;
   return event.enabled === 'Y' && !hasEventEnded(event);
-}
-
-/** True once the event's last day is over in the event's own timezone. */
-function hasEventEnded(event) {
-  const endDate = toSqlDateString(event.end_date);
-  if (!endDate) return false;
-  const today = nowInTimezone(event.timezone).slice(0, 10);
-  return today > endDate;
 }
 
 function safeParseJson(value, fallback) {
@@ -821,16 +788,7 @@ router.get('/health-events/public-home', async (req, res) => {
     if (publicHomeCache.data && Date.now() - publicHomeCache.at < PUBLIC_HOME_CACHE_MS) {
       return res.status(200).json(publicHomeCache.data);
     }
-    // CURDATE() corre en hora del SERVIDOR (UTC): un evento en Los Ángeles
-    // desaparecería ~7 horas antes de terminar su último día. El SQL trae un
-    // día de margen y el corte exacto se decide por zona horaria del evento.
-    const [eventRows] = await mysqlConnection.promise().query(
-      `SELECT he.*, l.organization, l.community_city, l.address
-       FROM health_event he INNER JOIN location l ON l.id = he.location_id
-       WHERE he.enabled = 'Y' AND he.landing_enabled = 'Y' AND he.public_home_visible = 'Y'
-         AND he.end_date >= (CURDATE() - INTERVAL 1 DAY)
-       ORDER BY he.start_date ASC`);
-    const events = eventRows.filter(event => !hasEventEnded(event));
+    const events = await publicHomeHealthEvents(mysqlConnection.promise());
 
     const list = [];
     for (const event of events) {

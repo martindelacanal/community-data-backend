@@ -19,6 +19,47 @@ test('bounds Unicode input and chooses user language independently of interface'
   assert.equal(chooseLocale('can you code?','es'),'en');
   assert.equal(chooseLocale('OK','en','es'),'es');
   assert.equal(chooseLocale('diabetes','es','en'),'en');
+  assert.equal(chooseLocale('cuantas distrbuciones tiene Saint Terrace Highschool','en','en'),'es');
+  assert.equal(chooseLocale('cuantos repartos hay en Saint Vincent','en','en'),'es');
+  assert.equal(chooseLocale('number of pickups at Oak Center','es','es'),'en');
+});
+
+test('a bare count following a site count uses the previous verified site instead of counting the whole calendar', async () => {
+  const {retrieveContext}=require('./chatbotKnowledge');
+  const http=provider([]),service=createChatbotService({env:{},http});
+  const history=[{role:'user',content:'How many distributions at Saint Terrace Highschool?'},
+    {role:'assistant',content:'There is one distribution at that site.'}];
+  const rows=[
+    {id:1,location_id:11,date:'2028-01-10',community_city:'City A: St. Terrace High School'},
+    {id:2,location_id:12,date:'2028-01-11',community_city:'City B: Other school'}
+  ];
+  const db={query:async sql=>{assert.match(sql,/FROM calendar_event/);return [rows];}};
+  const answer=await service.answer({question:'cuantas distrbuciones hay?',locale:'en',history,
+    retrieve:args=>retrieveContext({...args,db})});
+  assert.equal(answer.locale,'es');
+  assert.match(answer.content,/1 distribución en St\. Terrace High School, City A/);
+  assert.deepEqual(answer.citationIds,['calendar:1']);
+  const rescope=await service.answer({question:'How many distributions in City B?',history:[{role:'user',content:'Recipes with rice'}],
+    retrieve:args=>retrieveContext({...args,db})});
+  assert.deepEqual(rescope.citationIds,['calendar:2']);
+  const global=await service.answer({question:'How many distributions?',history:[{role:'user',content:'How many distributions are there?'},
+    {role:'assistant',content:'The calendar shows two distributions.'}],retrieve:args=>retrieveContext({...args,db})});
+  assert.deepEqual(global.citationIds,['calendar:1','calendar:2']);
+  assert.equal(http.calls.length,0);
+});
+
+test('a failed local site match shares its live calendar read with the classified lookup for that message only',async()=>{
+  const {retrieveContext}=require('./chatbotKnowledge');
+  const scope=()=>({allowed:true,medicalEmergency:false,language:'en',location:''});
+  const http=provider([scope(),scope()]),service=createChatbotService({env,http});
+  let reads=0;
+  const db={query:async sql=>{assert.match(sql,/FROM calendar_event/);reads++;return [[]];}};
+  for (let turn=1;turn<=2;turn++) {
+    const answer=await service.answer({question:'How many distributions at Example Hall?',retrieve:args=>retrieveContext({...args,db})});
+    assert.match(answer.content,/city and site name/);
+    assert.equal(reads,turn);
+    assert.equal(http.calls.length,turn);
+  }
 });
 test('prompt overrides and emergencies are deterministic without sending personal text to a provider',async()=>{
   const http=provider([]),service=createChatbotService({env:{GEMINI_API_KEY:'unit-test-only'},http});
@@ -268,6 +309,8 @@ test('explicit links and social phrases work offline in the language of the requ
     ['Abre el calendario','es','/calendar',/calendario/i],
     ['Open the articles page','en','/articles',/articles/i],
     ['Mil gracias!','es',undefined,/de nada/i],
+    ['Muchas gracias por tu ayuda.','es',undefined,/de nada/i],
+    ['Thank you for your help!','en',undefined,/welcome/i],
     ['Goodbye!','en',undefined,/goodbye/i]
   ]) {
     const reply = await service.answer({question,locale:expectedLocale === 'es' ? 'en' : 'es',retrieve:() => assert.fail()});
@@ -343,4 +386,17 @@ test('catalog decision reuse respects fallback language, expires and never cache
   await decide({...first,question:'unclear'});
   await decide({...first,question:'unclear'});
   assert.equal(calls,5);
+});
+
+test('reuses a confident site-help decision, rechecking low-confidence and contextual requests', async () => {
+  const {reuseCatalogDecisions} = require('./chatbotDecisionCache');
+  let calls = 0;
+  const decide = reuseCatalogDecisions(async input=>{
+    calls++;
+    return {route:'site_help',data:{allowed:true,siteHelp:input.question === 'confirmed'},inputTokens:17,enrich:false};
+  });
+  for (const question of ['confirmed','confirmed','unsure','unsure']) await decide({question,history:[],fallbackLanguage:'en'});
+  assert.equal(calls,3);
+  await decide({question:'confirmed',history:[{role:'user',text:'prior turn'}],fallbackLanguage:'en'});
+  assert.equal(calls,4);
 });

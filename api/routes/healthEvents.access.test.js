@@ -104,7 +104,7 @@ async function fixture(t) {
   };
   const router = express.Router();
   const helpers = ['getBearerToken', 'getOptionalAuthUser', 'verifyToken', 'requireRoles',
-    'nowInTimezone', 'toSqlDateTimeString', 'toSqlDateString', 'isRegistrationOpen', 'hasEventEnded',
+    'toSqlDateTimeString', 'isRegistrationOpen',
     'safeParseJson', 'getEventBySlug', 'getEventById', 'publicEventShape', 'validateEventBody'];
   const roleConstants = source.slice(source.indexOf('const ADMIN_ROLES ='), source.indexOf('// ============ HELPERS'));
   const validationConstants = source.slice(source.indexOf('const SLUG_REGEX ='), source.indexOf('const DUPLICATE_SCAN_WINDOW_SECONDS'));
@@ -113,6 +113,7 @@ async function fixture(t) {
     routeSource('get', '/health-events/landing/:slug'),
     ...adminRoutes.map(([method, route]) => routeSource(method, route)),
   ].join('\n'), vm.createContext({
+    ...require('../services/healthEventPublicHome'),
     router, jwt, process: { env: { JWT_SECRET: secret } }, logger: { error(message) { throw new Error(message); } },
     mysqlConnection: { promise: () => db }, publicHomeCache: { at: 0 },
     attachImageUrls: async images => images, fetchForms: async () => [], fetchSlotsWithBooked: async () => [],
