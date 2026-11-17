@@ -10,6 +10,8 @@ const { RecurrenceRule } = require('node-schedule');
 
 const logger = require('./api/utils/logger.js');
 const email = require('./api/email/email.js');
+const { processDueConfirmations } = require('./api/services/healthEventConfirmation');
+const { processQueue: processParticipantEmailQueue } = require('./api/services/healthEventParticipantEmails');
 const moment = require('moment-timezone');
 const {
     isHealthMetricsDriveSyncEnabled,
@@ -28,6 +30,32 @@ const {
 const XLSX = require('xlsx-js-style');
 
 let isHealthMetricsDriveSyncRunning = false;
+
+let processingClinicConfirmations = false;
+schedule.scheduleJob('*/15 * * * * *', async () => {
+    if (processingClinicConfirmations) return;
+    processingClinicConfirmations = true;
+    try {
+        await processDueConfirmations(mysqlConnection.promise(), email.sendHealthEventBeneficiaryConfirmation, logger);
+    } catch (error) {
+        logger.error('Clinic confirmation queue unavailable: ' + (error.code || error.name));
+    } finally {
+        processingClinicConfirmations = false;
+    }
+});
+
+let processingParticipantEmails = false;
+schedule.scheduleJob('*/10 * * * * *', async () => {
+    if (processingParticipantEmails) return;
+    processingParticipantEmails = true;
+    try {
+        await processParticipantEmailQueue(mysqlConnection.promise(), email.sendHealthEventParticipantEmail);
+    } catch (error) {
+        logger.error('Health event participant email queue: ' + (error.code || error.name));
+    } finally {
+        processingParticipantEmails = false;
+    }
+});
 
 schedule.scheduleJob('0 * * * *', async () => { // Se ejecuta cada hora
     // Modificar todos los delivery_log con operation_id = 3 y offboarding_date = null que hayan sido creados hace más de 5 horas y agregarle la fecha actual
