@@ -19,6 +19,7 @@ const adminRoutes = [
   ['put', eventPath], ['get', `${eventPath}/full`], ['put', `${eventPath}/landing`],
   ['post', `${eventPath}/duplicate`],
   ['get', `${eventPath}/participant-emails/audience`], ['post', `${eventPath}/participant-emails`],
+  ['post', `${eventPath}/participant-emails/preview`], ['post', `${eventPath}/participant-emails/test`],
   ['get', `${eventPath}/participant-emails/latest`], ['get', `${eventPath}/participant-emails/:jobId(\\\\d+)`],
 ];
 
@@ -172,6 +173,7 @@ test('Non-managers and unauthenticated users cannot read or mutate health-event 
   const paths = [['get', '/health-events'], ['post', '/health-events'], ['put', '/health-events/1'],
     ['get', '/health-events/1/full'], ['put', '/health-events/1/landing'], ['post', '/health-events/1/duplicate'],
     ['get', '/health-events/1/participant-emails/audience'], ['post', '/health-events/1/participant-emails'],
+    ['post', '/health-events/1/participant-emails/preview'], ['post', '/health-events/1/participant-emails/test'],
     ['get', '/health-events/1/participant-emails/latest'], ['get', '/health-events/1/participant-emails/25']];
   for (const role of [undefined, 'beneficiary', 'eventvolunteer', 'delivery', 'stocker', 'client', 'contentmanager', 'auditor', 'director']) {
     for (const [method, route] of paths) {

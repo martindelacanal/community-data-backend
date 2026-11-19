@@ -3567,6 +3567,22 @@ function participantEmailFailure(res, error) {
   return res.status(500).json({ error: 'INTERNAL' });
 }
 
+router.post('/health-events/:id(\\d+)/participant-emails/preview', verifyToken, requireAdmin, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const draft = await participantEmails.sampleDraft(mysqlConnection.promise(), Number(req.params.id), req.body || {});
+    res.json(require('../email/email').buildHealthEventParticipantEmailContent(draft));
+  } catch (error) { participantEmailFailure(res, error); }
+});
+
+router.post('/health-events/:id(\\d+)/participant-emails/test', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await participantEmails.sendTest(mysqlConnection.promise(), Number(req.params.id), req.body || {},
+      require('../email/email').sendHealthEventParticipantEmail);
+    res.json(result);
+  } catch (error) { participantEmailFailure(res, error); }
+});
+
 router.get('/health-events/:id(\\d+)/participant-emails/audience', verifyToken, requireAdmin, async (req, res) => {
   try {
     res.json(await participantEmails.previewAudience(mysqlConnection.promise(), Number(req.params.id), req.query.slot_id));

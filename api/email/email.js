@@ -1565,7 +1565,7 @@ module.exports.buildVolunteerConfirmationContent = buildVolunteerConfirmationCon
 
 module.exports.sendAlertEmail = sendAlertEmail;
 
-module.exports.sendHealthEventParticipantEmail = function sendHealthEventParticipantEmail({ to, subject, message, reservations }) {
+function buildHealthEventParticipantEmailContent({ subject, message, reservations }) {
   const html = [`<p>${escapeHtmlValue(message).replace(/\r\n|\r|\n/g, '<br>')}</p>`];
   const text = [message];
   for (const reservation of reservations) {
@@ -1577,12 +1577,15 @@ module.exports.sendHealthEventParticipantEmail = function sendHealthEventPartici
     text.push([...lines, label, manageUrl].join('\n'));
     html.push(`<p lang="${language}">${lines.map(escapeHtmlValue).join('<br>')}<br><a href="${escapeHtmlValue(manageUrl)}">${label}</a></p>`);
   }
+  return { subject, text: text.join('\n\n'), html: html.join('\n') };
+}
+
+module.exports.buildHealthEventParticipantEmailContent = buildHealthEventParticipantEmailContent;
+module.exports.sendHealthEventParticipantEmail = function sendHealthEventParticipantEmail(params) {
   return transporter.sendMail({
     from: 'bienestarcommunity@gmail.com',
-    to: { address: to, name: '' },
-    subject,
-    text: text.join('\n\n'),
-    html: html.join('\n')
+    to: { address: params.to, name: '' },
+    ...buildHealthEventParticipantEmailContent(params)
   });
 };
 
