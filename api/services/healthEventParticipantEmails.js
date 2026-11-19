@@ -2,7 +2,7 @@
 
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
 const { participantContactEmailSql } = require('./healthEventParticipantContact');
-const { buildReservationUrl } = require('./healthEventReservation');
+const { buildReservationUrl, includesReservationLinks } = require('./healthEventReservation');
 
 class ParticipantEmailError extends Error {
   constructor(code, status) {
@@ -44,8 +44,11 @@ async function sampleDraft(db, eventId, body) {
   const { subject, message, slotId } = parseDraft(body);
   const language = body.language ?? 'en';
   if (!['en', 'es'].includes(language)) throw new ParticipantEmailError('INVALID_LANGUAGE', 400);
-  const [[event]] = await db.query('SELECT name_en, name_es FROM health_event WHERE id = ?', [eventId]);
-  if (!event) throw new ParticipantEmailError('NOT_FOUND', 404);
+  const event = await getEmailEvent(db, eventId);
+  if (!includesReservationLinks(event)) {
+    await checkSlot(db, eventId, slotId);
+    return { subject, message, reservations: [] };
+  }
   const params = slotId === null ? [eventId] : [eventId, slotId];
   const filter = slotId === null ? '' : 'AND id = ?';
   // Use a configured slot to illustrate the footer, even for clinics with no participants.
@@ -64,7 +67,7 @@ async function sendTest(db, eventId, body, send) {
   const to = normalizeParticipantEmail(body.to);
   if (!to) throw new ParticipantEmailError('INVALID_TEST_EMAIL', 400);
   const draft = await sampleDraft(db, eventId, body);
-  const prefix = draft.reservations[0].language === 'es' ? '[Prueba]' : '[Test]';
+  const prefix = body.language === 'es' ? '[Prueba]' : '[Test]';
   let receipt;
   try {
     receipt = await send({ ...draft, subject: prefix + ' ' + draft.subject, to });
@@ -93,9 +96,11 @@ function summarizeAddresses(registrations) {
   return { addresses, counts };
 }
 
-async function checkEvent(db, eventId, lock = false) {
-  const [events] = await db.query('SELECT id FROM health_event WHERE id = ?' + (lock ? ' FOR UPDATE' : ''), [eventId]);
-  if (!events.length) throw new ParticipantEmailError('NOT_FOUND', 404);
+async function getEmailEvent(db, eventId, lock = false) {
+  const [[event]] = await db.query("SELECT name_en, name_es, enabled, timezone, DATE_FORMAT(end_date,'%Y-%m-%d') AS end_date FROM health_event WHERE id = ?"
+    + (lock ? ' FOR UPDATE' : ''), [eventId]);
+  if (!event) throw new ParticipantEmailError('NOT_FOUND', 404);
+  return event;
 }
 
 async function checkSlot(db, eventId, slotId) {
@@ -122,9 +127,10 @@ async function loadAudience(db, eventId, slotId) {
 
 async function previewAudience(db, eventId, rawSlot) {
   const slotId = parseSlot(rawSlot);
-  await checkEvent(db, eventId);
+  const event = await getEmailEvent(db, eventId);
   await checkSlot(db, eventId, slotId);
-  return (await loadAudience(db, eventId, slotId)).counts;
+  const { counts } = await loadAudience(db, eventId, slotId);
+  return { ...counts, includes_reservation_links: includesReservationLinks(event) };
 }
 
 async function getJob(db, eventId, jobId = null) {
@@ -151,7 +157,7 @@ async function enqueue(db, eventId, userId, rawMessage) {
   try {
     await connection.beginTransaction();
     // Serialize duplicate browser submissions, including concurrent retries.
-    await checkEvent(connection, eventId, true);
+    await getEmailEvent(connection, eventId, true);
     const [existing] = await connection.query(`SELECT id, subject, message, slot_id, created_by_user_id
       FROM health_event_participant_email WHERE health_event_id = ? AND request_id = ?`, [eventId, requestId]);
     let jobId;
@@ -213,7 +219,8 @@ async function loadBatchAppointments(db, job, registrations) {
 }
 
 async function sendBatch(db, send) {
-  const [jobs] = await db.query(`SELECT j.id, j.health_event_id, j.slot_id, j.subject, j.message, e.name_en, e.name_es
+  const [jobs] = await db.query(`SELECT j.id, j.health_event_id, j.slot_id, j.subject, j.message, e.name_en, e.name_es,
+      e.enabled, e.timezone, DATE_FORMAT(e.end_date,'%Y-%m-%d') AS end_date
     FROM health_event_participant_email j JOIN health_event e ON e.id = j.health_event_id JOIN health_event_participant_delivery d ON d.job_id = j.id
     WHERE d.status = 'pending' ORDER BY d.job_id, d.id LIMIT 1`);
   if (!jobs.length) return;
@@ -221,8 +228,9 @@ async function sendBatch(db, send) {
   const [deliveries] = await db.query(`SELECT id, email FROM health_event_participant_delivery WHERE job_id = ?
     AND status = 'pending' ORDER BY id LIMIT 6`, [job.id]);
   const { addresses } = await loadAudience(db, job.health_event_id, job.slot_id);
-  const registrations = deliveries.flatMap(d => addresses.get(d.email.toLowerCase())?.registrations || []);
-  const appointments = await loadBatchAppointments(db, job, registrations);
+  const includeReservations = includesReservationLinks(job);
+  const appointments = includeReservations ? await loadBatchAppointments(db, job,
+    deliveries.flatMap(d => addresses.get(d.email.toLowerCase())?.registrations || [])) : null;
 
   const results = await Promise.allSettled(deliveries.map(async delivery => {
     const recipient = addresses.get(delivery.email.toLowerCase());
@@ -230,11 +238,11 @@ async function sendBatch(db, send) {
       await db.query("UPDATE health_event_participant_delivery SET status='skipped', email=NULL WHERE id=? AND status='pending'", [delivery.id]);
       return;
     }
-    const reservations = recipient.registrations.map(r => {
+    const reservations = includeReservations ? recipient.registrations.map(r => {
       const language = r.language === 'es' ? 'es' : 'en';
       return { firstname: r.firstname, language, eventName: language === 'es' ? job.name_es : job.name_en,
         appointments: appointments.get(r.id) || [], manageUrl: buildReservationUrl(r, language) };
-    });
+    }) : [];
     const [claim] = await db.query("UPDATE health_event_participant_delivery SET status='sending' WHERE id=? AND status='pending'", [delivery.id]);
     if (!claim.affectedRows) return;
     let status;

@@ -1,7 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const { buildReservationUrl, readReservationSchedule } = require('./healthEventReservation');
+const { buildReservationUrl, includesReservationLinks, readReservationSchedule } = require('./healthEventReservation');
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
 
 const DEFAULT_HEALTH_PASSWORD = 'bienestar';
@@ -9,7 +9,7 @@ const DEFAULT_HEALTH_PASSWORD = 'bienestar';
 async function deliverConfirmation(db, send, job) {
   const [[row]] = await db.query(
     `SELECT r.id, r.reservation_version, r.contact_email, u.firstname, u.username, u.reset_password,
-            e.name_en, e.name_es, e.start_time, e.end_time, l.organization, l.community_city, l.address,
+            e.name_en, e.name_es, e.start_time, e.end_time, e.enabled, e.timezone, l.organization, l.community_city, l.address,
             DATE_FORMAT(e.start_date, '%Y-%m-%d') AS start_date, DATE_FORMAT(e.end_date, '%Y-%m-%d') AS end_date
        FROM health_event_registration r JOIN user u ON u.id = r.user_id JOIN health_event e ON e.id = r.health_event_id
        JOIN location l ON l.id = e.location_id
@@ -22,7 +22,7 @@ async function deliverConfirmation(db, send, job) {
     to, language: job.language, firstname: row.firstname, eventNameEn: row.name_en, eventNameEs: row.name_es,
     locationName: [row.organization, row.community_city].filter(Boolean).join(' — '), address: row.address,
     startTime: row.start_time, endTime: row.end_time, eventStartDate: row.start_date, eventEndDate: row.end_date,
-    ...schedule, manageUrl: buildReservationUrl(row, job.language),
+    ...schedule, manageUrl: includesReservationLinks(row) ? buildReservationUrl(row, job.language) : null,
     messageId: '<health-event-confirmation-' + row.id + '-' + row.reservation_version + '@bienestarcommunity.org>',
     credentials: job.include_default_login && row.reset_password === 'Y' ? { username: row.username, password: DEFAULT_HEALTH_PASSWORD } : null
   });
