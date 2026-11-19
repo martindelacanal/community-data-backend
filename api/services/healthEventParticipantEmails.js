@@ -22,17 +22,60 @@ function parseSlot(input) {
   return id;
 }
 
-function parseMessage(body = {}) {
+function parseDraft(body) {
   const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
   const message = typeof body.message === 'string' ? body.message.trim() : '';
   if (!subject || subject.length > 160 || /[\x00-\x1f\x7f\u2028\u2029]/.test(body.subject) ||
       !message || message.length > 5000 || /\0/.test(message)) {
     throw new ParticipantEmailError('INVALID_MESSAGE', 400);
   }
+  return { subject, message, slotId: parseSlot(body.slot_id) };
+}
+
+function parseMessage(body = {}) {
+  const draft = parseDraft(body);
   if (typeof body.request_id !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(body.request_id)) {
     throw new ParticipantEmailError('INVALID_REQUEST_ID', 400);
   }
-  return { subject, message, requestId: body.request_id.toLowerCase(), slotId: parseSlot(body.slot_id) };
+  return { ...draft, requestId: body.request_id.toLowerCase() };
+}
+
+async function sampleDraft(db, eventId, body) {
+  const { subject, message, slotId } = parseDraft(body);
+  const language = body.language ?? 'en';
+  if (!['en', 'es'].includes(language)) throw new ParticipantEmailError('INVALID_LANGUAGE', 400);
+  const [[event]] = await db.query('SELECT name_en, name_es FROM health_event WHERE id = ?', [eventId]);
+  if (!event) throw new ParticipantEmailError('NOT_FOUND', 404);
+  const params = slotId === null ? [eventId] : [eventId, slotId];
+  const filter = slotId === null ? '' : 'AND id = ?';
+  // Use a configured slot to illustrate the footer, even for clinics with no participants.
+  const [appointments] = await db.query(`SELECT service_key, DATE_FORMAT(slot_date,'%Y-%m-%d') AS slot_date,
+    TIME_FORMAT(start_time,'%H:%i') AS start_time FROM health_event_slot WHERE health_event_id = ? ${filter}
+    ORDER BY slot_date, start_time, id LIMIT 1`, params);
+  if (slotId !== null && !appointments.length) throw new ParticipantEmailError('INVALID_SLOT', 400);
+  return { subject, message, reservations: [{
+    firstname: language === 'es' ? 'Participante de ejemplo' : 'Sample participant', language,
+    eventName: language === 'es' ? event.name_es : event.name_en, appointments,
+    manageUrl: 'https://example.invalid/reservation'
+  }] };
+}
+
+async function sendTest(db, eventId, body, send) {
+  const to = normalizeParticipantEmail(body.to);
+  if (!to) throw new ParticipantEmailError('INVALID_TEST_EMAIL', 400);
+  const draft = await sampleDraft(db, eventId, body);
+  const prefix = draft.reservations[0].language === 'es' ? '[Prueba]' : '[Test]';
+  let receipt;
+  try {
+    receipt = await send({ ...draft, subject: prefix + ' ' + draft.subject, to });
+  } catch (error) {
+    const code = deliveryFailure(error) === 'failed' ? 'TEST_EMAIL_FAILED' : 'TEST_EMAIL_UNCERTAIN';
+    throw new ParticipantEmailError(code, 502);
+  }
+  if (receipt?.accepted?.length !== 1 || receipt.rejected?.length) {
+    throw new ParticipantEmailError('TEST_EMAIL_FAILED', 502);
+  }
+  return { accepted: true };
 }
 
 function summarizeAddresses(registrations) {
@@ -228,4 +271,4 @@ async function processQueue(pool, send) {
   }
 }
 
-module.exports = { ParticipantEmailError, parseMessage, previewAudience, getJob, enqueue, processQueue };
+module.exports = { ParticipantEmailError, parseMessage, sampleDraft, sendTest, previewAudience, getJob, enqueue, processQueue };

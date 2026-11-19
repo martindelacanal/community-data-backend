@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
 const { readReservationToken } = require('./healthEventReservation');
-const { parseMessage, previewAudience, enqueue, getJob, processQueue } = require('./healthEventParticipantEmails');
+const { parseMessage, sampleDraft, sendTest, previewAudience, enqueue, getJob, processQueue } = require('./healthEventParticipantEmails');
 
 const draft = { subject: 'Clinic reminder', message: 'Please use the east entrance.',
   request_id: '31958820-4bfb-4dc2-8f84-767237ff1019' };
@@ -73,6 +73,55 @@ function fixture(t) {
   };
   return { db, sql };
 }
+
+test('preview and test render the same draft as a mailing, using only event configuration and an example reservation', async t => {
+  const { db, sql } = fixture(t);
+  const eventOnly = { query: (query, params) => {
+    assert.match(query, /^SELECT /);
+    assert.match(query, / FROM health_event(?:_slot)? WHERE /);
+    assert.doesNotMatch(query, /JOIN|registration|appointment|user\b/i);
+    return db.query(query, params);
+  } };
+  const sent = [];
+  t.mock.method(require('nodemailer'), 'createTransport', () => ({
+    sendMail: async mail => { sent.push(mail); return { accepted: [mail.to.address], rejected: [] }; }
+  }));
+  const { buildHealthEventParticipantEmailContent, sendHealthEventParticipantEmail } = require('../email/email');
+  const body = { subject: 'Join the clinic', message: 'Hello <team>\nBring a friend.', slot_id: 11, language: 'es' };
+  const preview = buildHealthEventParticipantEmailContent(await sampleDraft(eventOnly, 1, body));
+  assert.equal(preview.subject, body.subject);
+  assert.match(preview.html, /Hello &lt;team&gt;<br>Bring a friend\./);
+  assert.match(preview.html, /Participante de ejemplo · Clínica/);
+  assert.match(preview.html, /Vision · .*2099 · 09:30/);
+  assert.match(preview.text, /https:\/\/example\.invalid\/reservation/);
+  assert.equal(sent.length, 0);
+  const testResult = await sendTest(eventOnly, 1, { ...body, to: ' editor@Example.test ' }, sendHealthEventParticipantEmail);
+  assert.deepEqual(testResult, { accepted: true });
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].to, { address: 'editor@example.test', name: '' });
+  assert.equal(sent[0].subject, '[Prueba] ' + preview.subject);
+  assert.equal(sent[0].html, preview.html);
+  assert.equal(sent[0].text, preview.text);
+  assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM health_event_participant_email').get().n, 0);
+  sql.exec('DELETE FROM health_event_slot WHERE health_event_id = 2');
+  const noSlot = await sampleDraft(eventOnly, 2, { subject: 'Info', message: 'Hello', language: 'en' });
+  assert.deepEqual(noSlot.reservations[0].appointments, []);
+  assert.equal(noSlot.reservations[0].firstname, 'Sample participant');
+});
+
+test('test sends reject invalid input before delivery and distinguish rejected mail from an unknown SMTP outcome', async t => {
+  const { db } = fixture(t);
+  const body = { ...draft, language: 'en', to: 'editor@example.test' };
+  const neverSend = async () => { assert.fail('Invalid input must never reach SMTP'); };
+  for (const [params, code] of [[{ to: ['a@example.test'] }, 'INVALID_TEST_EMAIL'],
+    [{ to: 'a@example.test,b@example.test' }, 'INVALID_TEST_EMAIL'], [{ slot_id: 22 }, 'INVALID_SLOT'],
+    [{ language: 'fr' }, 'INVALID_LANGUAGE'], [{ message: ' ' }, 'INVALID_MESSAGE']]) {
+    await assert.rejects(sendTest(db, 1, { ...body, ...params }, neverSend), { code });
+  }
+  await assert.rejects(sampleDraft(db, 77, body), { code: 'NOT_FOUND' });
+  await assert.rejects(sendTest(db, 1, body, async () => ({ accepted: [], rejected: [body.to] })), { code: 'TEST_EMAIL_FAILED' });
+  await assert.rejects(sendTest(db, 1, body, async () => { throw new Error('Connection lost'); }), { code: 'TEST_EMAIL_UNCERTAIN' });
+});
 
 test('only accepts a single mailbox and validates a plain-text subject and body', () => {
   for (const value of ['john@example.test,others', 'x,y@example.test', 'other:me@example.test',
