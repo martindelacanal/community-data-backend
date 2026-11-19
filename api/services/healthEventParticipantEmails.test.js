@@ -22,7 +22,9 @@ function fixture(t) {
   sql.function('DATE_FORMAT', (date, format) => date);
   sql.function('TIME_FORMAT', (time, format) => time.slice(0, 5));
   sql.exec(`
-    CREATE TABLE health_event (id INTEGER PRIMARY KEY, name_en TEXT DEFAULT 'Clinic', name_es TEXT DEFAULT 'Clínica');
+    CREATE TABLE health_event (id INTEGER PRIMARY KEY, name_en TEXT DEFAULT 'Clinic', name_es TEXT DEFAULT 'Clínica',
+      enabled TEXT DEFAULT 'Y', timezone TEXT DEFAULT 'America/Los_Angeles', end_date TEXT DEFAULT '2099-12-06',
+      registration_closes_at TEXT DEFAULT '2001-01-01');
     CREATE TABLE user (id INTEGER PRIMARY KEY, email TEXT, deleted TEXT DEFAULT 'N', firstname TEXT, language TEXT DEFAULT 'en');
     CREATE TABLE health_event_slot (id INTEGER PRIMARY KEY, health_event_id INTEGER, service_key TEXT DEFAULT 'vision',
       slot_date TEXT DEFAULT '2099-12-05', start_time TEXT DEFAULT '09:30');
@@ -138,12 +140,42 @@ test('only accepts a single mailbox and validates a plain-text subject and body'
 
 test('audience counts by clinic and booked slot, retaining only eligible, unique addresses', async t => {
   const { db } = fixture(t);
-  assert.deepEqual(await previewAudience(db, 1), { registrations: 5, recipients: 2, without_email: 2, duplicates: 1 });
-  assert.deepEqual(await previewAudience(db, 1, '11'), { registrations: 3, recipients: 1, without_email: 1, duplicates: 1 });
+  assert.deepEqual(await previewAudience(db, 1), { registrations: 5, recipients: 2, without_email: 2, duplicates: 1, includes_reservation_links: true });
+  assert.deepEqual(await previewAudience(db, 1, '11'), { registrations: 3, recipients: 1, without_email: 1, duplicates: 1, includes_reservation_links: true });
   await assert.rejects(previewAudience(db, 1, 22), { code: 'INVALID_SLOT' });
   await assert.rejects(previewAudience(db, 3), { code: 'NOT_FOUND' });
   await assert.rejects(enqueue(db, 1, 42, {...draft, slot_id:12}), { code:'NO_RECIPIENTS' });
   assert.equal(await getJob(db, 1), null);
+});
+
+test('a mailing to a previous clinic keeps the invitation and omits the old reservations in preview, test and delivery', async t => {
+  const { db, sql } = fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-12-07T07:59:59Z') });
+  sql.exec("UPDATE health_event SET end_date='2026-12-06' WHERE id=1");
+  const invitation = { ...draft, subject: 'San Jacinto', message: 'Join our next clinic! https://bienestarcommunity.org/san-jacinto',
+    slot_id: 11, language: 'es' };
+  const { buildHealthEventParticipantEmailContent: render } = require('../email/email');
+  // Although registration closed earlier, a reservation still exists through the clinic's last local day.
+  assert.equal((await previewAudience(db, 1, 11)).includes_reservation_links, true);
+  assert.match(render(await sampleDraft(db, 1, invitation)).text, /https:\/\/example\.invalid\/reservation/);
+  await enqueue(db, 1, 42, invitation);
+  t.mock.timers.tick(1000); // Midnight in Los Angeles.
+  assert.deepEqual(await previewAudience(db, 1, 11), { registrations: 3, recipients: 1, without_email: 1,
+    duplicates: 1, includes_reservation_links: false });
+  const expected = { subject: invitation.subject, html: '<p>' + invitation.message + '</p>', text: invitation.message };
+  assert.deepEqual(render(await sampleDraft(db, 1, invitation)), expected);
+  await assert.rejects(sampleDraft(db, 1, { ...invitation, slot_id: 22 }), { code: 'INVALID_SLOT' });
+  const sent = [];
+  const smtp = async mail => { sent.push([mail.to, render(mail)]); return { accepted: [mail.to], rejected: [] }; };
+  await sendTest(db, 1, { ...invitation, to: 'editor@example.test' }, smtp);
+  await processQueue(db, smtp);
+  assert.deepEqual(sent, [
+    ['editor@example.test', { ...expected, subject: '[Prueba] ' + expected.subject }],
+    ['Family@example.test', expected]
+  ]);
+  sql.exec("UPDATE health_event SET end_date='2099-12-06', enabled='N' WHERE id=1");
+  assert.equal((await previewAudience(db, 1)).includes_reservation_links, false);
+  assert.deepEqual(render(await sampleDraft(db, 1, invitation)), expected);
 });
 
 test('transaction snapshots the audience once across retries and sends privately to still-registered contacts', async t => {

@@ -144,11 +144,15 @@ test('queue sends individualized bilingual details, retries temporary failures a
   const job = { registration_id: 7, reservation_version: 1, language: 'es', include_default_login: 0, attempts: 0 };
   let canClaim = true;
   let active = true;
+  let endDate = '2099-12-06';
   let finalState;
   const db = { async query(sql, args) {
     if (sql.startsWith('SELECT registration_id')) return [[job]];
     if (sql.includes('SET claim_id = ?')) return [{ affectedRows: canClaim ? 1 : 0 }];
-    if (sql.includes('FROM health_event_registration r JOIN user')) return [active ? [{ id: 7, reservation_version: 1, contact_email: 'self@example.org', name_es: 'Clínica' }] : []];
+    if (sql.includes('FROM health_event_registration r JOIN user')) return [active ? [{
+      id: 7, reservation_version: 1, contact_email: 'self@example.org', name_es: 'Clínica',
+      enabled: 'Y', timezone: 'America/Los_Angeles', end_date: endDate
+    }] : []];
     if (sql.includes('FROM health_event_appointment') || sql.includes('FROM health_event_registration_date')) return [[]];
     if (sql.includes('SET state = ?')) { finalState = args[0]; return [{}]; }
     throw new Error('Unexpected query ' + sql);
@@ -163,6 +167,14 @@ test('queue sends individualized bilingual details, retries temporary failures a
   assert.equal(finalState, 'sent');
   await processDueConfirmations(db, async () => { throw new Error('transient'); }, logger);
   assert.equal(finalState, 'queued');
+  // A retry after the clinic's last day still confirms the registration without a management link.
+  endDate = '2001-12-06';
+  await processDueConfirmations(db, async mail => {
+    assert.equal(mail.manageUrl, null);
+    const { html, text } = buildHealthBeneficiaryConfirmationContent(mail);
+    for (const body of [html, text]) assert.doesNotMatch(body, /Ver o cancelar mi reserva|health-events\/reservation/);
+  }, logger);
+  assert.equal(finalState, 'sent');
   active = false;
   await processDueConfirmations(db, () => assert.fail(), logger);
   assert.equal(finalState, 'skipped');

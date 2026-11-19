@@ -1,6 +1,11 @@
 'use strict';
 
 const { createHmac, timingSafeEqual } = require('node:crypto');
+const { hasEventEnded } = require('./healthEventPublicHome');
+
+function includesReservationLinks(event, eventEnded = hasEventEnded) {
+  return event.enabled === 'Y' && !eventEnded(event);
+}
 
 function signature(claims, secret) {
   return createHmac('sha256', secret).update('health-event-reservation/v1/' + claims).digest('base64url');
@@ -64,7 +69,7 @@ async function manageReservation(pool, claims, cancel, hasEventEnded) {
     const [[checkin]] = await db.query(
       "SELECT id FROM health_event_scan WHERE registration_id = ? AND scan_type = 'checkin' LIMIT 1",
       [registration.id]);
-    let canCancel = registration.status === 'registered' && event.enabled === 'Y' && !hasEventEnded(event) && !checkin;
+    let canCancel = registration.status === 'registered' && includesReservationLinks(event, hasEventEnded) && !checkin;
     if (cancel && registration.status !== 'cancelled') {
       if (!canCancel) throw new ReservationError('CANCELLATION_CLOSED', 409);
       await db.query("UPDATE health_event_appointment SET status = 'cancelled' WHERE registration_id = ? AND status = 'booked'", [registration.id]);
@@ -85,4 +90,4 @@ async function manageReservation(pool, claims, cancel, hasEventEnded) {
   }
 }
 
-module.exports = { buildReservationUrl, readReservationToken, readReservationSchedule, manageReservation, ReservationError };
+module.exports = { buildReservationUrl, includesReservationLinks, readReservationToken, readReservationSchedule, manageReservation, ReservationError };
