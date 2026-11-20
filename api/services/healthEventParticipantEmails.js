@@ -1,5 +1,6 @@
 'use strict';
 
+const { createHmac } = require('node:crypto');
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
 const { participantContactEmailSql } = require('./healthEventParticipantContact');
 const { buildReservationUrl, includesReservationLinks } = require('./healthEventReservation');
@@ -136,16 +137,85 @@ async function previewAudience(db, eventId, rawSlot) {
   return { ...counts, includes_reservation_links: includesReservationLinks(event) };
 }
 
-async function getJob(db, eventId, jobId = null) {
-  const filter = jobId === null ? 'ORDER BY id DESC LIMIT 1' : 'AND id = ?';
-  const [jobs] = await db.query(`SELECT id, subject, slot_id, registrations, recipients, without_email, duplicates,
+function recipientKey(eventId, requestId, address = '') {
+  if (!process.env.JWT_SECRET) return null;
+  return createHmac('sha256', process.env.JWT_SECRET)
+    .update(JSON.stringify(['clinic-participant-email/v1', String(eventId), requestId, address.toLowerCase()])).digest('hex');
+}
+
+function registrationSnapshot(registrations) {
+  return registrations.map(row => [row.id, row.reservation_version]);
+}
+
+function readSnapshot(value) {
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
+async function readJob(db, eventId, jobId, lock = false) {
+  const filter = jobId === null ? 'ORDER BY j.id DESC LIMIT 1' : 'AND j.id = ?';
+  const [jobs] = await db.query(`SELECT j.id, j.subject, j.slot_id, j.registrations, j.recipients, j.without_email, j.duplicates,
+    j.created_at, j.request_id, j.retry_generation, j.retry_key_check,
+    (SELECT MAX(p.id) FROM health_event_participant_email p WHERE p.health_event_id=j.health_event_id AND p.id<j.id) AS previous_job_id,
+    (SELECT MIN(n.id) FROM health_event_participant_email n WHERE n.health_event_id=j.health_event_id AND n.id>j.id) AS next_job_id,
     EXISTS(SELECT 1 FROM health_event_participant_mail_sender WHERE id=1 AND paused_until > UTC_TIMESTAMP()) AS sender_paused
-    FROM health_event_participant_email WHERE health_event_id = ? ${filter}`, jobId === null ? [eventId] : [eventId, jobId]);
+    FROM health_event_participant_email j WHERE j.health_event_id = ? ${filter}${lock ? ' FOR UPDATE' : ''}`,
+  jobId === null ? [eventId] : [eventId, jobId]);
   if (!jobs.length) {
     if (jobId === null) return null;
     throw new ParticipantEmailError('NOT_FOUND', 404);
   }
-  const job = jobs[0];
+  return jobs[0];
+}
+
+async function manualRetryPlan(db, eventId, job, requireComplete = false) {
+  const [deliveries] = await db.query(`SELECT id, status, recipient_key, retry_recipient_key, registration_snapshot
+    FROM health_event_participant_delivery WHERE job_id=?`, [job.id]);
+  if (deliveries.some(row => row.status === 'pending' || row.status === 'sending')) {
+    if (requireComplete) throw new ParticipantEmailError('RETRY_IN_PROGRESS', 409);
+    return [];
+  }
+  // Older campaigns and rotated keys cannot reliably exclude a mailbox already contacted.
+  if (!job.retry_key_check || recipientKey(eventId, job.request_id) !== job.retry_key_check ||
+      deliveries.some(row => !row.recipient_key)) return [];
+
+  const { addresses } = await loadAudience(db, eventId, job.slot_id);
+  const byRegistration = new Map();
+  for (const recipient of addresses.values()) {
+    for (const r of recipient.registrations) byRegistration.set(r.id, { row: r, recipient });
+  }
+
+  const reserved = new Map();
+  for (const row of deliveries) {
+    for (const key of [row.recipient_key, row.retry_recipient_key].filter(Boolean)) {
+      reserved.set(key, reserved.has(key) && reserved.get(key) !== row.id ? null : row.id);
+    }
+  }
+
+  const candidates = new Map();
+  for (const row of deliveries) {
+    if (row.status !== 'failed' || !row.registration_snapshot) continue;
+    const matches = [];
+    for (const [id, version] of readSnapshot(row.registration_snapshot)) {
+      const current = byRegistration.get(id);
+      if (current && current.row.reservation_version === version) matches.push(current);
+    }
+    if (!matches.length) continue;
+    const recipient = matches[0].recipient;
+    // Never split a formerly shared household delivery across unverified new targets.
+    if (matches.some(match => match.recipient !== recipient)) continue;
+    const key = recipientKey(eventId, job.request_id, recipient.address);
+    if (reserved.has(key) && reserved.get(key) !== row.id) continue;
+    // Two independent failures converging on the same new address need individual review.
+    candidates.set(key, candidates.has(key) ? null : {
+      id: row.id, address: recipient.address, key, snapshot: registrationSnapshot(matches.map(match => match.row))
+    });
+  }
+  return Array.from(candidates.values()).filter(Boolean);
+}
+
+async function getJob(db, eventId, jobId = null) {
+  const job = await readJob(db, eventId, jobId);
+  if (!job) return null;
   const [states] = await db.query(`SELECT status, COUNT(*) AS total,
     SUM(CASE WHEN retry_at > UTC_TIMESTAMP() THEN 1 ELSE 0 END) AS deferred,
     SUM(recipient_rejected) AS recipient_rejections FROM health_event_participant_delivery
@@ -160,8 +230,38 @@ async function getJob(db, eventId, jobId = null) {
   }
   const pending = totals.pending + totals.sending;
   const status = !pending ? 'completed' : totals.pending === job.recipients ? 'pending' : 'sending';
-  return { ...job, status, sent: totals.sent, failed: totals.failed, uncertain: totals.uncertain, skipped: totals.skipped,
+  const retryable = !pending && totals.failed && job.retry_key_check ? (await manualRetryPlan(db, eventId, job)).length : 0;
+  const { retry_key_check, request_id, ...publicJob } = job;
+  return { ...publicJob, status, retryable_failed: retryable, sent: totals.sent, failed: totals.failed, uncertain: totals.uncertain, skipped: totals.skipped,
     pending, deferred, sender_paused: totals.pending > 0 && Boolean(job.sender_paused), recipient_rejections: recipientRejections };
+}
+
+async function retryFailed(db, eventId, jobId, generation) {
+  if (!Number.isSafeInteger(generation) || generation < 0) throw new ParticipantEmailError('INVALID_RETRY_GENERATION', 400);
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const job = await readJob(connection, eventId, jobId, true);
+    if (generation > job.retry_generation) throw new ParticipantEmailError('RETRY_GENERATION_CONFLICT', 409);
+    if (generation === job.retry_generation) {
+      const plan = await manualRetryPlan(connection, eventId, job, true);
+      if (!plan.length) throw new ParticipantEmailError('NO_RETRYABLE_FAILURES', 409);
+      for (const item of plan) {
+        await connection.query(`UPDATE health_event_participant_delivery SET status='pending', email=?, attempts=0,
+          recipient_rejected=0, retry_at=NULL, retry_recipient_key=?, registration_snapshot=? WHERE id=? AND status='failed'`,
+        [item.address, item.key, JSON.stringify(item.snapshot), item.id]);
+      }
+      await connection.query('UPDATE health_event_participant_email SET retry_generation=retry_generation+1 WHERE id=?', [job.id]);
+    }
+    const result = await getJob(connection, eventId, job.id);
+    await connection.commit();
+    return result;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 async function enqueue(db, eventId, userId, rawMessage) {
@@ -185,13 +285,16 @@ async function enqueue(db, eventId, userId, rawMessage) {
       const { addresses, counts } = await loadAudience(connection, eventId, slotId);
       if (!counts.recipients) throw new ParticipantEmailError('NO_RECIPIENTS', 409);
       const [created] = await connection.query(`INSERT INTO health_event_participant_email
-        (health_event_id, request_id, created_by_user_id, slot_id, subject, message, registrations, recipients, without_email, duplicates)
-        VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      [eventId, requestId, userId, slotId, subject, message, counts.registrations, counts.recipients, counts.without_email, counts.duplicates]);
+        (health_event_id, request_id, created_by_user_id, slot_id, subject, message, registrations, recipients, without_email, duplicates, retry_key_check)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [eventId, requestId, userId, slotId, subject, message, counts.registrations, counts.recipients,
+        counts.without_email, counts.duplicates, recipientKey(eventId, requestId)]);
       jobId = created.insertId;
-      const entries = Array.from(addresses.values(), recipient => [jobId, recipient.address]);
+      const entries = Array.from(addresses.values(), recipient => [jobId, recipient.address,
+        recipientKey(eventId, requestId, recipient.address), JSON.stringify(registrationSnapshot(recipient.registrations))]);
       for (let offset = 0; offset < entries.length; offset += 500) {
-        await connection.query('INSERT INTO health_event_participant_delivery (job_id,email) VALUES ?', [entries.slice(offset, offset + 500)]);
+        await connection.query('INSERT INTO health_event_participant_delivery (job_id,email,recipient_key,registration_snapshot) VALUES ?',
+          [entries.slice(offset, offset + 500)]);
       }
     }
     const job = await getJob(connection, eventId, jobId);
@@ -241,7 +344,8 @@ async function recordDelivery(db, delivery, outcome) {
         retry_at=TIMESTAMPADD(MINUTE, ?, UTC_TIMESTAMP()) WHERE id=?`, [delay, delivery.id]);
     } else {
       const status = outcome === 'sent' || outcome === 'uncertain' ? outcome : 'failed';
-      await db.query('UPDATE health_event_participant_delivery SET status=?, email=NULL, retry_at=NULL, recipient_rejected=? WHERE id=?',
+      const clearSnapshot = status === 'failed' ? '' : ', registration_snapshot=NULL';
+      await db.query(`UPDATE health_event_participant_delivery SET status=?, email=NULL, retry_at=NULL, recipient_rejected=?${clearSnapshot} WHERE id=?`,
         [status, outcome === 'invalid_recipient' ? 1 : 0, delivery.id]);
     }
     if (pauseSender) await db.commit();
@@ -261,20 +365,23 @@ async function sendBatch(db, send) {
     ORDER BY d.job_id, d.id LIMIT 1`);
   if (!jobs.length) return;
   const job = jobs[0];
-  const [deliveries] = await db.query(`SELECT id, email, attempts FROM health_event_participant_delivery WHERE job_id = ?
+  const [deliveries] = await db.query(`SELECT id, email, attempts, registration_snapshot FROM health_event_participant_delivery WHERE job_id = ?
     AND status = 'pending' AND (retry_at IS NULL OR retry_at <= UTC_TIMESTAMP()) ORDER BY id LIMIT 6`, [job.id]);
   const { addresses } = await loadAudience(db, job.health_event_id, job.slot_id);
+  for (const delivery of deliveries) {
+    const members = addresses.get(delivery.email.toLowerCase())?.registrations || [];
+    const versions = delivery.registration_snapshot ? new Map(readSnapshot(delivery.registration_snapshot)) : null;
+    delivery.registrations = versions ? members.filter(r => versions.get(r.id) === r.reservation_version) : members;
+  }
   const includeReservations = includesReservationLinks(job);
-  const appointments = includeReservations ? await loadBatchAppointments(db, job,
-    deliveries.flatMap(d => addresses.get(d.email.toLowerCase())?.registrations || [])) : null;
+  const appointments = includeReservations ? await loadBatchAppointments(db, job, deliveries.flatMap(d => d.registrations)) : null;
 
   for (const delivery of deliveries) {
-    const recipient = addresses.get(delivery.email.toLowerCase());
-    if (!recipient) {
-      await db.query("UPDATE health_event_participant_delivery SET status='skipped', email=NULL, retry_at=NULL WHERE id=? AND status='pending'", [delivery.id]);
+    if (!delivery.registrations.length) {
+      await db.query("UPDATE health_event_participant_delivery SET status='skipped', email=NULL, retry_at=NULL, registration_snapshot=NULL WHERE id=? AND status='pending'", [delivery.id]);
       continue;
     }
-    const reservations = includeReservations ? recipient.registrations.map(r => {
+    const reservations = includeReservations ? delivery.registrations.map(r => {
       const language = r.language === 'es' ? 'es' : 'en';
       return { firstname: r.firstname, language, eventName: language === 'es' ? job.name_es : job.name_en,
         appointments: appointments.get(r.id) || [], manageUrl: buildReservationUrl(r, language) };
@@ -304,7 +411,7 @@ async function processQueue(pool, send) {
     const [[row]] = await connection.query("SELECT GET_LOCK('health_event_participant_mail_worker',0) AS acquired");
     locked = row.acquired === 1;
     if (!locked) return;
-    await connection.query("UPDATE health_event_participant_delivery SET status='uncertain', email=NULL, retry_at=NULL WHERE status='sending'");
+    await connection.query("UPDATE health_event_participant_delivery SET status='uncertain', email=NULL, retry_at=NULL, registration_snapshot=NULL WHERE status='sending'");
     await sendBatch(connection, send);
   } finally {
     try {
@@ -315,4 +422,4 @@ async function processQueue(pool, send) {
   }
 }
 
-module.exports = { ParticipantEmailError, parseMessage, sampleDraft, sendTest, previewAudience, getJob, enqueue, processQueue };
+module.exports = { ParticipantEmailError, parseMessage, sampleDraft, sendTest, previewAudience, getJob, enqueue, retryFailed, processQueue };

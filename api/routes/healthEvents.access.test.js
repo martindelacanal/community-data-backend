@@ -21,6 +21,7 @@ const adminRoutes = [
   ['get', `${eventPath}/participant-emails/audience`], ['post', `${eventPath}/participant-emails`],
   ['post', `${eventPath}/participant-emails/preview`], ['post', `${eventPath}/participant-emails/test`],
   ['get', `${eventPath}/participant-emails/latest`], ['get', `${eventPath}/participant-emails/:jobId(\\\\d+)`],
+  ['post', `${eventPath}/participant-emails/:jobId(\\\\d+)/retry-failed`],
 ];
 
 function functionSource(name) {
@@ -48,7 +49,7 @@ function eventBody(extra = {}) {
     location_id: 10, start_date: '2099-01-01', end_date: '2099-01-02', ...extra };
 }
 
-async function fixture(t) {
+async function fixture(t, participantEmails = {}) {
   const statements = [];
   const duplicates = [];
   const events = new Map();
@@ -105,7 +106,7 @@ async function fixture(t) {
   };
   const router = express.Router();
   const helpers = ['getBearerToken', 'getOptionalAuthUser', 'verifyToken', 'requireRoles',
-    'toSqlDateTimeString', 'isRegistrationOpen',
+    'toSqlDateTimeString', 'isRegistrationOpen', 'participantEmailFailure',
     'safeParseJson', 'getEventBySlug', 'getEventById', 'publicEventShape', 'validateEventBody'];
   const roleConstants = source.slice(source.indexOf('const ADMIN_ROLES ='), source.indexOf('// ============ HELPERS'));
   const validationConstants = source.slice(source.indexOf('const SLUG_REGEX ='), source.indexOf('const DUPLICATE_SCAN_WINDOW_SECONDS'));
@@ -116,7 +117,7 @@ async function fixture(t) {
   ].join('\n'), vm.createContext({
     ...require('../services/healthEventPublicHome'),
     router, jwt, process: { env: { JWT_SECRET: secret } }, logger: { error(message) { throw new Error(message); } },
-    mysqlConnection: { promise: () => db }, publicHomeCache: { at: 0 },
+    mysqlConnection: { promise: () => db }, publicHomeCache: { at: 0 }, participantEmails,
     attachImageUrls: async images => images, fetchForms: async () => [], fetchSlotsWithBooked: async () => [],
     duplicateHealthEvent: async options => { duplicates.push(options); return { id: 123 }; },
     HealthEventDuplicateError: require('../services/healthEventDuplicate').HealthEventDuplicateError,
@@ -174,7 +175,8 @@ test('Non-managers and unauthenticated users cannot read or mutate health-event 
     ['get', '/health-events/1/full'], ['put', '/health-events/1/landing'], ['post', '/health-events/1/duplicate'],
     ['get', '/health-events/1/participant-emails/audience'], ['post', '/health-events/1/participant-emails'],
     ['post', '/health-events/1/participant-emails/preview'], ['post', '/health-events/1/participant-emails/test'],
-    ['get', '/health-events/1/participant-emails/latest'], ['get', '/health-events/1/participant-emails/25']];
+    ['get', '/health-events/1/participant-emails/latest'], ['get', '/health-events/1/participant-emails/25'],
+    ['post', '/health-events/1/participant-emails/25/retry-failed']];
   for (const role of [undefined, 'beneficiary', 'eventvolunteer', 'delivery', 'stocker', 'client', 'contentmanager', 'auditor', 'director']) {
     for (const [method, route] of paths) {
       const response = await f.request(method, route, { role, body: method === 'get' ? undefined : eventBody() });
@@ -185,6 +187,24 @@ test('Non-managers and unauthenticated users cannot read or mutate health-event 
     assert.equal((await f.request(method, route, { token: signedToken('admin', {}, 'wrong-secret') })).status, 403);
   }
   assert.equal(f.statements.length, 0, 'Denied requests never reach the database');
+});
+
+test('Admin and Ops Manager can requeue failed deliveries for a specific event and campaign', async t => {
+  const calls = [];
+  const f = await fixture(t, {
+    async retryFailed(db, eventId, jobId, generation) {
+      calls.push([eventId, jobId, generation]);
+      return { id: jobId, pending: 1, sent: 5, retry_generation: generation + 1 };
+    },
+  });
+  for (const role of ['admin', 'opsmanager']) {
+    const response = await f.request('post', '/health-events/2/participant-emails/47/retry-failed', {
+      role, body: { retry_generation: 3 },
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(response.data, { id: 47, pending: 1, sent: 5, retry_generation: 4 });
+  }
+  assert.deepEqual(calls, [[2, 47, 3], [2, 47, 3]]);
 });
 
 test('Only Admin and Ops Manager can duplicate an event with the new validated identity', async t => {

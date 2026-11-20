@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
 const { readReservationToken } = require('./healthEventReservation');
-const { parseMessage, sampleDraft, sendTest, previewAudience, enqueue, getJob, processQueue } = require('./healthEventParticipantEmails');
+const { parseMessage, sampleDraft, sendTest, previewAudience, enqueue, getJob, retryFailed, processQueue } = require('./healthEventParticipantEmails');
 
 const draft = { subject: 'Clinic reminder', message: 'Please use the east entrance.',
   request_id: '31958820-4bfb-4dc2-8f84-767237ff1019' };
@@ -38,10 +38,13 @@ function fixture(t) {
     CREATE TABLE health_event_appointment (registration_id INTEGER, slot_id INTEGER, status TEXT DEFAULT 'booked');
     CREATE TABLE health_event_participant_email (id INTEGER PRIMARY KEY, health_event_id INTEGER, request_id TEXT,
       created_by_user_id INTEGER, slot_id INTEGER, subject TEXT, message TEXT, registrations INTEGER,
-      recipients INTEGER, without_email INTEGER, duplicates INTEGER, UNIQUE(health_event_id, request_id));
+      recipients INTEGER, without_email INTEGER, duplicates INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      retry_generation INTEGER DEFAULT 0, retry_key_check TEXT,
+      UNIQUE(health_event_id, request_id));
     CREATE TABLE health_event_participant_delivery (id INTEGER PRIMARY KEY, job_id INTEGER, email TEXT,
       status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0, retry_at INTEGER,
-      recipient_rejected INTEGER DEFAULT 0, UNIQUE(job_id, email));
+      recipient_rejected INTEGER DEFAULT 0, recipient_key TEXT, retry_recipient_key TEXT, registration_snapshot TEXT,
+      UNIQUE(job_id, email));
     CREATE TABLE health_event_participant_mail_sender (id INTEGER PRIMARY KEY, paused_until INTEGER);
     INSERT INTO health_event_participant_mail_sender (id) VALUES (1);
     INSERT INTO health_event(id) VALUES (1),(2);
@@ -69,7 +72,8 @@ function fixture(t) {
       if (raw.includes('GET_LOCK')) return [[{ acquired: 1 }]];
       if (raw.includes('RELEASE_LOCK')) return [[{}]];
       if (raw.endsWith('VALUES ?')) {
-        const insert = sql.prepare(raw.replace('VALUES ?', 'VALUES (?,?)'));
+        const placeholders = params[0][0].map(() => '?').join(',');
+        const insert = sql.prepare(raw.replace('VALUES ?', 'VALUES (' + placeholders + ')'));
         for (const row of params[0]) insert.run(...row);
         return [{}];
       }
@@ -153,6 +157,21 @@ test('audience counts by clinic and booked slot, retaining only eligible, unique
   await assert.rejects(previewAudience(db, 3), { code: 'NOT_FOUND' });
   await assert.rejects(enqueue(db, 1, 42, {...draft, slot_id:12}), { code:'NO_RECIPIENTS' });
   assert.equal(await getJob(db, 1), null);
+});
+
+test('mailing history links stay within the clinic even when other clinics send in between', async t => {
+  const { db } = fixture(t);
+  const first = await enqueue(db, 1, 42, draft);
+  const elsewhere = await enqueue(db, 2, 42, draft);
+  const last = await enqueue(db, 1, 42, { ...draft, request_id: '7f229d9c-5f58-4332-9ab6-206b86fc128f' });
+  const older = await getJob(db, 1, first.id);
+  assert.ok(older.created_at);
+  assert.deepEqual([older.previous_job_id, older.next_job_id], [null, last.id]);
+  const latest = await getJob(db, 1);
+  assert.deepEqual([latest.id, latest.previous_job_id, latest.next_job_id], [last.id, first.id, null]);
+  const only = await getJob(db, 2);
+  assert.deepEqual([only.id, only.previous_job_id, only.next_job_id], [elsewhere.id, null, null]);
+  await assert.rejects(getJob(db, 1, elsewhere.id), { code: 'NOT_FOUND' });
 });
 
 test('a reviewed legacy contact authorizes only its exact address and reservation version', async t => {
@@ -347,6 +366,191 @@ test('a confirmed invalid recipient, an old failure without a reason, and a lost
   assert.deepEqual([current.failed, current.recipient_rejections, current.uncertain, current.pending], [1, 1, 1, 0]);
   const historical = await getJob(db, 2);
   assert.deepEqual([historical.failed, historical.recipient_rejections, historical.sender_paused], [1, 0, false]);
+});
+
+function rejectMailbox() {
+  throw Object.assign(new Error('Mailbox does not exist'), {
+    responseCode: 550, response: '550 5.1.1 Mailbox does not exist', command: 'RCPT TO'
+  });
+}
+
+test('manual retry requeues only confirmed failures, once per requested generation', async t => {
+  const { db, sql } = fixture(t);
+  sql.exec(`
+    UPDATE health_event_registration SET status='registered' WHERE id=3;
+    UPDATE user SET deleted='N' WHERE id=7;
+    UPDATE user SET email='full@example.test' WHERE id=5;
+  `);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T18:00:00Z') });
+  const original = await enqueue(db, 1, 42, draft);
+  sql.exec("UPDATE health_event_registration SET status='cancelled' WHERE id=7");
+  const recipients = [];
+  await processQueue(db, async mail => {
+    recipients.push(mail.to);
+    if (mail.to === 'Family@example.test') rejectMailbox();
+    if (mail.to === 'prior@example.test') throw Object.assign(new Error('Lost reply'), { command: 'DATA' });
+    if (mail.to === 'full@example.test') throw Object.assign(new Error('Mailbox full'), {
+      command: 'RCPT TO', responseCode: 452, response: '452 4.2.2 Mailbox full'
+    });
+    return { accepted: [mail.to] };
+  });
+  assert.deepEqual(recipients, ['Family@example.test', 'prior@example.test', 'unbooked@example.test', 'full@example.test']);
+  const partial = await getJob(db, 1, original.id);
+  assert.deepEqual([partial.sent, partial.failed, partial.uncertain, partial.skipped, partial.deferred], [1, 1, 1, 1, 1]);
+  await assert.rejects(retryFailed(db, 1, original.id, 0), { code: 'RETRY_IN_PROGRESS' });
+  t.mock.timers.tick(15 * 60 * 1000);
+  await processQueue(db, async mail => {
+    assert.equal(mail.to, 'full@example.test');
+    return { accepted: [mail.to] };
+  });
+
+  const completed = await getJob(db, 1, original.id);
+  assert.deepEqual([completed.retry_generation, completed.retryable_failed, completed.recipient_rejections], [0, 1, 1]);
+  await assert.rejects(retryFailed(db, 2, original.id, 0), { code: 'NOT_FOUND' });
+  await assert.rejects(retryFailed(db, 1, original.id, -1), { code: 'INVALID_RETRY_GENERATION' });
+  await assert.rejects(retryFailed(db, 1, original.id, 2), { code: 'RETRY_GENERATION_CONFLICT' });
+  const queued = await retryFailed(db, 1, original.id, 0);
+  assert.deepEqual([queued.id, queued.retry_generation, queued.pending, queued.failed, queued.sent, queued.skipped, queued.uncertain],
+    [original.id, 1, 1, 0, 2, 1, 1]);
+  assert.equal((await retryFailed(db, 1, original.id, 0)).retry_generation, 1);
+  const attempts = [];
+  await processQueue(db, async mail => { attempts.push(mail.to); rejectMailbox(); });
+  const replay = await retryFailed(db, 1, original.id, 0);
+  assert.deepEqual([replay.retry_generation, replay.pending, replay.retryable_failed], [1, 0, 1]);
+  await processQueue(db, async () => assert.fail('An old retry request must not enqueue another attempt'));
+  await retryFailed(db, 1, original.id, 1);
+  await processQueue(db, async mail => {
+    attempts.push(mail.to);
+    assert.deepEqual([mail.subject, mail.message], [draft.subject, draft.message]);
+    return { accepted: [mail.to] };
+  });
+  const final = await getJob(db, 1);
+  assert.deepEqual(attempts.map(address => address.toLowerCase()), ['family@example.test', 'family@example.test']);
+  assert.deepEqual([final.id, final.recipients, final.sent, final.failed, final.uncertain, final.skipped, final.retryable_failed],
+    [original.id, 5, 3, 0, 1, 1, 0]);
+  await assert.rejects(retryFailed(db, 1, original.id, 2), { code: 'NO_RETRYABLE_FAILURES' });
+  assert.deepEqual({ ...sql.prepare('SELECT COUNT(*) AS deliveries, COUNT(email) AS addresses FROM health_event_participant_delivery').get() },
+    { deliveries: 5, addresses: 0 });
+});
+
+test('a retry which fails partway leaves all recipients and the generation ready for one later request', async t => {
+  const { db, sql } = fixture(t);
+  const original = await enqueue(db, 1, 42, draft);
+  await processQueue(db, rejectMailbox);
+  sql.exec(`CREATE TRIGGER reject_second_update BEFORE UPDATE ON health_event_participant_delivery
+    WHEN NEW.status='pending' AND NEW.email='unbooked@example.test'
+    BEGIN SELECT RAISE(ABORT, 'simulated database error'); END;`);
+  await assert.rejects(retryFailed(db, 1, original.id, 0), /simulated database error/);
+  const rolledBack = await getJob(db, 1, original.id);
+  assert.deepEqual([rolledBack.pending, rolledBack.retryable_failed, rolledBack.retry_generation], [0, 2, 0]);
+  sql.exec('DROP TRIGGER reject_second_update');
+  const queued = await retryFailed(db, 1, original.id, 0);
+  assert.deepEqual([queued.pending, queued.retry_generation], [2, 1]);
+});
+
+test('a corrected address gets the original message and links only for the original, still-booked slot registrations', async t => {
+  const { db, sql } = fixture(t);
+  const original = await enqueue(db, 1, 42, { ...draft, slot_id: 11 });
+  await processQueue(db, rejectMailbox);
+  sql.exec(`
+    UPDATE health_event_registration SET contact_email='corrected@example.test' WHERE id=1;
+    UPDATE health_event_appointment SET slot_id=12 WHERE registration_id=2;
+  `);
+  assert.equal((await retryFailed(db, 1, original.id, 0)).pending, 1);
+  sql.exec(`
+    UPDATE health_event_registration SET contact_email='corrected@example.test', status='registered' WHERE id=3;
+    INSERT INTO health_event_appointment(registration_id,slot_id) VALUES (3,11);
+    UPDATE health_event_registration SET contact_email='corrected@example.test' WHERE id=8;
+  `);
+  const received = [];
+  await processQueue(db, async mail => {
+    received.push({ to: mail.to, subject: mail.subject, message: mail.message,
+      links: mail.reservations.map(r => readReservationToken(new URL(r.manageUrl).hash.slice(1))) });
+    return { accepted: [mail.to] };
+  });
+  assert.deepEqual(received, [{ to: 'corrected@example.test', subject: draft.subject, message: draft.message,
+    links: [{ id: 1, version: 1 }] }]);
+});
+
+test('a retry queued before cancellation cannot send to a new reservation using the same address', async t => {
+  const { db, sql } = fixture(t);
+  const original = await enqueue(db, 1, 42, { ...draft, slot_id: 11 });
+  await processQueue(db, rejectMailbox);
+  await retryFailed(db, 1, original.id, 0);
+  sql.exec(`
+    UPDATE health_event_registration SET status='cancelled' WHERE id=1;
+    UPDATE health_event_registration SET reservation_version=2 WHERE id=2;
+    UPDATE health_event_registration SET contact_email='family@example.test',status='registered' WHERE id=3;
+    INSERT INTO health_event_appointment(registration_id,slot_id) VALUES (3,11);
+  `);
+  await processQueue(db, async () => assert.fail('The original bookings are no longer active'));
+  const final = await getJob(db, 1, original.id);
+  assert.deepEqual([final.sent, final.skipped, final.pending, final.retryable_failed], [0, 1, 0, 0]);
+});
+
+test('manual retry excludes ambiguous corrections, other original recipients, and unidentifiable historical failures', async t => {
+  const { db, sql } = fixture(t);
+  const original = await enqueue(db, 1, 42, draft);
+  await processQueue(db, async mail => {
+    if (mail.to === 'Family@example.test') rejectMailbox();
+    return { accepted: [mail.to] };
+  });
+  const initially = await getJob(db, 1, original.id);
+  assert.equal(initially.retryable_failed, 1);
+  sql.exec('INSERT INTO health_event_confirmation(registration_id,reservation_version) VALUES (1,1),(2,1)');
+  const update = sql.prepare('UPDATE health_event_registration SET contact_email=? WHERE id IN (1,2)');
+  update.run('Unbooked@example.test');
+  assert.equal((await getJob(db, 1, original.id)).retryable_failed, 0);
+  update.run('family@example.test');
+  sql.exec("UPDATE health_event_registration SET contact_email='corrected@example.test' WHERE id=2");
+  assert.equal((await getJob(db, 1, original.id)).retryable_failed, 0);
+  update.run('family@example.test');
+  process.env.JWT_SECRET = 'different-synthetic-secret';
+  assert.equal((await getJob(db, 1, original.id)).retryable_failed, 0);
+  process.env.JWT_SECRET = 'synthetic-participant-links-test';
+  sql.exec('UPDATE health_event_participant_delivery SET registration_snapshot=NULL, recipient_key=NULL, retry_recipient_key=NULL');
+  sql.exec('UPDATE health_event_participant_email SET retry_key_check=NULL');
+  const historical = await getJob(db, 1, original.id);
+  assert.deepEqual([historical.failed, historical.sent, historical.retryable_failed], [1, 1, 0]);
+  await assert.rejects(retryFailed(db, 1, original.id, 0), { code: 'NO_RETRYABLE_FAILURES' });
+});
+
+test('independent failures cannot converge on one new mailbox or reuse a mailbox reached by an earlier retry', async t => {
+  const { db, sql } = fixture(t);
+  const original = await enqueue(db, 1, 42, draft);
+  await processQueue(db, rejectMailbox);
+  sql.exec("UPDATE health_event_registration SET contact_email='new@example.test' WHERE id IN (1,2,4)");
+  assert.equal((await getJob(db, 1, original.id)).retryable_failed, 0);
+  sql.exec("UPDATE health_event_registration SET status='cancelled' WHERE id=4");
+  assert.equal((await retryFailed(db, 1, original.id, 0)).pending, 1);
+  await processQueue(db, async mail => {
+    assert.equal(mail.to, 'new@example.test');
+    return { accepted: [mail.to] };
+  });
+  sql.exec("UPDATE health_event_registration SET status='registered' WHERE id=4");
+  const final = await getJob(db, 1, original.id);
+  assert.deepEqual([final.sent, final.failed, final.retryable_failed], [1, 1, 0]);
+});
+
+test('a queued mailing from before the upgrade finishes normally without guessing its failed recipients', async t => {
+  const { db, sql } = fixture(t);
+  sql.exec(`
+    INSERT INTO health_event_participant_email
+      (id,health_event_id,request_id,created_by_user_id,subject,message,registrations,recipients,without_email,duplicates)
+      VALUES (71,1,'historical',42,'Existing notice','Previously queued',3,2,0,1);
+    INSERT INTO health_event_participant_delivery(job_id,email)
+      VALUES (71,'Family@example.test'),(71,'unbooked@example.test');
+  `);
+  const received = [];
+  await processQueue(db, async mail => {
+    received.push([mail.subject, mail.to]);
+    if (mail.to === 'unbooked@example.test') rejectMailbox();
+    return { accepted: [mail.to] };
+  });
+  assert.deepEqual(received, [['Existing notice', 'Family@example.test'], ['Existing notice', 'unbooked@example.test']]);
+  const final = await getJob(db, 1, 71);
+  assert.deepEqual([final.sent, final.failed, final.retryable_failed], [1, 1, 0]);
+  await assert.rejects(retryFailed(db, 1, 71, 0), { code: 'NO_RETRYABLE_FAILURES' });
 });
 
 test('only specific enhanced SMTP responses identify an invalid mailbox or a daily sender quota', () => {
