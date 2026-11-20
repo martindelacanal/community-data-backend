@@ -21,6 +21,7 @@ function fixture(t) {
   });
   sql.function('DATE_FORMAT', (date, format) => date);
   sql.function('TIME_FORMAT', (time, format) => time.slice(0, 5));
+  sql.function('UTC_TIMESTAMP', () => Math.floor(Date.now() / 1000));
   sql.exec(`
     CREATE TABLE health_event (id INTEGER PRIMARY KEY, name_en TEXT DEFAULT 'Clinic', name_es TEXT DEFAULT 'Clínica',
       enabled TEXT DEFAULT 'Y', timezone TEXT DEFAULT 'America/Los_Angeles', end_date TEXT DEFAULT '2099-12-06',
@@ -37,7 +38,10 @@ function fixture(t) {
       created_by_user_id INTEGER, slot_id INTEGER, subject TEXT, message TEXT, registrations INTEGER,
       recipients INTEGER, without_email INTEGER, duplicates INTEGER, UNIQUE(health_event_id, request_id));
     CREATE TABLE health_event_participant_delivery (id INTEGER PRIMARY KEY, job_id INTEGER, email TEXT,
-      status TEXT DEFAULT 'pending', UNIQUE(job_id, email));
+      status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0, retry_at INTEGER,
+      recipient_rejected INTEGER DEFAULT 0, UNIQUE(job_id, email));
+    CREATE TABLE health_event_participant_mail_sender (id INTEGER PRIMARY KEY, paused_until INTEGER);
+    INSERT INTO health_event_participant_mail_sender (id) VALUES (1);
     INSERT INTO health_event(id) VALUES (1),(2);
     INSERT INTO health_event_slot(id,health_event_id) VALUES (11,1),(12,1),(22,2);
     INSERT INTO user(id,email) VALUES (1,'account@example.test'),(2,'other@example.test'),(3,'prior@example.test'),
@@ -67,7 +71,8 @@ function fixture(t) {
         for (const row of params[0]) insert.run(...row);
         return [{}];
       }
-      const stmt = sql.prepare(raw.replace(' FOR UPDATE', ''));
+      const stmt = sql.prepare(raw.replace(' FOR UPDATE', '')
+        .replaceAll('TIMESTAMPADD(MINUTE, ?, UTC_TIMESTAMP())', '(UTC_TIMESTAMP() + 60 * ?)'));
       if (/^SELECT/i.test(raw.trim())) return [stmt.all(...params).map(row => ({ ...row }))];
       const result = stmt.run(...params);
       return [{ affectedRows: result.changes, insertId: result.lastInsertRowid }];
@@ -222,4 +227,107 @@ test('distinguishes SMTP rejection and interrupted delivery and never repeats am
   assert.equal(result.pending, 0);
   await processQueue(db, reject);
   assert.equal(attempted, 1);
+});
+
+test('sender quota pauses all campaigns durably before touching another address and resumes after the cooldown', async t => {
+  const { db, sql } = fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T18:00:00Z') });
+  const first = await enqueue(db, 1, 42, draft);
+  await enqueue(db, 2, 42, draft);
+  const calls = [];
+  const smtp = async mail => {
+    calls.push(mail.to);
+    if (calls.length === 1) throw Object.assign(new Error('refused'), {
+      responseCode: 550, response: '550-5.4.5 Daily user sending limit exceeded', command: 'DATA'
+    });
+    return { accepted: [mail.to], rejected: [] };
+  };
+  await processQueue(db, smtp);
+  await processQueue(db, smtp);
+  const paused = await getJob(db, 1, first.id);
+  assert.deepEqual([paused.pending, paused.deferred, paused.sender_paused, paused.failed, paused.recipient_rejections],
+    [2, 1, true, 0, 0]);
+  assert.equal((await getJob(db, 2)).sender_paused, true);
+  assert.equal(sql.prepare('SELECT COUNT(email) AS n FROM health_event_participant_delivery').get().n, 3);
+  t.mock.timers.tick(24 * 60 * 60 * 1000 - 1000);
+  await processQueue(db, smtp);
+  assert.deepEqual(calls, ['Family@example.test']);
+  t.mock.timers.tick(1000);
+  // Another registration may have been cancelled or its address corrected while waiting.
+  sql.exec("UPDATE health_event_registration SET status='cancelled' WHERE id IN (1,2)");
+  await processQueue(db, smtp);
+  await processQueue(db, smtp);
+  const completed = await getJob(db, 1);
+  assert.deepEqual([completed.sent, completed.skipped, completed.pending, completed.deferred, completed.sender_paused],
+    [1, 1, 0, 0, false]);
+  assert.deepEqual(calls, ['Family@example.test', 'unbooked@example.test', 'otherclinic@example.test']);
+  assert.equal(sql.prepare('SELECT COUNT(email) AS n FROM health_event_participant_delivery').get().n, 0);
+});
+
+test('one temporary mailbox rejection does not block other recipients and is retried only a bounded number of times', async t => {
+  const { db, sql } = fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T18:00:00Z') });
+  await enqueue(db, 1, 42, draft);
+  const calls = [];
+  const smtp = async mail => {
+    calls.push(mail.to);
+    if (mail.to === 'Family@example.test') throw Object.assign(new Error(), {
+      responseCode: 452, response: '452 4.2.2 The recipient inbox is full', command: 'RCPT TO'
+    });
+    return { accepted: [mail.to], rejected: [] };
+  };
+  await processQueue(db, smtp);
+  const partial = await getJob(db, 1);
+  assert.deepEqual([partial.sent, partial.pending, partial.deferred, partial.sender_paused], [1, 1, 1, false]);
+  for (const minutes of [15, 60, 360]) {
+    await processQueue(db, smtp);
+    t.mock.timers.tick(minutes * 60 * 1000);
+    await processQueue(db, smtp);
+  }
+  await processQueue(db, smtp);
+  assert.equal(calls.filter(address => address === 'Family@example.test').length, 4);
+  assert.equal(calls.filter(address => address === 'unbooked@example.test').length, 1);
+  const completed = await getJob(db, 1);
+  assert.deepEqual([completed.sent, completed.failed, completed.recipient_rejections, completed.pending], [1, 1, 0, 0]);
+  assert.equal(sql.prepare('SELECT COUNT(email) AS n FROM health_event_participant_delivery').get().n, 0);
+});
+
+test('a confirmed invalid recipient, an old failure without a reason, and a lost SMTP response stay distinct', async t => {
+  const { db, sql } = fixture(t);
+  await enqueue(db, 1, 42, draft);
+  const job = await enqueue(db, 2, 42, draft);
+  sql.prepare("UPDATE health_event_participant_delivery SET status='failed', email=NULL WHERE job_id=?").run(job.id);
+  let attempts = 0;
+  const smtp = async () => {
+    attempts++;
+    if (attempts === 1) throw Object.assign(new Error(), { code: 'EENVELOPE', rejectedErrors: [
+      { responseCode: 550, response: '550 5.1.1 Mailbox does not exist', command: 'RCPT TO' }
+    ] });
+    // Nodemailer can report CONN even when a connection breaks after DATA.
+    throw Object.assign(new Error(), { code: 'ECONNECTION', command: 'CONN' });
+  };
+  await processQueue(db, smtp);
+  await processQueue(db, smtp);
+  assert.equal(attempts, 2);
+  const current = await getJob(db, 1);
+  assert.deepEqual([current.failed, current.recipient_rejections, current.uncertain, current.pending], [1, 1, 1, 0]);
+  const historical = await getJob(db, 2);
+  assert.deepEqual([historical.failed, historical.recipient_rejections, historical.sender_paused], [1, 0, false]);
+});
+
+test('only specific enhanced SMTP responses identify an invalid mailbox or a daily sender quota', () => {
+  const { classifyMailFailure } = require('./healthEventMailFailure');
+  assert.equal(classifyMailFailure({ command: 'DATA', responseCode: 550,
+    response: '550 5.7.1 Daily SMTP relay sending limit exceeded for this customer' }), 'daily_sender_limit');
+  assert.equal(classifyMailFailure({ command: 'DATA', responseCode: 550, response: '550 5.7.1 Blocked by policy' }), 'rejected');
+  assert.equal(classifyMailFailure({ command: 'RCPT TO', responseCode: 550, response: '550 Not delivered' }), 'rejected');
+  assert.equal(classifyMailFailure({ command: 'RCPT TO', responseCode: 550, response: '550 No such mailbox' }), 'invalid_recipient');
+  assert.equal(classifyMailFailure({ command: 'RCPT TO', responseCode: 450, response: '450 4.2.1 Peak SMTP relay limit exceeded' }), 'temporary_sender');
+  assert.equal(classifyMailFailure({ command: 'MAIL FROM', responseCode: 550, response: '550 5.1.1 Invalid origin' }), 'rejected');
+  assert.equal(classifyMailFailure({ command: 'AUTH', responseCode: 454, response: '454 4.7.0 Try again later' }), 'temporary_sender');
+  assert.equal(classifyMailFailure({ command: 'DATA', code: 'ETIMEDOUT' }), 'uncertain');
+  assert.equal(classifyMailFailure({ command: 'CONN', code: 'ETIMEDOUT', timeoutType: 'SOCKET_TIMEOUT' }), 'uncertain');
+  assert.equal(classifyMailFailure({ command: 'CONN', code: 'ETIMEDOUT', timeoutType: 'GREETING_TIMEOUT' }), 'temporary_sender');
+  assert.equal(classifyMailFailure({ command: 'CONN', code: 'ESOCKET', originalCode: 'ECONNREFUSED' }), 'temporary_sender');
+  assert.equal(classifyMailFailure({ command: 'CONN', code: 'EDNS' }), 'temporary_sender');
 });

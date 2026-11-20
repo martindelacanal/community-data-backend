@@ -77,13 +77,17 @@ async function postJson(baseUrl, route, payload) {
 
 test('KAN-17: atomic event exit, separate consent, family identities and concurrent duplicate prevention', {
   skip: RUN_INTEGRATION ? false : 'Set RUN_HEALTH_SCAN_INTEGRATION=development', timeout: 90000
-}, async () => {
+}, async t => {
   require('dotenv').config({ path: ENV_PATH, quiet: true });
   assertDevelopmentDatabaseTarget();
   const pool = require('../connection/connection');
   const db = pool.promise();
   const emailPath = require.resolve('../email/email');
   require.cache[emailPath] = { id: emailPath, filename: emailPath, loaded: true, exports: {} };
+  t.mock.method(require('node:dns/promises').Resolver.prototype, 'resolveMx', async domain => {
+    assert.equal(domain, 'example.invalid');
+    return [{ priority: 10, exchange: 'mx.example.invalid' }];
+  });
   const express = require('express');
   const jwt = require('jsonwebtoken');
   const app = express(); app.use(express.json()); app.use('/api', require('./healthEvents'));
