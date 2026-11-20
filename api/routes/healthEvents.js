@@ -54,7 +54,7 @@ const { manageReservation, readReservationToken, ReservationError } = require('.
 const { saveParticipantRegistration } = require('../services/healthEventParticipantRegistration');
 const { VolunteerRegistrationError, volunteerApprovalStatus, requestVolunteerRegistration, reviewVolunteerRegistration } = require('../services/healthEventVolunteerRegistration');
 const { DEFAULT_HEALTH_PASSWORD } = require('../services/healthEventConfirmation');
-const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
+const { validateClinicContactEmail } = require('../utils/clinicContactEmail');
 const { normalizeWristbandSource, assertAssignableRegistration, buildHealthStaffDebounceKey, HealthWristbandError } = require('../utils/healthWristband');
 const {
   PROFILE_MAPS_TO,
@@ -987,6 +987,9 @@ router.post('/health-events/:slug/register', async (req, res) => {
       });
     }
 
+    // A returning participant can submit missing answers without changing the contact.
+    const contact = await validateClinicContactEmail(previousRegistration ? null : account.email);
+    if (contact.error) return res.status(400).json({ error: contact.error });
     connection = await mysqlConnection.promise().getConnection();
     if (!useOwnAccount) identityLock = await lockParticipantIdentity(connection, account);
     await connection.beginTransaction();
@@ -1013,7 +1016,7 @@ router.post('/health-events/:slug/register', async (req, res) => {
         logger.error('POST /health-events/:slug/register 400 INVALID_ACCOUNT_DATA (missing name/phone or short password)');
         return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
       }
-      let email = normalizeParticipantEmail(account.email);
+      let email = contact.email;
       const phone = String(account.phone).trim();
 
       // A contact phone has exactly ten digits; family members may share it.
@@ -1058,7 +1061,7 @@ router.post('/health-events/:slug/register', async (req, res) => {
     }
 
     const registration = await saveParticipantRegistration(connection, event.id, userId, {
-      email: account.email, language: account.uiLanguage, previousVersion: previousRegistration?.reservation_version,
+      email: contact.email, language: account.uiLanguage, previousVersion: previousRegistration?.reservation_version,
       includeDefaultLogin: createdWithDefaultPassword
     });
     const registrationId = registration.registration_id;
@@ -1141,8 +1144,7 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
     if (!validPrivacyConsent(account.privacyConsent)) {
       return res.status(400).json({ error: 'PRIVACY_CONSENT_REQUIRED' });
     }
-    let email = account.email ? String(account.email).trim() : null;
-    if (!returning && (!account.firstName || !account.phone || !email)) {
+    if (!returning && (!account.firstName || !account.phone || !account.email)) {
       logger.error('POST /health-events/:slug/register/volunteer 400 INVALID_ACCOUNT_DATA (missing firstName/phone/email)');
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
@@ -1158,6 +1160,11 @@ router.post('/health-events/:slug/register/volunteer', async (req, res) => {
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
 
+    const contact = await validateClinicContactEmail(returning ? null : account.email);
+    if (contact.error) return res.status(400).json({ error: contact.error });
+    if (!returning && !contact.email) return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
+    // Volunteer account lookups historically use the entered spelling of international domains.
+    let email = returning ? null : account.email.trim();
     const forms = await fetchForms(event.id, 'volunteer');
     const allQuestions = forms.flatMap(f => f.questions);
     const questionsById = new Map(allQuestions.map(q => [q.id, q]));
@@ -3407,14 +3414,18 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
     if (!event) {
       return res.status(404).json({ error: 'NOT_FOUND' });
     }
-    const { firstName, lastName, email, phone, dateOfBirth } = req.body;
-    if (!firstName || !email) {
+    const { firstName, lastName, phone, dateOfBirth } = req.body;
+    if (!firstName || !req.body.email) {
       return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
     }
+    const contact = await validateClinicContactEmail(req.body.email);
+    if (contact.error) return res.status(400).json({ error: contact.error });
+    if (!contact.email) return res.status(400).json({ error: 'INVALID_ACCOUNT_DATA' });
+    const email = req.body.email.trim();
     connection = await mysqlConnection.promise().getConnection();
     await connection.beginTransaction();
 
-    const [emailTaken] = await connection.query('SELECT id, role_id, enabled FROM user WHERE email = ? LIMIT 1 FOR UPDATE', [String(email).trim()]);
+    const [emailTaken] = await connection.query('SELECT id, role_id, enabled FROM user WHERE email = ? LIMIT 1 FOR UPDATE', [email]);
     let userId;
     let credentials = null;
     // Adding an existing account never changes its credentials or activates it.
@@ -3428,7 +3439,7 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
       userId = await createHealthEventUser(connection, {
         username,
         passwordHash: await bcryptjs.hash(password, 8),
-        email: String(email).trim(),
+        email,
         roleId: 11,
         firstName,
         lastName,
@@ -3444,7 +3455,7 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
 
     const [regResult] = await connection.query(
       `INSERT IGNORE INTO health_event_registration(health_event_id, user_id, registration_role, contact_email, source, status, submitted_at)
-       VALUES (?,?,?,?,?,?,NOW())`, [id, userId, 'volunteer', String(email).trim(), 'admin', pendingApproval ? 'pending' : 'registered']);
+       VALUES (?,?,?,?,?,?,NOW())`, [id, userId, 'volunteer', email, 'admin', pendingApproval ? 'pending' : 'registered']);
     await connection.commit();
 
     // Best-effort emails after commit: credentials to the volunteer (when fresh
@@ -3454,7 +3465,7 @@ router.post('/health-events/:id(\\d+)/volunteers', verifyToken, requireAdmin, as
         const emailModule = require('../email/email');
         if (typeof emailModule.sendHealthEventVolunteerCredentials === 'function') {
           emailModule.sendHealthEventVolunteerCredentials({
-            to: String(email).trim(),
+            to: email,
             language: 'en',
             eventNameEn: event.name_en,
             eventNameEs: event.name_es,

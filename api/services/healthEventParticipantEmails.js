@@ -3,6 +3,9 @@
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
 const { participantContactEmailSql } = require('./healthEventParticipantContact');
 const { buildReservationUrl, includesReservationLinks } = require('./healthEventReservation');
+const { classifyMailFailure } = require('./healthEventMailFailure');
+
+const retryDelaysMinutes = [15, 60, 360];
 
 class ParticipantEmailError extends Error {
   constructor(code, status) {
@@ -72,7 +75,7 @@ async function sendTest(db, eventId, body, send) {
   try {
     receipt = await send({ ...draft, subject: prefix + ' ' + draft.subject, to });
   } catch (error) {
-    const code = deliveryFailure(error) === 'failed' ? 'TEST_EMAIL_FAILED' : 'TEST_EMAIL_UNCERTAIN';
+    const code = classifyMailFailure(error) === 'uncertain' ? 'TEST_EMAIL_UNCERTAIN' : 'TEST_EMAIL_FAILED';
     throw new ParticipantEmailError(code, 502);
   }
   if (receipt?.accepted?.length !== 1 || receipt.rejected?.length) {
@@ -135,20 +138,30 @@ async function previewAudience(db, eventId, rawSlot) {
 
 async function getJob(db, eventId, jobId = null) {
   const filter = jobId === null ? 'ORDER BY id DESC LIMIT 1' : 'AND id = ?';
-  const [jobs] = await db.query(`SELECT id, subject, slot_id, registrations, recipients, without_email, duplicates
+  const [jobs] = await db.query(`SELECT id, subject, slot_id, registrations, recipients, without_email, duplicates,
+    EXISTS(SELECT 1 FROM health_event_participant_mail_sender WHERE id=1 AND paused_until > UTC_TIMESTAMP()) AS sender_paused
     FROM health_event_participant_email WHERE health_event_id = ? ${filter}`, jobId === null ? [eventId] : [eventId, jobId]);
   if (!jobs.length) {
     if (jobId === null) return null;
     throw new ParticipantEmailError('NOT_FOUND', 404);
   }
   const job = jobs[0];
-  const [states] = await db.query(`SELECT status, COUNT(*) AS total FROM health_event_participant_delivery
+  const [states] = await db.query(`SELECT status, COUNT(*) AS total,
+    SUM(CASE WHEN retry_at > UTC_TIMESTAMP() THEN 1 ELSE 0 END) AS deferred,
+    SUM(recipient_rejected) AS recipient_rejections FROM health_event_participant_delivery
     WHERE job_id = ? GROUP BY status`, [job.id]);
   const totals = { pending: 0, sending: 0, sent: 0, failed: 0, skipped: 0, uncertain: 0 };
-  for (const row of states) totals[row.status] = Number(row.total);
+  let deferred = 0;
+  let recipientRejections = 0;
+  for (const row of states) {
+    totals[row.status] = Number(row.total);
+    if (row.status === 'pending') deferred = Number(row.deferred);
+    if (row.status === 'failed') recipientRejections = Number(row.recipient_rejections);
+  }
   const pending = totals.pending + totals.sending;
   const status = !pending ? 'completed' : totals.pending === job.recipients ? 'pending' : 'sending';
-  return { ...job, status, sent: totals.sent, failed: totals.failed, uncertain: totals.uncertain, skipped: totals.skipped, pending };
+  return { ...job, status, sent: totals.sent, failed: totals.failed, uncertain: totals.uncertain, skipped: totals.skipped,
+    pending, deferred, sender_paused: totals.pending > 0 && Boolean(job.sender_paused), recipient_rejections: recipientRejections };
 }
 
 async function enqueue(db, eventId, userId, rawMessage) {
@@ -192,14 +205,6 @@ async function enqueue(db, eventId, userId, rawMessage) {
   }
 }
 
-function deliveryFailure(error) {
-  // If the connection broke while waiting for the final SMTP acknowledgement,
-  // the provider may already have accepted the message.
-  if ((error?.responseCode >= 400 && error.responseCode < 600) ||
-      ['EAUTH', 'EDNS', 'EENVELOPE'].includes(error?.code)) return 'failed';
-  return 'uncertain';
-}
-
 async function loadBatchAppointments(db, job, registrations) {
   const appointments = new Map();
   if (!registrations.length) return appointments;
@@ -218,44 +223,75 @@ async function loadBatchAppointments(db, job, registrations) {
   return appointments;
 }
 
+async function recordDelivery(db, delivery, outcome) {
+  const pauseSender = outcome === 'daily_sender_limit' || outcome === 'temporary_sender';
+  const temporary = pauseSender || outcome === 'temporary_recipient';
+  const retry = temporary && delivery.attempts < retryDelaysMinutes.length;
+  const delay = outcome === 'daily_sender_limit' ? 24 * 60 :
+    retryDelaysMinutes[Math.min(delivery.attempts, retryDelaysMinutes.length - 1)];
+  // The worker holds the advisory lock. Persist the backoff and the known
+  // refusal together before another worker can take over after a restart.
+  if (pauseSender) await db.beginTransaction();
+  try {
+    if (pauseSender) {
+      await db.query('UPDATE health_event_participant_mail_sender SET paused_until=TIMESTAMPADD(MINUTE, ?, UTC_TIMESTAMP()) WHERE id=1', [delay]);
+    }
+    if (retry) {
+      await db.query(`UPDATE health_event_participant_delivery SET status='pending',
+        retry_at=TIMESTAMPADD(MINUTE, ?, UTC_TIMESTAMP()) WHERE id=?`, [delay, delivery.id]);
+    } else {
+      const status = outcome === 'sent' || outcome === 'uncertain' ? outcome : 'failed';
+      await db.query('UPDATE health_event_participant_delivery SET status=?, email=NULL, retry_at=NULL, recipient_rejected=? WHERE id=?',
+        [status, outcome === 'invalid_recipient' ? 1 : 0, delivery.id]);
+    }
+    if (pauseSender) await db.commit();
+  } catch (error) {
+    if (pauseSender) await db.rollback();
+    throw error;
+  }
+  return pauseSender;
+}
+
 async function sendBatch(db, send) {
   const [jobs] = await db.query(`SELECT j.id, j.health_event_id, j.slot_id, j.subject, j.message, e.name_en, e.name_es,
       e.enabled, e.timezone, DATE_FORMAT(e.end_date,'%Y-%m-%d') AS end_date
     FROM health_event_participant_email j JOIN health_event e ON e.id = j.health_event_id JOIN health_event_participant_delivery d ON d.job_id = j.id
-    WHERE d.status = 'pending' ORDER BY d.job_id, d.id LIMIT 1`);
+    WHERE d.status = 'pending' AND (d.retry_at IS NULL OR d.retry_at <= UTC_TIMESTAMP())
+      AND NOT EXISTS (SELECT 1 FROM health_event_participant_mail_sender WHERE id=1 AND paused_until > UTC_TIMESTAMP())
+    ORDER BY d.job_id, d.id LIMIT 1`);
   if (!jobs.length) return;
   const job = jobs[0];
-  const [deliveries] = await db.query(`SELECT id, email FROM health_event_participant_delivery WHERE job_id = ?
-    AND status = 'pending' ORDER BY id LIMIT 6`, [job.id]);
+  const [deliveries] = await db.query(`SELECT id, email, attempts FROM health_event_participant_delivery WHERE job_id = ?
+    AND status = 'pending' AND (retry_at IS NULL OR retry_at <= UTC_TIMESTAMP()) ORDER BY id LIMIT 6`, [job.id]);
   const { addresses } = await loadAudience(db, job.health_event_id, job.slot_id);
   const includeReservations = includesReservationLinks(job);
   const appointments = includeReservations ? await loadBatchAppointments(db, job,
     deliveries.flatMap(d => addresses.get(d.email.toLowerCase())?.registrations || [])) : null;
 
-  const results = await Promise.allSettled(deliveries.map(async delivery => {
+  for (const delivery of deliveries) {
     const recipient = addresses.get(delivery.email.toLowerCase());
     if (!recipient) {
-      await db.query("UPDATE health_event_participant_delivery SET status='skipped', email=NULL WHERE id=? AND status='pending'", [delivery.id]);
-      return;
+      await db.query("UPDATE health_event_participant_delivery SET status='skipped', email=NULL, retry_at=NULL WHERE id=? AND status='pending'", [delivery.id]);
+      continue;
     }
     const reservations = includeReservations ? recipient.registrations.map(r => {
       const language = r.language === 'es' ? 'es' : 'en';
       return { firstname: r.firstname, language, eventName: language === 'es' ? job.name_es : job.name_en,
         appointments: appointments.get(r.id) || [], manageUrl: buildReservationUrl(r, language) };
     }) : [];
-    const [claim] = await db.query("UPDATE health_event_participant_delivery SET status='sending' WHERE id=? AND status='pending'", [delivery.id]);
-    if (!claim.affectedRows) return;
-    let status;
+    const [claim] = await db.query("UPDATE health_event_participant_delivery SET status='sending', attempts=attempts+1, retry_at=NULL WHERE id=? AND status='pending'", [delivery.id]);
+    if (!claim.affectedRows) continue;
+    let outcome;
     try {
       const receipt = await send({ to: delivery.email, subject: job.subject, message: job.message, reservations });
-      status = receipt?.accepted?.length === 1 && !receipt.rejected?.length ? 'sent' : 'failed';
+      if (receipt?.accepted?.length === 1 && !receipt.rejected?.length) outcome = 'sent';
+      else if (!receipt?.accepted?.length && receipt?.rejected?.length) outcome = classifyMailFailure({ ...receipt, code: 'EENVELOPE' });
+      else outcome = 'uncertain';
     } catch (error) {
-      status = deliveryFailure(error);
+      outcome = classifyMailFailure(error);
     }
-    await db.query('UPDATE health_event_participant_delivery SET status=?, email=NULL WHERE id=?', [status, delivery.id]);
-  }));
-  const failure = results.find(result => result.status === 'rejected');
-  if (failure) throw failure.reason;
+    if (await recordDelivery(db, delivery, outcome)) break;
+  }
 }
 
 // Only the holder of this connection-level database lock may send. When a
@@ -268,7 +304,7 @@ async function processQueue(pool, send) {
     const [[row]] = await connection.query("SELECT GET_LOCK('health_event_participant_mail_worker',0) AS acquired");
     locked = row.acquired === 1;
     if (!locked) return;
-    await connection.query("UPDATE health_event_participant_delivery SET status='uncertain', email=NULL WHERE status='sending'");
+    await connection.query("UPDATE health_event_participant_delivery SET status='uncertain', email=NULL, retry_at=NULL WHERE status='sending'");
     await sendBatch(connection, send);
   } finally {
     try {

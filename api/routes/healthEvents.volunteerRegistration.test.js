@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
+const { Resolver } = require('node:dns/promises');
 const { DatabaseSync } = require('node:sqlite');
 const express = require('express');
 const jwt = require('jsonwebtoken');
@@ -29,7 +30,7 @@ test('volunteers apply for another clinic with their own login and staff review 
   // SQLite serializes writers at database level and has no per-row lock syntax.
   const connection = {
     async query(sql, params = []) {
-      if (sql.includes('WHERE he.slug = ?')) {
+      if (sql.includes('WHERE he.slug = ?') || sql.includes('WHERE he.id = ?')) {
         return [[{ id: Number(params[0]), location_id: 1, enabled: 'Y', timezone: 'America/Los_Angeles', end_date: '2099-01-01' }]];
       }
       if (/FROM (?:health_event_form f|health_event_notification_recipient|client_location)/.test(sql)) return [[]];
@@ -55,6 +56,11 @@ test('volunteers apply for another clinic with their own login and staff review 
   replaceModule('../email/email', { sendVolunteerConfirmation: async email => { sent.push(email); } });
   replaceModule('../services/imageVariants', {});
   replaceModule('../utils/logger', { error: console.error });
+  t.mock.method(Resolver.prototype, 'resolveMx', async domain => {
+    if (domain === 'bad-domain.test') throw Object.assign(new Error(), { code: 'ENOTFOUND' });
+    assert.equal(domain, 'example.test');
+    return [{ priority: 10, exchange: 'mx.example.test' }];
+  });
   const secret = 'synthetic-volunteer-clinic-test-secret';
   const oldSecret = process.env.JWT_SECRET;
   process.env.JWT_SECRET = secret;
@@ -115,6 +121,13 @@ test('volunteers apply for another clinic with their own login and staff review 
 
   const anonymous = { account: { ...body.account, firstName: 'New', lastName: 'Applicant',
     email: 'newapplicant@example.test', phone: '9515550100' }, answers: [] };
+  for (const [email, error] of [['bad..address@example.test', 'INVALID_EMAIL'], ['new@bad-domain.test', 'EMAIL_DOMAIN_UNDELIVERABLE']]) {
+    const account = { ...anonymous.account, email, dateOfBirth: '1985-04-14' };
+    const expected = { status: 400, body: { error } };
+    assert.deepEqual(await apply(3, null, { account }), expected);
+    assert.deepEqual(await request('POST', '/3/register', null, { account }), expected);
+    assert.deepEqual(await request('POST', '/3/volunteers', manager, account), expected);
+  }
   const newSignup = await apply(3, null, anonymous);
   assert.equal(newSignup.status, 200);
   assert.equal(newSignup.body.credentials.username, 'new.applicant');
