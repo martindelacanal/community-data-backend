@@ -33,6 +33,8 @@ function fixture(t) {
       contact_email TEXT, registration_role TEXT DEFAULT 'beneficiary', status TEXT DEFAULT 'registered',
       source TEXT DEFAULT 'web', reservation_version INTEGER DEFAULT 1);
     CREATE TABLE health_event_confirmation (registration_id INTEGER, reservation_version INTEGER);
+    CREATE TABLE health_event_registration_contact_review (registration_id INTEGER PRIMARY KEY, reservation_version INTEGER,
+      contact_email TEXT COLLATE NOCASE NOT NULL);
     CREATE TABLE health_event_appointment (registration_id INTEGER, slot_id INTEGER, status TEXT DEFAULT 'booked');
     CREATE TABLE health_event_participant_email (id INTEGER PRIMARY KEY, health_event_id INTEGER, request_id TEXT,
       created_by_user_id INTEGER, slot_id INTEGER, subject TEXT, message TEXT, registrations INTEGER,
@@ -151,6 +153,38 @@ test('audience counts by clinic and booked slot, retaining only eligible, unique
   await assert.rejects(previewAudience(db, 3), { code: 'NOT_FOUND' });
   await assert.rejects(enqueue(db, 1, 42, {...draft, slot_id:12}), { code:'NO_RECIPIENTS' });
   assert.equal(await getJob(db, 1), null);
+});
+
+test('a reviewed legacy contact authorizes only its exact address and reservation version', async t => {
+  const { db, sql } = fixture(t);
+  sql.exec(`
+    INSERT INTO user(id,email) VALUES (10,NULL);
+    INSERT INTO health_event_registration(id,health_event_id,user_id,contact_email)
+      VALUES (10,1,10,'staff@example.test');
+    INSERT INTO health_event_registration_contact_review(registration_id,reservation_version,contact_email)
+      VALUES (9,1,'Staff@example.test');
+  `);
+  assert.equal((await previewAudience(db, 1)).recipients, 2);
+  sql.exec("UPDATE health_event_registration_contact_review SET contact_email='staff@example.test'");
+  assert.equal((await previewAudience(db, 1)).recipients, 3);
+  await enqueue(db, 1, 42, draft);
+  const received = [];
+  await processQueue(db, async mail => {
+    if (mail.to === 'staff@example.test') {
+      for (const reservation of mail.reservations) {
+        received.push(readReservationToken(new URL(reservation.manageUrl).hash.slice(1)));
+      }
+    }
+    return { accepted: [mail.to], rejected: [] };
+  });
+  assert.deepEqual(received, [{ id: 9, version: 1 }]);
+
+  const { previousParticipantContactEmailSql } = require('./healthEventParticipantContact');
+  const prior = sql.prepare(`SELECT ${previousParticipantContactEmailSql} AS contact FROM health_event_registration r
+    JOIN user u ON u.id=r.user_id WHERE r.id=9`).get();
+  assert.equal(prior.contact, null);
+  sql.exec("UPDATE health_event_registration SET reservation_version=2 WHERE id=9");
+  assert.equal((await previewAudience(db, 1)).recipients, 2);
 });
 
 test('a mailing to a previous clinic keeps the invitation and omits the old reservations in preview, test and delivery', async t => {
