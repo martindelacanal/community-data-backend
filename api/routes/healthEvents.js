@@ -3619,6 +3619,14 @@ router.get('/health-events/:id(\\d+)/participant-emails/:jobId(\\d+)', verifyTok
   } catch (error) { participantEmailFailure(res, error); }
 });
 
+router.post('/health-events/:id(\\d+)/participant-emails/:jobId(\\d+)/retry-failed', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const job = await participantEmails.retryFailed(mysqlConnection.promise(), Number(req.params.id),
+      Number(req.params.jobId), req.body?.retry_generation);
+    res.status(202).json(job);
+  } catch (error) { participantEmailFailure(res, error); }
+});
+
 const NOTIFICATION_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const NOTIFICATION_AUDIENCES = ['beneficiary', 'volunteer'];
 const MAX_NOTIFICATION_RECIPIENTS = 100;
