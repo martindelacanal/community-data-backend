@@ -1,12 +1,12 @@
 'use strict';
 
 const { normalizeParticipantEmail } = require('../utils/participantEmailAddress');
-const { participantContactEmailSql } = require('./healthEventParticipantContact');
+const { previousParticipantContactEmailSql } = require('./healthEventParticipantContact');
 
 async function previousContact(db, existing) {
   if (!existing?.contact_email) return null;
   const [[row]] = await db.query(
-    `SELECT ${participantContactEmailSql} AS contact_email FROM health_event_registration r
+    `SELECT ${previousParticipantContactEmailSql} AS contact_email FROM health_event_registration r
        JOIN user u ON u.id = r.user_id WHERE r.id = ?`, [existing.id]);
   return normalizeParticipantEmail(row.contact_email);
 }
